@@ -1,0 +1,45 @@
+name: emiecrm
+services:
+  crm:
+    build: .
+    image: emiecrm:local
+    container_name: emiecrm
+    ports:
+      - "127.0.0.1:8088:5174"
+      - "${CRM_LAN_IP:?Set CRM_LAN_IP in .env}:8088:5174"
+    environment:
+      CRM_REQUIRE_LOGIN: ${CRM_REQUIRE_LOGIN:-1}
+      CRM_FEISHU_LONG_CONNECTION: ${CRM_FEISHU_LONG_CONNECTION:-0}
+      CRM_FEISHU_ENABLED: ${CRM_FEISHU_ENABLED:-0}
+      CRM_FEISHU_APP_ID: ${CRM_FEISHU_APP_ID:-}
+      CRM_FEISHU_APP_SECRET: ${CRM_FEISHU_APP_SECRET:-}
+      CRM_FEISHU_REDIRECT_URI: ${CRM_FEISHU_REDIRECT_URI:-}
+      CRM_DB_HOST: mysql
+      CRM_DB_NAME: emiecrm
+      CRM_DB_USER: emiecrm
+      CRM_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+  mysql:
+    image: mysql:8.4
+    container_name: emiecrm-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: emiecrm
+      MYSQL_USER: emiecrm
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--max-allowed-packet=64M"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $$MYSQL_USER -D $$MYSQL_DATABASE -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+volumes:
+  mysql-data:

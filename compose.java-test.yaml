@@ -1,0 +1,39 @@
+name: emiecrm-java-test
+services:
+  java-test:
+    image: emiecrm:java-local
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+    environment:
+      CRM_DB_HOST: emiecrm-mysql
+      CRM_DB_NAME: emiecrm_java_test
+      CRM_DB_USER: emiecrm
+      CRM_DB_PASSWORD: ${MYSQL_PASSWORD}
+      CRM_REQUIRE_LOGIN: '1'
+      CRM_TEST_MODE: '1'
+    ports:
+      - '127.0.0.1:8089:5174'
+    networks:
+      - crm
+  contract-test:
+    image: node:22-bookworm-slim
+    working_dir: /tests
+    volumes:
+      - .:/tests:ro
+    environment:
+      CRM_TEST_BASE_URL: http://java-test:5174
+      CRM_DB_HOST: emiecrm-mysql
+      CRM_DB_NAME: emiecrm_java_test
+      CRM_DB_USER: emiecrm
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    depends_on:
+      java-test:
+        condition: service_healthy
+    networks:
+      - crm
+    command: ['node','--test','tests/crm.test.mjs']
+networks:
+  crm:
+    external: true
+    name: emiecrm_default

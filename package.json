@@ -1,0 +1,22 @@
+{
+  "name": "emie-crm-replica",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "docker compose up -d --build",
+    "check": "docker compose -f compose.java-test.yaml --env-file .env run --rm contract-test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "mysql2": "^3.24.6"
+  }
+}
