@@ -9,6 +9,7 @@ import java.util.*;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -25,6 +26,9 @@ public class SystemService implements ApplicationRunner {
     p.put("data.backup", "备份与恢复业务数据");
     PERMISSIONS = Collections.unmodifiableMap(p);
   }
+
+  @Value("${CRM_FEISHU_APP_ID:}")
+  private String feishuAppId;
 
   private final CrmRepository db;
   private final PasswordCodec passwords;
@@ -106,9 +110,9 @@ public class SystemService implements ApplicationRunner {
         "SELECT u.name,u.role,COALESCE(p.display_name,u.name) AS"
             + " displayName,COALESCE(p.status,'启用') AS status,COALESCE(p.email,'') AS"
             + " email,COALESCE(p.phone,'') AS phone,p.department_id AS departmentId,d.name AS"
-            + " department,p.created_at AS createdAt FROM users u LEFT JOIN user_profiles p ON"
-            + " p.name=u.name LEFT JOIN departments d ON d.id=p.department_id ORDER BY p.created_at"
-            + " DESC,u.name");
+            + " department,p.created_at AS createdAt,COALESCE(f.open_id,'') AS openId,COALESCE(f.feishu_user_id,'') AS feishuUserId FROM users u LEFT JOIN user_profiles p ON"
+            + " p.name=u.name LEFT JOIN departments d ON d.id=p.department_id LEFT JOIN feishu_identities f ON f.user_name=u.name AND f.app_id=? ORDER BY p.created_at"
+            + " DESC,u.name", feishuAppId);
   }
 
   @Transactional
