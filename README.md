@@ -1,6 +1,6 @@
 # 亿觅 CRM
 
-Java 21 / Spring Boot 3.5.16 + React + MySQL 8.4。本地使用 OrbStack Docker，服务器使用 Docker Compose。订单、待回款、预收款、客户、产品、系统管理均由 Java API 提供业务能力，支持账号与飞书 SSO 登录。
+Java 21 / Spring Boot 3.5.16 + React + MySQL 8.4。本地使用 OrbStack Docker，服务器使用 Docker Compose。订单、待回款、预收款、客户、产品、系统管理均由 Java API 提供业务能力，仅支持飞书 SSO 登录。
 
 生产访问地址由部署环境配置；不要将服务器凭据或业务数据提交仓库。
 
@@ -29,4 +29,4 @@ docker compose ps
 
 详细说明见 backend/README.md、deploy/README.md、docs/JAVA-MIGRATION-2026-10-14.md。
 
-飞书 SSO 使用独立应用与官方 Java SDK。认证配置、回调地址和首次管理员初始化流程见 docs/FEISHU-SSO.md。本地默认要求登录；飞书凭据未配置时使用管理员账号登录。
+飞书 SSO 使用独立应用与官方 Java SDK。认证配置、回调地址和首次管理员绑定流程见 docs/FEISHU-SSO.md。本地默认要求飞书登录；未配置时提示联系管理员。

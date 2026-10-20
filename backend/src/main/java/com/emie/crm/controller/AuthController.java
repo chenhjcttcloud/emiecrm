@@ -6,6 +6,8 @@ import com.emie.crm.service.SystemService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
+import com.emie.crm.common.exception.ApiException;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -14,11 +16,13 @@ public class AuthController {
   private final AuthService auth;
   private final SystemService system;
   private final CrmRepository db;
+  private final boolean passwordLoginEnabled;
 
-  public AuthController(AuthService auth, SystemService system, CrmRepository db) {
+  public AuthController(AuthService auth, SystemService system, CrmRepository db, @Value("${CRM_PASSWORD_LOGIN_ENABLED:0}") String passwordLoginEnabled) {
     this.auth = auth;
     this.system = system;
     this.db = db;
+    this.passwordLoginEnabled = "1".equals(passwordLoginEnabled);
   }
 
   @GetMapping("/status")
@@ -40,13 +44,19 @@ public class AuthController {
 
   @PostMapping("/setup")
   public Object setup(@RequestBody JsonNode body) {
+    requirePasswordLogin();
     system.setup(body);
     return Map.of("ok", true);
   }
 
   @PostMapping("/login")
   public Object login(@RequestBody JsonNode body) {
+    requirePasswordLogin();
     return auth.login(body);
+  }
+
+  private void requirePasswordLogin() {
+    if (!passwordLoginEnabled) throw new ApiException(403, "账号密码登录已关闭，请使用飞书登录");
   }
 
   @GetMapping("/me")
