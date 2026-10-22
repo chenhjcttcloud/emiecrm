@@ -20,7 +20,7 @@ CRM_FEISHU_REDIRECT_URI=http://127.0.0.1:8088/api/auth/feishu/callback
 
 配置后执行 `docker compose up -d --build crm`。系统仅提供飞书登录，账号密码登录和公开初始化接口默认关闭。已有管理员应先由运维核对并绑定飞书身份，再切换正式环境。首次飞书登录创建“待授权”账号；管理员在系统设置 → 用户管理中给该账号分配销售、财务或其他角色。不得通过姓名或邮箱自动关联管理员。账号与飞书身份按 App ID + Open ID 唯一绑定，飞书 User ID 仅作辅助身份字段。停用账号立即阻止后续请求。
 
-登录会话有效期8小时；OAuth state 5分钟内单次有效；回调不在 URL 传递访问令牌，通过绑定同一浏览器会话的一次性票据（60秒）兑换。Secret 只在后端环境中使用，SDK 请求调试日志关闭。
+登录会话不按时间自动过期；手动退出、管理员撤销登录（包括重置密码）或账号停用后失效。会话保存在服务内存中，服务重启后需要重新登录，浏览器关闭标签页后 sessionStorage 中的令牌也会清除。OAuth state 5分钟内单次有效；回调不在 URL 传递访问令牌，通过绑定同一浏览器会话的一次性票据（60秒）兑换。Secret 只在后端环境中使用，SDK 请求调试日志关闭。
 
 ## 上线
 
@@ -41,3 +41,10 @@ Docker 镜像构建运行 Java 单元测试，覆盖 state、浏览器绑定票�
 ## 仅飞书登录
 
 登录页不再提供账号密码或公开初始化入口。`/api/login`、`/api/setup` 默认返回403。正式编排固定 `CRM_PASSWORD_LOGIN_ENABLED=0`；独立回归测试环境可设为1以运行原账户与权限合约测试，此测试开关不影响网页仅展示飞书入口。已有用户与密码摘要保留，禁用密码登录不会删除账号或业务数据。切换前需要核对飞书管理员身份绑定。
+
+## 首次登录与超时排查
+
+- 登录按钮使用配置回调 URL 的 origin 发起 `/api/auth/feishu/start`。从 `localhost`、IP 或其他入口打开页面时，先在回调域名建立浏览器会话，避免 state 对应的 Cookie 留在另一个域名。
+- 前端对一次页面初始化只兑换一次票据，取得新令牌后才读取当前用户。普通打开页面发现旧令牌已过期时正常回到登录页；迟到的旧请求 401 不会清除新令牌。无效 SSO 票据不会回退到旧账号。
+- 错误或过时的 state / ticket 只拒绝该请求，不销毁当前仍有效的凭据；正确 state 和 ticket 仍为单次使用，原有效期和浏览器绑定校验保持不变。
+- 服务日志使用 `Feishu login rejected/failed at` 和 `Feishu ticket exchange rejected` 标记阶段：`browser-session` / `browser-session-missing`（没有原浏览器会话）、`state-expired`（超过五分钟）、`state-mismatch`、`exchange-code`（飞书授权或用户信息接口）、`resolve-user`（本地用户绑定）、`ticket-expired-or-consumed`、`ticket-mismatch`。日志不包含授权码、state 值、票据或访问令牌。排查时按失败时间查询这些标记，不应仅凭“第二次成功”推断具体原因。

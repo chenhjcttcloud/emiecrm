@@ -1,0 +1,140 @@
+{
+  "checkedAt": "2026-10-21T18:03:55.315888",
+  "environment": "sandbox",
+  "companyId": 10048859,
+  "shopId": 10402930,
+  "overall": "NOT_ACCEPTED",
+  "split": {
+    "original": 5993108,
+    "children": [
+      5993109,
+      5993110
+    ],
+    "result": "PASS",
+    "constraint": "WaitConfirm or Question only"
+  },
+  "partial": {
+    "result": "PASS",
+    "status": "PARTIAL",
+    "shipments": [
+      {
+        "id": "2500393284",
+        "company": "京东快递freedom",
+        "trackingNumber": "CRM-SANDBOX-5993109-01",
+        "sentAt": "2026-10-21 18:00:30",
+        "items": [
+          {
+            "skuId": "2609271415-80",
+            "quantity": 1,
+            "lineId": "CRM-ce53bb73491445ab922f6f0d6a68d55d-1"
+          }
+        ]
+      }
+    ]
+  },
+  "full": {
+    "result": "PASS",
+    "status": "SHIPPED",
+    "shipments": [
+      {
+        "id": "2500393284",
+        "company": "京东快递freedom",
+        "trackingNumber": "CRM-SANDBOX-5993109-01",
+        "sentAt": "2026-10-21 18:00:30",
+        "items": [
+          {
+            "skuId": "2609271415-80",
+            "quantity": 1,
+            "lineId": "CRM-ce53bb73491445ab922f6f0d6a68d55d-1"
+          }
+        ]
+      },
+      {
+        "id": "2500393285",
+        "company": "京东快递freedom",
+        "trackingNumber": "CRM-SANDBOX-5993110-01",
+        "sentAt": "2026-10-21 18:01:16",
+        "items": [
+          {
+            "skuId": "2609271415-80",
+            "quantity": 1,
+            "lineId": "CRM-ce53bb73491445ab922f6f0d6a68d55d-1"
+          }
+        ]
+      }
+    ]
+  },
+  "cancelGuard": {
+    "http": 400,
+    "data": {
+      "error": "订单已拆分、合并或查询结果不唯一，请人工核对"
+    }
+  },
+  "crmLedger": {
+    "count": 1,
+    "net": 0.02
+  },
+  "pending": [
+    "已出库撤销的ERP操作入口/权限待确认；批量终止发货仅待出库可用，转到待审核拒绝Sent",
+    "取消重建订单的聚水潭资金报表排除/冲销口径待确认"
+  ],
+  "finding": {
+    "order": 5993081,
+    "description": "外部订单发货接口返回成功，原WMS出库记录status=delete；CRM同步PARTIAL且shipments为空",
+    "result": "PASS_FIXED_LOCAL",
+    "status": "SHIPPED",
+    "shipments": [
+      {
+        "id": "external-order-5993081",
+        "company": "京东快递freedom",
+        "trackingNumber": "CRM-SANDBOX-5993081-01",
+        "sentAt": "2026-10-21 17:58:44",
+        "items": [
+          {
+            "skuId": "2609271415-80",
+            "quantity": 2,
+            "lineId": "CRM-880fadc136d14faeb1b03f37342feaea-1"
+          }
+        ]
+      }
+    ]
+  },
+  "retestedAt": "2026-10-21T18:11:25.627402",
+  "validation": {
+    "backendTests": 73,
+    "failures": 0,
+    "localStatus": {
+      "testMode": false,
+      "backend": "java",
+      "database": "mysql",
+      "setup": true,
+      "loginRequired": true
+    },
+    "assets": {
+      "/assets/index-alxpjkwU.js": 200,
+      "/assets/index-PgpT3VZz.css": 200
+    },
+    "productionUpdated": false
+  },
+  "financeRetest": {
+    "orders": [
+      5993071,
+      5993072,
+      5993073
+    ],
+    "statuses": [
+      "Cancelled",
+      "Cancelled",
+      "Cancelled"
+    ],
+    "confirmedPays": [
+      0.01,
+      0.02,
+      0.01
+    ],
+    "rawPaySum": 0.04,
+    "crmNet": 0.01,
+    "settlementPageRecords": 0,
+    "result": "UNVERIFIED_REPORTING_POLICY"
+  }
+}

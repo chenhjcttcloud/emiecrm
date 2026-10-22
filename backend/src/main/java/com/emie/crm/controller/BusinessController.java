@@ -33,9 +33,11 @@ public class BusinessController {
   }
 
   @GetMapping("/receipts")
-  public Object receipts(HttpServletRequest req) {
+  public Object receipts(@RequestParam(required = false) Integer page,
+      @RequestParam(defaultValue = "20") int pageSize, @RequestParam(defaultValue = "") String q,
+      @RequestParam(defaultValue = "") String method, HttpServletRequest req) {
     auth.actor(req).require("business.read");
-    return db.documents("receipts", true, 0);
+    return page == null ? service.receipts() : service.receiptsPage(page, pageSize, q, method);
   }
 
   @GetMapping("/audit")

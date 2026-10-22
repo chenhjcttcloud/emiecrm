@@ -1,0 +1,24 @@
+name: emie-jst
+services:
+  gateway:
+    build: .
+    image: emie-jst-gateway:0.2.0
+    env_file: .env
+    ports: ['127.0.0.1:18766:8080']
+    volumes: ['./data:/data']
+    restart: unless-stopped
+    mem_limit: 96m
+    cpus: 0.5
+    pids_limit: 32
+    read_only: true
+    tmpfs: ['/tmp:size=8m']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '2'}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

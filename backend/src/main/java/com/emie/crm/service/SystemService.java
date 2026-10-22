@@ -30,6 +30,9 @@ public class SystemService implements ApplicationRunner {
   @Value("${CRM_FEISHU_APP_ID:}")
   private String feishuAppId;
 
+  @org.springframework.beans.factory.annotation.Autowired
+  private AuthService auth;
+
   private final CrmRepository db;
   private final PasswordCodec passwords;
 
@@ -163,6 +166,14 @@ public class SystemService implements ApplicationRunner {
             text(b, "phone"),
             department,
             status);
+    if (!create && (!text(b, "password").isEmpty() || status.equals("停用"))) {
+      if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive())
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+            new org.springframework.transaction.support.TransactionSynchronization() {
+              @Override public void afterCommit() { auth.revokeUser(name); }
+            });
+      else if (auth != null) auth.revokeUser(name);
+    }
     db.audit(actor.name(), (create ? "创建用户 " : "编辑用户 ") + name);
   }
 

@@ -28,6 +28,11 @@ public class ApiExceptionHandler {
     return ResponseEntity.badRequest().body(Map.of("error", "请求JSON格式无效"));
   }
 
+  @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+  public ResponseEntity<?> missingResource() {
+    return ResponseEntity.status(404).body(Map.of("error", "资源不存在"));
+  }
+
   @ExceptionHandler(Exception.class)
   public ResponseEntity<?> unexpected(Exception e) {
     log.error("Request failed", e);

@@ -26,3 +26,5 @@ backups/
 /*.jpeg
 deploy/verification.json
 docs/DEPLOYMENT-*.md
+
+**/__pycache__/

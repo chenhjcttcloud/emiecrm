@@ -30,3 +30,8 @@ docker compose ps
 详细说明见 backend/README.md、deploy/README.md、docs/JAVA-MIGRATION-2026-10-14.md。
 
 飞书 SSO 使用独立应用与官方 Java SDK。认证配置、回调地址和首次管理员绑定流程见 docs/FEISHU-SSO.md。本地默认要求飞书登录；未配置时提示联系管理员。
+
+## 聚水潭对接
+
+- [使用及部署说明](docs/JUSHUITAN.md)
+- [正式环境接口开通与验收清单](docs/JUSHUITAN-PRODUCTION-API-CHECKLIST.md)（6项必需、2项辅助，正式权限尚待核对）

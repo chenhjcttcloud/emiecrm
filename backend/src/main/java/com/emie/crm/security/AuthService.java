@@ -14,7 +14,8 @@ public class AuthService {
   private final CrmRepository db;
   private final PasswordCodec passwords;
   private final boolean loginRequired;
-  private record Session(String name, long expiresAt) {}
+  // Sessions remain valid until explicitly revoked or the service restarts.
+  private record Session(String name) {}
   private final Map<String, Session> sessions = new ConcurrentHashMap<>();
 
   public AuthService(
@@ -41,7 +42,6 @@ public class AuthService {
     String token = req.getHeader("Authorization");
     token = token != null && token.startsWith("Bearer ") ? token.substring(7) : "";
     var session = sessions.get(token);
-    if (session != null && session.expiresAt() < System.currentTimeMillis()) { sessions.remove(token); session = null; }
     String name = session == null ? null : session.name();
     if (name == null) {
       if (!loginRequired) return new Actor("本地工作台", "管理员", permissions("管理员"));
@@ -83,11 +83,14 @@ public class AuthService {
   }
 
   public Map<String, Object> createSession(String name) {
-    sessions.entrySet().removeIf(e -> e.getValue().expiresAt() < System.currentTimeMillis());
     String token = UUID.randomUUID().toString();
-    sessions.put(token, new Session(name, System.currentTimeMillis() + 8 * 60 * 60 * 1000L));
+    sessions.put(token, new Session(name));
     var row=db.rows("SELECT role FROM users WHERE name=?", name);
     return Map.of("token", token, "user", Map.of("name",name,"role",row.isEmpty()?"":row.getFirst().get("role")));
+  }
+
+  public void revokeUser(String name) {
+    sessions.entrySet().removeIf(e -> e.getValue().name().equals(name));
   }
 
   public void logout(HttpServletRequest req) {

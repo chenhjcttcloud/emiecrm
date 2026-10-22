@@ -7,6 +7,18 @@ import java.util.*;
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
 class AuthServiceTest {
+ @Test void logoutAndAdministratorRevocationStillInvalidateSessions(){
+  var db=mock(CrmRepository.class);
+  when(db.rows(anyString(),eq("member"))).thenReturn(List.of(Map.of("role","销售","status","启用")));
+  var auth=new AuthService(db,mock(PasswordCodec.class),"1","0");
+  var first=auth.createSession("member");var second=auth.createSession("member");
+  var a=new MockHttpServletRequest();a.addHeader("Authorization","Bearer "+first.get("token"));
+  var b=new MockHttpServletRequest();b.addHeader("Authorization","Bearer "+second.get("token"));
+  assertEquals("member",auth.actor(a).name());assertEquals("member",auth.actor(b).name());
+  auth.logout(a);assertThrows(ApiException.class,()->auth.actor(a));
+  assertEquals("member",auth.actor(b).name());
+  auth.revokeUser("member");assertThrows(ApiException.class,()->auth.actor(b));
+ }
  @Test void feishuEnablingAlsoRequiresAuthentication(){
   var auth=new AuthService(mock(CrmRepository.class),mock(PasswordCodec.class),"0","1");
   assertTrue(auth.loginRequired());assertThrows(ApiException.class,()->auth.actor(new MockHttpServletRequest()));

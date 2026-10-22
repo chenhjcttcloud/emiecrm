@@ -6,6 +6,7 @@ server:
     session:
       timeout: 10m
       cookie:
+        name: EMIECRM_SESSION
         http-only: true
         same-site: lax
   tomcat:
