@@ -24,12 +24,13 @@ class BusinessServiceTest {
   @BeforeEach void setup() throws Exception {
     stored = json("""
         {"revision":1,"customers":[{"id":"c1","name":"客户甲","balance":0}],
-         "products":[{"id":"p1","name":"产品"}],
+         "products":[{"id":"p1","name":"产品","source":"jushuitan","enabled":true}],
          "orders":[{"id":"o1","customerId":"c1","customer":"客户甲","type":"销售订单",
           "status":"已批准","total":100,"paid":0,"items":[{"product":"p1","qty":1,"price":100}]}]}
         """);
     history = new ArrayList<>();
     db = mock(CrmRepository.class);
+    when(db.jdbc()).thenReturn(mock(org.springframework.jdbc.core.JdbcTemplate.class));
     when(db.state(anyBoolean())).thenAnswer(call -> stored.deepCopy());
     when(db.documents(eq("receipts"), anyBoolean(), eq(0))).thenAnswer(call -> history.stream().map(JsonNode::deepCopy).toList());
     when(db.object()).thenAnswer(call -> mapper.createObjectNode());
@@ -46,6 +47,12 @@ class BusinessServiceTest {
     return service.save(body, actor);
   }
 
+  @Test void catalogCannotBeOverwrittenThroughBusinessSave() {
+    var next=draft();((ObjectNode)next.path("products").get(0)).put("name","伪造商品");
+    var error=assertThrows(ApiException.class,()->save(next,admin));
+    assertTrue(error.getMessage().contains("聚水潭"));
+    verify(db,never()).state(any(JsonNode.class));
+  }
   @Test void approvedAmountCannotBeChangedBySalesEvenWithMatchingItems() {
     var next = draft(); order(next).put("total", 200);
     ((ObjectNode) order(next).path("items").get(0)).put("price", 200);
@@ -186,7 +193,68 @@ class BusinessServiceTest {
     when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
     var next=draft();((ArrayNode)next.path("products")).remove(1);
     var error=assertThrows(ApiException.class,()->save(next,admin));
-    assertEquals("该商品已被订单使用，不能删除",error.getMessage());
+    assertEquals("商品资料由聚水潭管理，请使用同步商品，不能在CRM新增、编辑或删除",error.getMessage());
+  }
+
+  @Test void restoreCannotDropExternallyConfirmedChangeHistory() throws Exception {
+    var shipment=mapper.createObjectNode().put("orderId","o1").put("soId","CRM-same");
+    shipment.set("snapshot",order(stored).deepCopy());
+    shipment.putArray("externalChanges").addObject().put("id","EXT-1").put("status","CONFIRMED");
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    when(db.parse(anyString())).thenAnswer(i->mapper.readTree((String)i.getArgument(0)));
+    var backup=mapper.createObjectNode().put("version",1);backup.set("state",draft());backup.putArray("receipts");
+    var old=shipment.deepCopy();old.remove("externalChanges");backup.putArray("jstShipments").add(old);
+    var error=assertThrows(ApiException.class,()->service.restore(backup,admin));assertTrue(error.getMessage().contains("备份早于现有聚水潭变更"));
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+
+  @Test void restoreCannotEraseTheDurableExternalJournal() throws Exception {
+    var shipment=mapper.createObjectNode().put("orderId","o1").put("soId","CRM-same");shipment.set("snapshot",order(stored).deepCopy());
+    shipment.putArray("externalTimeline").addObject().put("id","log-1").put("type","DETECTED");
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    when(db.parse(anyString())).thenAnswer(i->mapper.readTree((String)i.getArgument(0)));
+    var backup=mapper.createObjectNode().put("version",1);backup.set("state",draft());backup.putArray("receipts");
+    var old=shipment.deepCopy();old.remove("externalTimeline");backup.putArray("jstShipments").add(old);
+    assertThrows(ApiException.class,()->service.restore(backup,admin));verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void eachOrderEditRecordsExactBeforeAfterAndActor() {
+    var next=draft(); order(next).put("note", "新的备注"); save(next, admin);
+    var capture=org.mockito.ArgumentCaptor.forClass(JsonNode.class);
+    verify(db).audit(eq("admin"), eq("修改订单"), capture.capture());
+    var detail=capture.getValue(); assertEquals("o1",detail.path("orderId").asText());
+    assertFalse(detail.path("before").has("note")); assertEquals("新的备注",detail.path("after").path("note").asText());
+    assertEquals("note",detail.path("changes").get(0).path("field").asText());
+    assertEquals(2,detail.path("revisionAfter").asInt());
+  }
+  @Test void unchangedSaveDoesNotInventAnOrderModification() {
+    save(draft(),admin); verify(db,never()).audit(anyString(),eq("修改订单"),any(JsonNode.class));
+  }
+  @Test void paymentHasBothOrderDifferenceAndReceiptJournal() {
+    var next=draft();order(next).put("paid",25);order(next).put("method","银行转账");save(next,admin);
+    verify(db).audit(eq("admin"),eq("修改订单"),any(JsonNode.class));
+    var capture=org.mockito.ArgumentCaptor.forClass(JsonNode.class);
+    verify(db).audit(eq("admin"),eq("新增收款流水"),capture.capture());
+    assertEquals("o1",capture.getValue().path("orderId").asText());
+    assertEquals(25,capture.getValue().path("after").path("amount").asInt());
+  }
+  @Test void invalidModificationCannotWriteSuccessJournal() {
+    var next=draft();order(next).put("total",-1);assertThrows(ApiException.class,()->save(next,admin));
+    verify(db,never()).audit(anyString(),anyString(),any(JsonNode.class));
+  }
+  @Test void orderHistoryRequiresBusinessReadPermission() {
+    assertThrows(ApiException.class,()->service.orderHistory("o1",new Actor("blocked","待授权",Set.of())));
+  }
+
+  @Test void approvalAndCreationInOneSaveEachHaveTheirOwnJournal() {
+    order(stored).put("status","草稿");var next=draft();order(next).put("status","已批准");
+    var created=order(next).deepCopy();created.put("id","o2").put("status","草稿");((ArrayNode)next.path("orders")).add(created);
+    save(next,admin);
+    var edited=org.mockito.ArgumentCaptor.forClass(JsonNode.class);var added=org.mockito.ArgumentCaptor.forClass(JsonNode.class);
+    verify(db).audit(eq("admin"),eq("修改订单"),edited.capture());verify(db).audit(eq("admin"),eq("新建订单"),added.capture());
+    assertEquals("草稿",edited.getValue().path("before").path("status").asText());
+    assertEquals("已批准",edited.getValue().path("after").path("status").asText());
+    assertEquals("o2",added.getValue().path("orderId").asText());assertTrue(added.getValue().path("before").isNull());
   }
 
 }

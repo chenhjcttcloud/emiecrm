@@ -2,9 +2,11 @@ import{test}from'node:test';import assert from'node:assert/strict';import mysql 
 const base=process.env.CRM_TEST_BASE_URL;
 if(!base)throw Error('必须设置CRM_TEST_BASE_URL，测试不能指向生产环境');
 const pool=mysql.createPool({host:process.env.CRM_DB_HOST||'mysql',port:Number(process.env.CRM_DB_PORT||3306),user:process.env.CRM_DB_USER||'emiecrm',password:process.env.CRM_DB_PASSWORD||process.env.MYSQL_PASSWORD,database:process.env.CRM_DB_NAME,connectionLimit:3});
-test('本地数据库、账户权限、审批、收款、核销和备份',async()=>{if(!process.env.CRM_DB_NAME?.endsWith('_test'))throw Error('测试只能使用以_test结尾的隔离数据库');const readiness=await(await fetch(base+'/api/status')).json();assert.equal(readiness.backend,'java');assert.equal(readiness.testMode,true,'API必须启用独立数据库测试模式');try{for(const table of ['jst_shipments','feishu_identities','receipts','audit','user_profiles','users','departments'])await pool.query('DELETE FROM '+table);await pool.query('UPDATE state SET payload=NULL WHERE id=1');await pool.query('DELETE FROM roles WHERE builtin=0');await pool.query("DELETE FROM payment_methods WHERE id NOT IN ('bank','alipay','wechat','cash')");await pool.query("UPDATE payment_methods SET name=CASE id WHEN 'bank' THEN '银行转账' WHEN 'alipay' THEN '支付宝' WHEN 'wechat' THEN '微信' ELSE '现金' END,status='启用'");let token='';async function req(path,body,ok=true){const r=await fetch(base+'/api/'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:body?JSON.stringify(body):undefined});const data=await r.json();assert.equal(r.ok,ok,JSON.stringify(data));return data}
-await req('state',undefined,false);await req('setup',{name:'admin',password:'test-password'});token=(await req('login',{name:'admin',password:'test-password'})).token;assert.equal((await req('me')).role,'管理员');assert.equal((await req('auth/feishu/config')).enabled,false);await req('users',{name:'sales',password:'test-password',role:'销售'});let state={customers:[{id:'c1',name:'测试客户',balance:0}],products:[{id:'p1',name:'测试产品',price:100}],orders:[{id:'pre',customer:'测试客户',type:'预收款订单',total:200,paid:0,status:'审批中',items:[]},{id:'sale',customer:'测试客户',type:'销售订单',total:100,paid:0,status:'审批中',items:[{product:'p1',qty:1,price:100}]}]};const store=async(ok=true)=>{const result=await req('state',{data:state,revision:state.revision},ok);if(ok)state=result;return result};await store();
-state.products.push({id:'unused-delete-test',name:'未使用商品',price:10});await store();
+test('本地数据库、账户权限、审批、收款、核销和备份',async()=>{if(!process.env.CRM_DB_NAME?.endsWith('_test'))throw Error('测试只能使用以_test结尾的隔离数据库');const readiness=await(await fetch(base+'/api/status')).json();assert.equal(readiness.backend,'java');assert.equal(readiness.testMode,true,'API必须启用独立数据库测试模式');try{for(const table of ['jst_catalog_jobs','jst_shipments','feishu_identities','receipts','audit','user_profiles','users','departments'])await pool.query('DELETE FROM '+table);await pool.query('UPDATE state SET payload=NULL WHERE id=1');await pool.query('DELETE FROM roles WHERE builtin=0');await pool.query("DELETE FROM payment_methods WHERE id NOT IN ('bank','alipay','wechat','cash')");await pool.query("UPDATE payment_methods SET name=CASE id WHEN 'bank' THEN '银行转账' WHEN 'alipay' THEN '支付宝' WHEN 'wechat' THEN '微信' ELSE '现金' END,status='启用'");let token='';async function req(path,body,ok=true){const r=await fetch(base+'/api/'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:body?JSON.stringify(body):undefined});const data=await r.json();assert.equal(r.ok,ok,JSON.stringify(data));return data}
+await req('state',undefined,false);await req('setup',{name:'admin',password:'test-password'});token=(await req('login',{name:'admin',password:'test-password'})).token;assert.equal((await req('me')).role,'管理员');assert.equal((await req('auth/feishu/config')).enabled,false);await req('users',{name:'sales',password:'test-password',role:'销售'});let state={customers:[{id:'c1',name:'测试客户',balance:0}],products:[{id:'p1',name:'测试产品',price:100,source:'jushuitan',jstSku:'TEST001',jstEnvironment:'sandbox',enabled:true}],orders:[{id:'pre',customer:'测试客户',type:'预收款订单',total:200,paid:0,status:'审批中',items:[]},{id:'sale',customer:'测试客户',type:'销售订单',total:100,paid:0,status:'审批中',items:[{product:'p1',qty:1,price:100}]}]};const store=async(ok=true)=>{const result=await req('state',{data:state,revision:state.revision},ok);if(ok)state=result;return result};
+// Seed an authoritative catalog fixture only through the isolated test database.
+await pool.query('UPDATE state SET payload=? WHERE id=1',[JSON.stringify({revision:0,customers:[],products:state.products,orders:[]})]);state.revision=0;await store();
+state.products.push({id:'unused-delete-test',name:'未使用商品',price:10});await store(false);state=await req('state');
 state.products=state.products.filter(p=>p.id!=='unused-delete-test');await store();assert.ok(!state.products.some(p=>p.id==='unused-delete-test'));
 state.orders[1].items=[{product:'p1',qty:1,price:100}];await store();
 state.products=state.products.filter(p=>p.id!=='p1');await store(false);state=await req('state');assert.ok(state.products.some(p=>p.id==='p1'));
@@ -86,13 +88,13 @@ assert.match(asset.url,/^\/api\/assets\/[a-f0-9]{64}$/);
 assert.equal((await fetch(base+asset.url)).status,401);
 const image=await fetch(base+asset.url,{headers:{Authorization:'Bearer '+token}});assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
 const invalidUpload=await fetch(base+'/api/assets',{method:'POST',headers:{'Content-Type':'application/octet-stream',Authorization:'Bearer '+token},body:'<svg></svg>'});assert.equal(invalidUpload.status,400);
-state.products[0].image='data:image/png;base64,'+png.toString('base64');await store();assert.equal(state.products[0].image,asset.url);
+state.orders[0].attachments=[{name:'测试图片',url:'data:image/png;base64,'+png.toString('base64')}];await store();assert.equal(state.orders[0].attachments[0].url,asset.url);
 const receiptOrderBeforeBackup=(await req('receipts')).map(r=>r.id);
 const portableBackup=await req('backup');assert.equal(Object.keys(portableBackup.assets).length,1);
 const beforeRestore=structuredClone(state);const brokenBackup=structuredClone(portableBackup);brokenBackup.assets[asset.url.split('/').at(-1)].data=Buffer.from('broken').toString('base64');
 await req('restore',brokenBackup,false);assert.deepEqual(await req('state'),beforeRestore);
 await pool.query('DELETE FROM assets');await req('restore',portableBackup);state=await req('state');
-assert.equal(state.products[0].image,asset.url);assert.equal((await fetch(base+asset.url,{headers:{Authorization:'Bearer '+token}})).status,200);
+assert.equal(state.orders[0].attachments[0].url,asset.url);assert.equal((await fetch(base+asset.url,{headers:{Authorization:'Bearer '+token}})).status,200);
 assert.deepEqual((await req('receipts')).map(r=>r.id),receiptOrderBeforeBackup);
 
 // Pre-existing duplicate names and orphan orders stay readable without guessing associations.
@@ -103,6 +105,13 @@ assert.ok(!state.orders.find(o=>o.id==='legacy-orphan').customerId);await store(
 const legacyPage=await req('receipts?page=1&pageSize=100');assert.equal(legacyPage.total,allReceipts.length);assert.equal(legacyPage.rows.length,allReceipts.length);
 state.orders.find(o=>o.id==='legacy-orphan').paid=1;await store(false);state=await req('state');
 state.orders.find(o=>o.id==='legacy-orphan').customerId='c2';await store();assert.equal(state.orders.find(o=>o.id==='legacy-orphan').customerId,'c2');
+// Every saved order revision has durable before/after details; no-op saves add no order event.
+state.orders.find(o=>o.id==='legacy-orphan').note='日志验收备注';await store();
+const orderLog=await req('orders/legacy-orphan/history');
+const noteLog=orderLog.entries.find(e=>e.details?.after?.note==='日志验收备注');
+assert.ok(noteLog);assert.equal(noteLog.user,'admin');assert.equal(noteLog.details.orderId,'legacy-orphan');
+assert.ok(noteLog.details.changes.some(c=>c.field==='note'&&c.after==='日志验收备注'));
+await store();assert.equal((await req('orders/legacy-orphan/history')).entries.length,orderLog.entries.length);
 const pendingToken=(await req('login',{name:'pending',password:'pending-password'})).token;
 const forbiddenUpload=await fetch(base+'/api/assets',{method:'POST',headers:{'Content-Type':'application/octet-stream',Authorization:'Bearer '+pendingToken},body:png});assert.equal(forbiddenUpload.status,403);
 const oversizedImage=await fetch(base+'/api/assets',{method:'POST',headers:{'Content-Type':'application/octet-stream',Authorization:'Bearer '+token},body:Buffer.alloc(5*1024*1024+1)});assert.equal(oversizedImage.status,400);

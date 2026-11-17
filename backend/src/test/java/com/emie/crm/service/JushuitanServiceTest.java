@@ -25,8 +25,9 @@ class JushuitanServiceTest {
   when(db.parse(anyString())).thenAnswer(i->m.readTree((String)i.getArgument(0)));
   when(db.encode(any())).thenAnswer(i->m.writeValueAsString(i.getArgument(0)));
   when(db.state(true)).thenReturn(json("""
-   {"products":[{"id":"p1","name":"甲"}],"orders":[{"id":"o1","customerId":"c1","type":"销售订单","status":"已批准","paid":10,"total":10,"items":[{"product":"p1","qty":1,"price":10}]}]}
+   {"products":[{"id":"p1","name":"甲","source":"jushuitan","enabled":true,"jstEnvironment":"sandbox","jstSku":"A"}],"orders":[{"id":"o1","customerId":"c1","type":"销售订单","status":"已批准","paid":10,"total":10,"items":[{"product":"p1","qty":1,"price":10}]}]}
    """));
+  when(db.state(false)).thenAnswer(i->db.state(true));
   when(db.rows(anyString(),eq("o1"))).thenAnswer(i->persisted==null?List.of():List.of(Map.of("payload",persisted)));
   when(jdbc.update(anyString(),any(Object[].class))).thenAnswer(i->{
    String sql=i.getArgument(0);Object[] args=(Object[])i.getRawArguments()[1];
@@ -38,13 +39,47 @@ class JushuitanServiceTest {
   when(manager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
   service=new JushuitanService(db,client,m,manager,"sandbox");
   when(client.configured()).thenReturn(true);
+  when(client.uploadsEnabled()).thenReturn(true);
+  when(client.query(eq("/open/wms/partner/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"wms_co_id\":10048859,\"is_main\":true,\"name\":\"主仓\",\"status\":\"生效\"}]}}"));
   when(client.query(eq("/open/sku/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"sku_id\":\"A\",\"i_id\":\"STYLE\",\"enabled\":1}]}}"));
   when(client.query(eq("/open/inventory/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"inventorys\":[{\"sku_id\":\"A\",\"qty\":5}]}}"));
   when(client.query(eq("/open/shops/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"shop_id\":1,\"shop_site\":\"商家自有商城\"}]}}"));
  }
  JsonNode input()throws Exception{return json("""
-  {"shopId":1,"items":[{"skuId":"A"}],"recipient":{"name":"测试","phone":"00000000000","province":"广东省","city":"深圳市","district":"南山区","address":"测试勿投递"}}
+  {"shopId":1,"warehouseId":10048859,"items":[{"skuId":"A"}],"recipient":{"name":"测试","phone":"00000000000","province":"广东省","city":"深圳市","district":"南山区","address":"测试勿投递"}}
   """);}
+ @Test void readOnlyConnectionDoesNotPersistOrAttemptOrderUpload() throws Exception {
+  when(client.uploadsEnabled()).thenReturn(false);
+  assertThrows(ApiException.class,()->service.submit("o1",input(),admin));
+  assertNull(persisted);verify(client,never()).upload(any());
+ }
+ @Test void inventoryIsScopedToExplicitValidWarehouse() throws Exception {
+  assertThrows(ApiException.class,()->service.inventory("A",0));
+  assertThrows(ApiException.class,()->service.inventory("A",999));
+  service.inventory("A",10048859);
+  verify(client).query(eq("/open/inventory/query"),argThat(b-> b instanceof Map<?,?> values
+      && Long.valueOf(10048859).equals(values.get("wms_co_id")) && Boolean.TRUE.equals(values.get("has_lock_qty"))));
+ }
+ @Test void invalidWarehouseNeverUploads() throws Exception {
+  var request=(ObjectNode)input();request.put("warehouseId",999);
+  assertEquals("FAILED",service.submit("o1",request,admin).path("status").asText());
+  verify(client,never()).upload(any());
+ }
+ @Test void partialCatalogFetchNeverReplacesProducts() throws Exception {
+  when(client.query(eq("/open/sku/query"),any())).thenReturn(
+      json("{\"code\":0,\"data\":{\"datas\":[{\"sku_id\":\"A\",\"enabled\":1}],\"has_next\":true}}"))
+      .thenThrow(new ApiException("第二页不可用"));
+  assertThrows(ApiException.class,()->service.syncProducts(admin,json("{\"keyword\":\"A\"}")));
+  verify(db,never()).state(any(JsonNode.class));
+ }
+ @Test void syncPreservesOrdersAndUpdatesProductRevision() throws Exception {
+  var result=service.syncProducts(admin,json("{\"keyword\":\"A\"}"));
+  assertEquals("o1",result.path("orders").get(0).path("id").asText());
+  assertEquals(1,result.path("revision").asLong());
+  assertEquals("jushuitan",result.path("productSource").asText());
+  assertEquals("A",result.path("products").get(0).path("jstSku").asText());
+  verify(db).state(any(JsonNode.class));
+ }
  @Test void persistsBeforeUploadAndPreventsRepeatedSubmission()throws Exception{
   when(client.upload(any())).thenAnswer(i->{
    assertNotNull(persisted);assertTrue(m.readTree(persisted).path("upstreamAttempted").asBoolean());
@@ -90,7 +125,9 @@ class JushuitanServiceTest {
   upstreamOrder("WaitConfirm", null);
  }
  void upstreamOrder(String status, JsonNode target) {
-  var order=m.createObjectNode().put("o_id",123).put("status",status).put("pay_amount",10);
+  ObjectNode order;
+  try {order=((ObjectNode)m.readTree(persisted).path("request")).deepCopy();} catch(Exception e){throw new RuntimeException(e);}
+  order.put("o_id",123).put("status",status);
   try { order.set("items",m.readTree(persisted).path("request").path("items").deepCopy()); } catch(Exception e) { throw new RuntimeException(e); }
   if(target!=null)order.setAll((ObjectNode)target);
   when(client.query(eq("/open/orders/single/query"),any())).thenReturn(m.createObjectNode().put("code",0).set("data",m.createObjectNode().set("orders",m.createArrayNode().add(order))));
@@ -165,7 +202,7 @@ class JushuitanServiceTest {
  boolean oldCancelled; JsonNode newRequest;
  void amendmentSetup() throws Exception {
   acceptedOrder();oldCancelled=false;newRequest=null;
-  when(db.state(false)).thenAnswer(i->db.state(true));
+  var original=m.readTree(persisted);
   when(db.rows(contains("payment_methods"),eq("银行转账"))).thenReturn(List.of(Map.of("id","bank")));
   when(client.mutate(anyString(),eq("/open/jushuitan/orderbyoid/cancel"),any())).thenAnswer(i->{oldCancelled=true;return json("{\"code\":0}");});
   when(client.query(eq("/open/orders/single/query"),any())).thenAnswer(i->{
@@ -173,9 +210,9 @@ class JushuitanServiceTest {
    var orders=m.createArrayNode();
    if(newRequest!=null&&newRequest.path("so_id").asText().equals(so)) {
     var actual=((ObjectNode)newRequest).deepCopy();actual.put("o_id",456).put("status","WaitConfirm");orders.add(actual);
-   } else if(so.equals(m.readTree(persisted).path("amendment").path("oldSoId").asText())) {
+   } else if(so.equals(original.path("soId").asText())) {
     var old=m.createObjectNode().put("o_id",123).put("so_id",so).put("pay_amount",10).put("status",oldCancelled?"Cancelled":"WaitConfirm");
-    old.set("items",m.readTree(persisted).path("request").path("items"));orders.add(old);
+    old.setAll((ObjectNode)original.path("request"));old.put("status",oldCancelled?"Cancelled":"WaitConfirm");orders.add(old);
    }
    return m.createObjectNode().put("code",0).set("data",m.createObjectNode().set("orders",orders));
   });
@@ -222,6 +259,50 @@ class JushuitanServiceTest {
   assertEquals("COMPLETE",service.continueAmendment("o1",m.createObjectNode(),admin).path("amendment").path("status").asText());
   verify(db,never()).receipt(any());
  }
+
+ @Test void manualCancellationAllowsReplacementWithAnotherWarehouse() throws Exception {
+  amendmentSetup();
+  oldCancelled = true;
+  when(client.changesEnabled()).thenReturn(false);
+  when(client.query(eq("/open/wms/partner/query"), any())).thenReturn(json("""
+      {"code":0,"data":{"datas":[{"wms_co_id":10048860,"status":"生效","name":"备用仓"}]}}
+      """));
+  var body = amendmentInput(10).put("manualCancellation", true).put("warehouseId", 10048860);
+
+  var prepared = service.amend("o1", body, admin);
+  assertEquals("READY", prepared.path("amendment").path("status").asText());
+  assertTrue(prepared.path("amendment").hasNonNull("cancellationVerifiedAt"));
+  assertEquals("CANCELLED", prepared.path("status").asText());
+  verify(client, times(1)).upload(any());
+
+  var replaced = service.continueAmendment("o1", m.createObjectNode(), admin);
+  assertEquals("COMPLETE", replaced.path("amendment").path("status").asText());
+  assertEquals(10048860, newRequest.path("wms_co_id").asInt());
+  assertEquals(123, replaced.path("amendment").path("oldOId").asInt());
+  assertEquals(456, replaced.path("oId").asInt());
+  verify(client, never()).mutate(anyString(), anyString(), any());
+  verify(db, never()).receipt(any());
+ }
+
+ @Test void manualCancellationRequiresExactCancelledOrderAndChecksArchivedOutbound() throws Exception {
+  amendmentSetup();
+  var body = amendmentInput(10).put("manualCancellation", true);
+  assertThrows(ApiException.class, () -> service.amend("o1", body, admin));
+  assertFalse(m.readTree(persisted).has("amendment"));
+
+  oldCancelled = true;
+  service.amend("o1", body, admin);
+  when(client.query(eq("/open/orders/out/simple/query"),
+      argThat(filters -> filters instanceof JsonNode request && request.path("archive").asBoolean())))
+      .thenReturn(json("""
+          {"code":0,"data":{"datas":[{"io_id":91,"status":"Archive"}]}}
+          """));
+  assertThrows(ApiException.class, () -> service.continueAmendment("o1", m.createObjectNode(), admin));
+  verify(client, times(1)).upload(any());
+  verify(client, never()).mutate(anyString(), anyString(), any());
+  verify(db, never()).receipt(any());
+ }
+
  @Test void uncertainOldCancellationBlocksNewOrderAndAnotherAmendment() throws Exception {
   amendmentSetup();doThrow(new ApiException("超时")).when(client).mutate(anyString(),anyString(),any());
   var result=service.amend("o1",amendmentInput(20),admin);
@@ -279,6 +360,123 @@ class JushuitanServiceTest {
  @Test void pollFiltersEnvironmentBeforeLimit() {
   when(db.rows(contains("WHERE JSON_UNQUOTE"),eq("sandbox"))).thenReturn(List.of());
   service.poll();verify(db).rows("SELECT order_id,payload FROM jst_shipments WHERE JSON_UNQUOTE(JSON_EXTRACT(payload,'$.environment'))=? ORDER BY updated_at LIMIT 10","sandbox");
+ }
+
+ ObjectNode externalInput(JsonNode record) {
+  var diff=record.path("externalDifference");return m.createObjectNode().put("id",diff.path("id").asText())
+   .put("fingerprint",diff.path("fingerprint").asText()).put("version",record.path("editVersion").asText()).put("reason","已核对聚水潭修改");
+ }
+ JsonNode externalPrice(int amount) throws Exception {
+  var actual=((ObjectNode)m.readTree(persisted).path("request")).deepCopy();actual.put("pay_amount",amount);
+  ((ObjectNode)actual.path("items").get(0)).put("price",amount).put("amount",amount);
+  upstreamOrder("WaitConfirm",actual);return service.sync("o1");
+ }
+ @Test void externalAddressCanBeAcceptedOnReadOnlyConnectionWithoutMutatingOriginal() throws Exception {
+  acceptedOrder();when(client.changesEnabled()).thenReturn(false);when(client.uploadsEnabled()).thenReturn(false);
+  upstreamOrder("WaitConfirm",m.createObjectNode().put("receiver_address","聚水潭新地址"));
+  var result=service.sync("o1");assertEquals("PENDING",result.path("externalDifference").path("status").asText());
+  var input=externalInput(result);result=service.confirmExternal("o1",input,admin);
+  assertFalse(result.has("externalDifference"));assertEquals("聚水潭新地址",result.path("request").path("receiver_address").asText());
+  assertEquals(1,result.path("externalChanges").size());
+  service.confirmExternal("o1",input,admin); // stable ID replay must not append another history or receipt
+  assertEquals(1,m.readTree(persisted).path("externalChanges").size());
+  verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+ @Test void externalFinancialChangeNeedsApprovalAndSignedCashDifference() throws Exception {
+  acceptedOrder();when(db.rows(contains("payment_methods"),eq("银行转账"))).thenReturn(List.of(Map.of("id","bank")));
+  var result=externalPrice(20);var pending=externalInput(result);result=service.confirmExternal("o1",pending,admin);
+  assertEquals("AWAITING_FUNDS",result.path("externalDifference").path("status").asText());assertFalse(result.has("effectiveOrder"));verify(db,never()).receipt(any());
+  var confirm=externalInput(result);confirm.setAll(settlement(10));
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",confirm,admin));
+  result=service.confirmExternal("o1",confirm,finance);
+  assertEquals(20,result.path("effectiveOrder").path("total").asInt());assertEquals(20,result.path("effectiveOrder").path("paid").asInt());
+  assertEquals(10,m.readTree(persisted).path("snapshot").path("total").asInt());
+  var receipt=org.mockito.ArgumentCaptor.forClass(JsonNode.class);verify(db).receipt(receipt.capture());assertEquals(10,receipt.getValue().path("amount").asInt());
+  service.confirmExternal("o1",confirm,finance);verify(db,times(1)).receipt(any());
+  assertTrue(result.path("request").path("pay_amount").isNumber());assertTrue(result.path("request").path("items").get(0).path("qty").isNumber());
+  assertEquals("ACCEPTED",service.sync("o1").path("status").asText());
+  verify(client,times(1)).upload(any());verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+ @Test void externalRefundIsNegativeReceiptAndNewerEditInvalidatesApproval() throws Exception {
+  acceptedOrder();when(db.rows(contains("payment_methods"),eq("银行转账"))).thenReturn(List.of(Map.of("id","bank")));
+  var result=externalPrice(5);var old=externalInput(result);externalPrice(7);
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",old,finance));verify(db,never()).receipt(any());
+  result=service.sync("o1");var input=externalInput(result);input.setAll(settlement(3));
+  service.confirmExternal("o1",input,finance);var receipt=org.mockito.ArgumentCaptor.forClass(JsonNode.class);verify(db).receipt(receipt.capture());assertEquals(-3,receipt.getValue().path("amount").asInt());
+ }
+ @Test void outboundCoreDifferenceAndReadFailuresCannotBeAccepted() throws Exception {
+  acceptedOrder();when(client.query(eq("/open/orders/out/simple/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"io_id\":1}]}}"));
+  var result=externalPrice(20);assertEquals("BLOCKED",result.path("externalDifference").path("status").asText());
+  var input=externalInput(result);assertThrows(ApiException.class,()->service.confirmExternal("o1",input,admin));
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"orders\":[]}}"));
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",input,admin));verify(db,never()).receipt(any());
+ }
+ @Test void externalEditReversionResolvesDifferenceAndKeepsHistory() throws Exception {
+  acceptedOrder();externalPrice(20);upstreamOrder("WaitConfirm",null);
+  var result=service.sync("o1");assertFalse(result.has("externalDifference"));assertEquals("RESOLVED",result.path("externalChanges").get(0).path("status").asText());
+ }
+ @Test void externalDifferenceRequiresOrderApprovalPermissionAndBlocksCrmWrites() throws Exception {
+  acceptedOrder();var result=externalPrice(20);
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",externalInput(result),new Actor("sales","销售",Set.of("business.write"))));
+  assertThrows(ApiException.class,()->service.change("o1",changeInput("REMARK"),admin));verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+
+ @Test void equalTotalExternalProductChangeNeedsNoCashAndChangesCurrentExecutionOnly() throws Exception {
+  acceptedOrder();var target=((ObjectNode)m.readTree(persisted).path("request")).deepCopy();
+  ((ObjectNode)target.path("items").get(0)).put("qty",2).put("price",5);
+  upstreamOrder("WaitConfirm",target);var result=service.sync("o1");
+  result=service.confirmExternal("o1",externalInput(result),admin);
+  assertEquals(2,result.path("effectiveOrder").path("items").get(0).path("qty").asInt());
+  assertEquals(1,m.readTree(persisted).path("snapshot").path("items").get(0).path("qty").asInt());
+  verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+ }
+ @Test void furtherExternalEditWhileWaitingForFundsRequiresFreshApproval() throws Exception {
+  acceptedOrder();var result=externalPrice(20);result=service.confirmExternal("o1",externalInput(result),admin);
+  var old=externalInput(result);old.setAll(settlement(10));var fresh=externalPrice(30);
+  assertEquals("PENDING",fresh.path("externalDifference").path("status").asText());assertFalse(fresh.path("externalDifference").has("approvedAt"));
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",old,finance));verify(db,never()).receipt(any());
+ }
+
+ @Test void externalJournalKeepsEveryObservedRevisionBeyondPollingMessageLimitAndExportsIt() throws Exception {
+  acceptedOrder();for(int amount=11;amount<=45;amount++)externalPrice(amount);
+  var record=m.readTree(persisted);assertEquals(50,record.path("events").size());
+  assertEquals(69,record.path("externalTimeline").size());assertEquals(34,record.path("externalChanges").size());
+  var first=record.path("externalTimeline").get(0);assertEquals("DETECTED",first.path("type").asText());
+  assertEquals("o1",first.path("orderId").asText());assertEquals("SYSTEM_OBSERVER",first.path("operatorSource").asText());
+  assertFalse(first.path("erpOperatorKnown").asBoolean());assertEquals(10,first.path("baselineBefore").path("pay_amount").asInt());
+  assertEquals(11,first.path("observation").path("orders").get(0).path("pay_amount").asInt());assertFalse(first.path("time").asText().isBlank());
+  var exported=service.externalHistory("o1",new Actor("reader","查看",Set.of("business.read")));
+  assertEquals(record.path("externalTimeline"),exported.path("externalTimeline"));assertTrue(exported.path("coverage").asText().contains("不是聚水潭全部操作日志"));
+  assertThrows(ApiException.class,()->service.externalHistory("o1",admin));verify(db,never()).receipt(any());
+ }
+ @Test void externalJournalPreservesApprovalConfirmationAndSignedSettlementWithActorsAndTimes() throws Exception {
+  acceptedOrder();when(db.rows(contains("payment_methods"),eq("银行转账"))).thenReturn(List.of(Map.of("id","bank")));
+  var result=externalPrice(5);result=service.confirmExternal("o1",externalInput(result),admin);
+  var input=externalInput(result);input.setAll(settlement(5));result=service.confirmExternal("o1",input,finance);
+  var timeline=result.path("externalTimeline");assertEquals(4,timeline.size());
+  assertEquals("APPROVED",timeline.get(1).path("type").asText());assertEquals("admin",timeline.get(1).path("operator").asText());
+  assertEquals("SETTLEMENT_RECORDED",timeline.get(2).path("type").asText());assertEquals(-5,timeline.get(2).path("difference").path("settlement").path("amount").asInt());
+  assertEquals("CONFIRMED",timeline.get(3).path("type").asText());assertEquals("finance",timeline.get(3).path("operator").asText());
+  assertEquals(10,timeline.get(3).path("baselineBefore").path("pay_amount").asInt());assertEquals(5,timeline.get(3).path("observation").path("orders").get(0).path("pay_amount").asInt());
+  assertEquals(4,service.confirmExternal("o1",input,finance).path("externalTimeline").size());
+ }
+ @Test void invalidPayloadAndRejectedConfirmationRemainRecordedWithoutCashEntry() throws Exception {
+  acceptedOrder();var target=((ObjectNode)m.readTree(persisted).path("request")).deepCopy();((ObjectNode)target.path("items").get(0)).put("amount",999);
+  upstreamOrder("WaitConfirm",target);var result=service.sync("o1");var input=externalInput(result);
+  assertThrows(ApiException.class,()->service.confirmExternal("o1",input,admin));
+  var timeline=m.readTree(persisted).path("externalTimeline");assertEquals(2,timeline.size());
+  assertEquals(999,timeline.get(0).path("observation").path("orders").get(0).path("items").get(0).path("amount").asInt());
+  assertEquals("ATTEMPT_FAILED",timeline.get(1).path("type").asText());assertEquals("admin",timeline.get(1).path("operator").asText());
+  assertFalse(timeline.get(1).path("details").path("result").asText().isBlank());verify(db,never()).receipt(any());
+ }
+
+ @Test void oldWriterCannotDropHistoryAndExistingJournalEntriesCannotBeEdited() throws Exception {
+  acceptedOrder();externalPrice(20);var stale=(ObjectNode)m.readTree(persisted);stale.remove("externalTimeline");
+  org.springframework.test.util.ReflectionTestUtils.invokeMethod(service,"store",stale);
+  assertEquals(1,m.readTree(persisted).path("externalTimeline").size());
+  var changed=(ObjectNode)m.readTree(persisted);((ObjectNode)changed.path("externalTimeline").get(0)).put("type","ERASED");
+  assertThrows(ApiException.class,()->org.springframework.test.util.ReflectionTestUtils.invokeMethod(service,"store",changed));
+  assertEquals("DETECTED",m.readTree(persisted).path("externalTimeline").get(0).path("type").asText());
  }
 
 }

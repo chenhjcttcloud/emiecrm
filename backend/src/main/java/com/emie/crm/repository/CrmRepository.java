@@ -3,6 +3,8 @@ package com.emie.crm.repository;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.*;
 import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
+import com.emie.crm.common.audit.AuditCompression;
 import java.time.Instant;
 import java.time.format.DateTimeFormatterBuilder;
 import java.util.*;
@@ -51,16 +53,36 @@ public class CrmRepository {
 
   public List<JsonNode> documents(String table, boolean desc, int limit) {
     if (!Set.of("audit", "receipts").contains(table)) throw new IllegalArgumentException();
-    return jdbc
-        .queryForList(
-            "SELECT payload FROM "
-                + table
-                + " ORDER BY seq "
-                + (desc ? "DESC" : "ASC")
-                + (limit > 0 ? " LIMIT " + limit : ""))
-        .stream()
-        .map(r -> parse((String) r.get("payload")))
-        .toList();
+    var rows = jdbc.queryForList("SELECT " + (table.equals("audit") ? "id," : "") + "payload FROM " + table
+        + " ORDER BY seq " + (desc ? "DESC" : "ASC") + (limit > 0 ? " LIMIT " + limit : ""));
+    var entries = rows.stream().map(r -> {
+      JsonNode node = parse(r.get("payload").toString());
+      if (table.equals("audit")) ((ObjectNode)node).put("id", r.get("id").toString());
+      return node;
+    }).toList();
+    return table.equals("audit") ? expandAudits(entries) : entries;
+  }
+
+  public List<JsonNode> expandAudits(List<JsonNode> entries) {
+    var cache = new HashMap<String, JsonNode>();
+    return entries.stream().map(entry -> {
+      if (!entry.has("_archive")) return entry;
+      var pointer = entry.path("_archive"); String id = pointer.path("id").asText();
+      JsonNode archive = cache.computeIfAbsent(id, key -> {
+        var rows = jdbc.queryForList("SELECT content,sha256,record_count FROM audit_archives WHERE id=?", key);
+        if (rows.size() != 1) throw new IllegalStateException("日志归档缺失：" + key);
+        var row = rows.getFirst();
+        var decoded = parse(new String(AuditCompression.restore((byte[]) row.get("content"), row.get("sha256").toString()), StandardCharsets.UTF_8));
+        if (!decoded.isArray() || decoded.size() != ((Number)row.get("record_count")).intValue()) throw new IllegalStateException("日志归档条数不一致");
+        return decoded;
+      });
+      int index = pointer.path("index").asInt(-1);
+      if (index < 0 || index >= archive.size() || !archive.get(index).path("id").asText().equals(entry.path("id").asText()))
+        throw new IllegalStateException("日志归档索引不一致");
+      ObjectNode restored = archive.get(index).path("payload").deepCopy();
+      restored.put("id", entry.path("id").asText());
+      return (JsonNode) restored;
+    }).toList();
   }
 
   public void receipt(JsonNode value) {
@@ -76,6 +98,12 @@ public class CrmRepository {
         "INSERT INTO audit(id,payload) VALUES(?,?)",
         UUID.randomUUID().toString(),
         encode(Map.of("user", user, "action", action, "time", now())));
+  }
+
+  public void audit(String user, String action, JsonNode details) {
+    String id = UUID.randomUUID().toString();
+    jdbc.update("INSERT INTO audit(id,payload) VALUES(?,?)", id,
+        encode(Map.of("id", id, "user", user, "action", action, "time", now(), "details", details.deepCopy())));
   }
 
   public static String now() {

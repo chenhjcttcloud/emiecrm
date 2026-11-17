@@ -13,11 +13,18 @@ class JushuitanOrderMapperTest {
     {"id":"o1","customerId":"c1","status":"已批准","type":"销售订单","total":19.98,"paid":19.98,
     "items":[{"product":"p1","qty":"2","price":"9.99"}]}
     """); }
-  private JsonNode products() throws Exception { return json("[{\"id\":\"p1\",\"name\":\"产品甲\"}]"); }
+  private JsonNode products() throws Exception { return json("[{\"id\":\"p1\",\"name\":\"产品甲\",\"source\":\"jushuitan\",\"enabled\":true,\"jstSku\":\"SKU-1\",\"jstEnvironment\":\"sandbox\"}]"); }
   private ObjectNode input() throws Exception { return (ObjectNode)json("""
-    {"shopId":10402930,"items":[{"skuId":"SKU-1"}],"recipient":{"name":"测试","phone":"00000000000",
+    {"shopId":10402930,"warehouseId":10048859,"items":[{"skuId":"SKU-1"}],"recipient":{"name":"测试","phone":"00000000000",
      "province":"广东省","city":"深圳市","district":"南山区","address":"虚拟测试地址"}}
     """); }
+  @Test void requiresManualWarehouseAndRejectsSkuOverride() throws Exception {
+    var missing=input();missing.remove("warehouseId");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),missing,"CRM-id",true));
+    var tampered=input();((ObjectNode)tampered.path("items").get(0)).put("skuId","OTHER");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),tampered,"CRM-id",true));
+    assertEquals(10048859,JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-id",true).path("wms_co_id").asLong());
+  }
   @Test void payloadUsesAuthoritativeAmountsAndPreservesIdentity() throws Exception {
     var r=JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-identity",true);
     assertEquals("CRM-identity-1",r.path("items").get(0).path("outer_oi_id").asText());

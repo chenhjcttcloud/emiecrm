@@ -22,6 +22,7 @@ services:
       CRM_JST_GATEWAY_URL: ${CRM_JST_GATEWAY_URL:-}
       CRM_JST_GATEWAY_TOKEN: ${CRM_JST_GATEWAY_TOKEN:-}
       CRM_JST_ENV: ${CRM_JST_ENV:-sandbox}
+      CRM_JST_READ_ONLY: ${CRM_JST_READ_ONLY:-true}
     depends_on:
       mysql:
         condition: service_healthy

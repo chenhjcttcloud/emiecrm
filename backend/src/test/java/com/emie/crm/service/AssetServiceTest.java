@@ -35,6 +35,11 @@ class AssetServiceTest {
     service.externalize(new ObjectMapper().readTree("{\"products\":[{\"image\":null},{}],\"orders\":[]}"));
     verifyNoInteractions(jdbc);
   }
+  @Test void vendorPictureDoesNotBreakBusinessSaveOrLeakIntoAssetStorage() throws Exception {
+    var service=service();
+    service.externalize(new ObjectMapper().readTree("{\"products\":[{\"source\":\"jushuitan\",\"jstImage\":\"https://cdn.example.com/a.png\"}],\"orders\":[]}"));
+    verifyNoInteractions(jdbc);
+  }
   @Test void activeImageFormatsAndOversizedBodiesAreRejected() {
     var service = service();
     assertThrows(ApiException.class, () -> service.store("<svg onload='alert(1)'/>".getBytes(StandardCharsets.UTF_8)));

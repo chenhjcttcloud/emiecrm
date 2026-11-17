@@ -4,11 +4,13 @@ export function feishuLoginUrl(redirectUri, currentOrigin){
 }
 
 export async function loadAuthentication({api,storage}){
- const[status,feishu]=await Promise.all([api('status'),api('auth/feishu/config')]);
- let user=null;
- if(storage.getItem('crm-token')||!status.loginRequired){
-  try{user=await api('me')}catch(error){if(error.status!==401)throw error}
- }
+ const status=api('status');
+ const config=api('auth/feishu/config');
+ const currentUser=async()=>{
+  try{return await api('me')}catch(error){if(error.status!==401)throw error;return null}
+ };
+ const userRequest=storage.getItem('crm-token')?currentUser():status.then(info=>info.loginRequired?null:currentUser());
+ const[,feishu,user]=await Promise.all([status,config,userRequest]);
  return {user,feishu};
 }
 

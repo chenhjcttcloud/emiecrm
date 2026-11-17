@@ -20,7 +20,9 @@ public class JushuitanOrderMapper {
     catch (Exception e) { throw new com.emie.crm.common.exception.ApiException("订单金额无效"); }
     require(total.signum() > 0 && total.compareTo(paid) == 0, "请完成收款后再提交发货；当前暂不支持账期发货");
     require(input.path("shopId").canConvertToLong() && input.path("shopId").asLong() > 0, "请选择聚水潭店铺");
+    require(input.path("warehouseId").canConvertToLong() && input.path("warehouseId").asLong() > 0, "请手工选择发货仓库");
     ObjectNode out = mapper.createObjectNode();
+    out.put("wms_co_id", input.path("warehouseId").asLong());
     out.put("shop_id", input.path("shopId").asLong()).put("so_id", soId)
         .put("shop_buyer_id", soId).put("shop_status", "WAIT_SELLER_SEND_GOODS")
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
@@ -45,7 +47,10 @@ public class JushuitanOrderMapper {
       var mapping = mappings.get(i);
       var product = byId.get(line.path("product").asText());
       require(product != null, "订单中的商品已不存在");
-      String sku = mapping.path("skuId").asText().trim();
+      require(product.path("source").asText().equals("jushuitan") && product.path("enabled").asBoolean()
+          && product.path("jstEnvironment").asText().equals(sandbox ? "sandbox" : "production"), "请先从当前聚水潭环境同步已启用商品，历史商品需重新选择");
+      String sku = product.path("jstSku").asText().trim();
+      require(mapping.path("skuId").asText(sku).equals(sku), "商品SKU须以聚水潭同步结果为准，不能手工替换");
       require(!sku.isBlank() && sku.length() <= 40, "请填写每项商品的聚水潭 SKU 编码");
       BigDecimal qty;
       BigDecimal price;

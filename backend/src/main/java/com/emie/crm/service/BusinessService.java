@@ -47,6 +47,13 @@ public class BusinessService {
         || (a.isNumber() && b.isNumber() && a.decimalValue().compareTo(b.decimalValue()) == 0);
   }
 
+  private boolean sameRecord(JsonNode left, JsonNode right) {
+    if (!left.isObject() || !right.isObject() || left.size() != right.size()) return false;
+    for (var field : left.properties())
+      if (!same(field.getValue(), right.path(field.getKey()))) return false;
+    return true;
+  }
+
   private void validState(JsonNode n) {
     require(
         n.isObject()
@@ -220,6 +227,13 @@ public class BusinessService {
     var input = body.path("data");
     validState(input);
     ObjectNode next = input.deepCopy();
+    require(next.path("products").equals(old.path("products")) || (old.isNull() && next.path("products").isEmpty()),
+        "商品资料由聚水潭管理，请使用同步商品，不能在CRM新增、编辑或删除");
+    // Catalog ownership and synchronization metadata cannot be replaced through a state save.
+    for (String field : List.of("productSource", "productsSyncedAt")) {
+      next.remove(field);
+      if (old.has(field)) next.set(field, old.path(field));
+    }
     customersByName(next);
     var oldCustomers = index(old.path("customers"));
     var nextCustomers = index(next.path("customers"));
@@ -235,11 +249,23 @@ public class BusinessService {
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
     protectSubmittedOrders(nextOrders);
+    for (var entry : nextOrders.entrySet()) {
+      String id = entry.getKey();
+      var prior = oldOrders.get(id);
+      if (prior == null || "预收款订单".equals(prior.path("type").asText())
+          || !"预收款订单".equals(entry.getValue().path("type").asText())) continue;
+      require(db.rows("""
+          SELECT order_id FROM jst_document_sales WHERE order_id=?
+          UNION SELECT order_id FROM jst_document_purchases WHERE order_id=? LIMIT 1
+          """, id, id).isEmpty(), "改为预收款订单前，请先解除聚水潭单据关联");
+    }
     var oldRefs = references(old);
     var nextRefs = references(next);
     var historicalReceipts = new ArrayList<JsonNode>();
     var migratedReceipts = new ArrayList<JsonNode>();
+    var receiptOriginals = new HashMap<String, JsonNode>();
     for (var receipt : db.documents("receipts", false, 0)) {
+      receiptOriginals.put(receipt.path("id").asText(), receipt.deepCopy());
       var normalized = normalizeReceipt(receipt, oldRefs);
       if (normalized.path("customerId").asText().isBlank()) {
         var priorOrder = oldOrders.get(receipt.path("order").asText());
@@ -283,6 +309,12 @@ public class BusinessService {
     List<JsonNode> receipts = new ArrayList<>();
     for (var entry : next.path("orders")) {
       var prior = oldOrders.getOrDefault(entry.path("id").asText(), NullNode.instance);
+      boolean settlement = JushuitanDocumentService.isSettlement(entry);
+      require(settlement == JushuitanDocumentService.isSettlement(prior),
+          "请通过聚水潭结算补录入口创建结算单");
+      if (settlement)
+        require(!coreChanged(entry, prior) && sameRecord(entry.path("settlement"), prior.path("settlement")),
+            "结算单的客户、结算期间和确认金额已锁定，请通过关联单据核对明细");
       require(List.of("草稿", "审批中", "已批准").contains(entry.path("status").asText()), "订单状态无效");
       require(List.of("销售订单", "预收款订单", "海外提货单").contains(entry.path("type").asText()), "订单类型无效");
       boolean changed = coreChanged(entry, prior);
@@ -295,7 +327,15 @@ public class BusinessService {
       boolean lineItemsChanged = prior.isNull();
       for (String key : List.of("total", "type", "items"))
         lineItemsChanged |= !same(entry.path(key), prior.path(key));
-      if (lineItemsChanged) validateTotal(entry, next.path("products"));
+      if (lineItemsChanged) {
+        validateTotal(entry, next.path("products"));
+        var catalog = index(next.path("products"));
+        for (var line : entry.path("items")) {
+          var product = catalog.get(line.path("product").asText());
+          require(product != null && product.path("source").asText().equals("jushuitan")
+              && product.path("enabled").asBoolean(), "新建或修改商品明细前，请从聚水潭同步并选择已启用商品");
+        }
+      }
       if (prior.path("status").asText().equals("已批准")
           && (changed || !same(entry.path("status"), prior.path("status")))) actor.require("order.approve");
       if (entry.path("status").asText().equals("已批准")
@@ -304,6 +344,8 @@ public class BusinessService {
           paid = money(entry.path("paid"), true),
           before = number(prior.path("paid"), true),
           delta = paid.subtract(before);
+      if (settlement && before.signum() > 0)
+        require(entry.path("status").asText().equals("已批准"), "已收款结算单须保留审批状态");
       require(
           total.signum() >= 0
               && paid.signum() >= 0
@@ -325,6 +367,7 @@ public class BusinessService {
               "该客户有待确认归属的历史收款，请先核对流水");
         require(entry.path("status").asText().equals("已批准"), "订单需先批准");
         String method = entry.path("method").asText("银行转账");
+        if (settlement) require(!method.equals("预收款核销"), "结算补录须登记实际到账的收款方式");
         require(method.equals("预收款核销") || !db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'", method).isEmpty(), "请选择已启用的收款方式");
         require(
             !(entry.path("type").asText().equals("预收款订单") && method.equals("预收款核销")),
@@ -338,6 +381,8 @@ public class BusinessService {
         r.put("method", method);
         r.put("type", entry.path("type").asText());
         r.put("time", CrmRepository.now());
+        if (settlement) r.put("receivedOn", JushuitanSettlementService.receivedOn(
+            body.path("receiptVerification").path("receivedOn").asText(), entry));
         r.put("operator", actor.name());
         receipts.add(r);
       }
@@ -380,8 +425,56 @@ public class BusinessService {
     db.state(next);
     migratedReceipts.forEach(db::receipt);
     receipts.forEach(db::receipt);
+    auditRecords("orders", "订单", old, next, actor);
+    auditRecords("customers", "客户", old, next, actor);
+    for (var receipt : receipts) {
+      var detail = db.object().put("type", "RECEIPT_CREATED").put("source", "CRM")
+          .put("orderId", receipt.path("order").asText()).put("role", actor.role());
+      detail.set("after", receipt.deepCopy());
+      db.audit(actor.name(), "新增收款流水", detail);
+    }
+    for (var receipt : migratedReceipts) {
+      var detail = db.object().put("type", "RECEIPT_ASSOCIATION_UPDATED").put("source", "CRM")
+          .put("orderId", receipt.path("order").asText()).put("role", actor.role());
+      var before = receiptOriginals.get(receipt.path("id").asText());
+      detail.set("before", before); detail.set("after", receipt.deepCopy());
+      db.audit(actor.name(), "补全历史收款客户归属", detail);
+    }
     db.audit(actor.name(), receipts.isEmpty() ? "保存业务数据" : "登记收款");
     return next;
+  }
+
+  private void auditRecords(String collection, String label, JsonNode old, JsonNode next, Actor actor) {
+    var beforeIndex = index(old.path(collection));
+    var afterIndex = index(next.path(collection));
+    var ids = new TreeSet<String>(beforeIndex.keySet()); ids.addAll(afterIndex.keySet());
+    for (String id : ids) {
+      JsonNode before = beforeIndex.getOrDefault(id, NullNode.instance);
+      JsonNode after = afterIndex.getOrDefault(id, NullNode.instance);
+      if (before.equals(after)) continue;
+      var detail = db.object().put("type", collection.equals("orders") ? "ORDER_CHANGE" : collection.equals("receipts") ? "RECEIPT_CHANGE" : "CUSTOMER_CHANGE")
+          .put("source", "CRM").put("recordId", id).put("role", actor.role())
+          .put("revisionBefore", old.path("revision").asLong()).put("revisionAfter", next.path("revision").asLong());
+      if (collection.equals("orders")) detail.put("orderId", id);
+      if (collection.equals("receipts")) detail.put("orderId", after.path("order").asText(before.path("order").asText()));
+      detail.set("before", before.deepCopy()); detail.set("after", after.deepCopy());
+      var fields = new TreeSet<String>(); before.fieldNames().forEachRemaining(fields::add); after.fieldNames().forEachRemaining(fields::add);
+      var changes = detail.putArray("changes");
+      for (String field : fields) if (!before.path(field).equals(after.path(field))) {
+        var change = changes.addObject().put("field", field);
+        change.set("before", before.has(field) ? before.get(field).deepCopy() : NullNode.instance);
+        change.set("after", after.has(field) ? after.get(field).deepCopy() : NullNode.instance);
+      }
+      db.audit(actor.name(), (before.isNull() ? "新建" : after.isNull() ? "删除" : "修改") + label, detail);
+    }
+  }
+
+  @Transactional(readOnly = true)
+  public Map<String, Object> orderHistory(String id, Actor actor) {
+    actor.require("business.read");
+    var entries = db.rows("SELECT payload FROM audit WHERE JSON_UNQUOTE(JSON_EXTRACT(payload,'$.details.orderId'))=? ORDER BY seq", id)
+        .stream().map(row -> db.parse(row.get("payload").toString())).toList();
+    return Map.of("orderId", id, "exportedAt", CrmRepository.now(), "entries", db.expandAudits(entries));
   }
 
   @Transactional(readOnly = true)
@@ -397,6 +490,8 @@ public class BusinessService {
         assets.backup(state()),
         "jstShipments",
         db.rows("SELECT payload FROM jst_shipments").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
+        "jstDocumentLinks",
+        JushuitanDocumentBackup.exportLinks(db),
         "exported",
         CrmRepository.now());
   }
@@ -416,7 +511,7 @@ public class BusinessService {
       for (var item : backup.path("jstShipments"))
         if (item.path("orderId").equals(current.path("orderId"))) saved = item;
       require(saved != null, "备份缺少现有聚水潭发货记录，不能回退外部订单状态");
-      for (String key : List.of("soId", "oId", "request", "effectiveOrder", "change", "changes", "amendment", "amendments"))
+      for (String key : List.of("soId", "oId", "request", "effectiveOrder", "change", "changes", "amendment", "amendments", "externalDifference", "externalChanges", "externalTimeline"))
         require(saved.path(key).equals(current.path(key)), "备份早于现有聚水潭变更，禁止回退；请使用最新备份");
       var protectedIds = new HashSet<String>();
       collectSettlements(current, protectedIds);
@@ -440,10 +535,33 @@ public class BusinessService {
   public void restore(JsonNode body, Actor actor) {
     require(body.path("version").asInt() == 1 && body.path("receipts").isArray(), "备份格式无效");
     validState(body.path("state"));
+    // Stop old catalog checkpoints before taking the state lock; restored caches need a fresh full import.
+    db.jdbc().update("DELETE FROM jst_catalog_jobs");
     var old = db.state(true);
     protectShipmentRestore(body);
     ObjectNode next = body.path("state").deepCopy();
-    protectSubmittedOrders(index(next.path("orders")));
+    var restoredOrders = index(next.path("orders"));
+    protectSubmittedOrders(restoredOrders);
+    for (var current : old.path("orders")) {
+      if (!JushuitanDocumentService.isSettlement(current)) continue;
+      JsonNode saved = restoredOrders.getOrDefault(current.path("id").asText(), NullNode.instance);
+      require(JushuitanDocumentService.isSettlement(saved)
+          && !coreChanged(current, saved)
+          && same(current.path("status"), saved.path("status"))
+          && same(current.path("paid"), saved.path("paid"))
+          && sameRecord(current.path("settlement"), saved.path("settlement")),
+          "备份缺少现有聚水潭结算单或其最新收款记录，请使用最新备份");
+    }
+    var restoredReceipts = index(body.path("receipts"));
+    var currentRefs = references(old);
+    for (var receipt : db.documents("receipts", false, 0)) {
+      var currentOrder = currentRefs.orders().get(receipt.path("order").asText());
+      if (JushuitanDocumentService.isSettlement(currentOrder)) {
+        var saved = restoredReceipts.get(receipt.path("id").asText());
+        require(saved != null && sameRecord(normalizeReceipt(receipt, currentRefs),
+            normalizeReceipt(saved, currentRefs)), "备份缺少现有聚水潭结算收款流水，请使用最新备份");
+      }
+    }
     normalizeOrders(next, next);
     List<JsonNode> shipmentsToImport = new ArrayList<>();
     if (body.has("jstShipments")) {
@@ -465,28 +583,64 @@ public class BusinessService {
         shipmentsToImport.add(record);
       }
     }
+    var restoredCustomers = index(next.path("customers"));
     for (var order : next.path("orders")) {
       BigDecimal total = money(order.path("total"), false), paid = money(order.path("paid"), true);
       require(paid.compareTo(total) <= 0, "备份中订单已付金额超过订单总额");
+      if (JushuitanDocumentService.isSettlement(order)) {
+        require(total.signum() > 0 && "销售订单".equals(order.path("type").asText())
+            && order.path("items").isArray() && order.path("items").isEmpty()
+            && restoredCustomers.containsKey(order.path("customerId").asText())
+            && List.of("审批中", "已批准", "草稿").contains(order.path("status").asText())
+            && (paid.signum() == 0 || "已批准".equals(order.path("status").asText())),
+            "备份中的聚水潭补录总单信息无效");
+      }
     }
     var receiptIds = new HashSet<String>();
+    var settlementPayments = new HashMap<String, BigDecimal>();
     for (var receipt : body.path("receipts")) {
       require(receipt.isObject() && !receipt.path("id").asText().isBlank()
           && receiptIds.add(receipt.path("id").asText()), "备份流水ID无效或重复");
-      require(receiptAmount(receipt).signum() != 0, "备份流水金额无效");
+      var amount = receiptAmount(receipt);
+      require(amount.signum() != 0, "备份流水金额无效");
+      String orderId = receipt.path("order").asText();
+      var order = restoredOrders.get(orderId);
+      if (JushuitanDocumentService.isSettlement(order)) {
+        require(amount.signum() > 0 && order.path("customerId").equals(receipt.path("customerId"))
+            && "销售订单".equals(receipt.path("type").asText())
+            && !receipt.path("method").asText().isBlank()
+            && !"预收款核销".equals(receipt.path("method").asText()), "备份中的结算收款流水信息无效");
+        JushuitanSettlementService.receivedOn(receipt.path("receivedOn").asText(), order);
+        settlementPayments.merge(orderId, amount, BigDecimal::add);
+      }
     }
+    for (var order : next.path("orders"))
+      if (JushuitanDocumentService.isSettlement(order))
+        require(money(order.path("paid"), true).compareTo(settlementPayments.getOrDefault(
+            order.path("id").asText(), BigDecimal.ZERO)) == 0, "备份中的结算总单和收款流水金额不一致");
+    JushuitanDocumentBackup.restoreLinks(db, body.path("jstDocumentLinks"), restoredOrders, shipmentsToImport, old);
     assets.restore(body.path("assets"));
     assets.externalize(next);
     next.put("revision", old.path("revision").asLong() + 1);
     db.state(next);
+    var receiptsBefore = db.object();
+    var beforeRows = receiptsBefore.putArray("receipts");
+    db.documents("receipts", false, 0).forEach(beforeRows::add);
+    var receiptsAfter = db.object();
+    var afterRows = receiptsAfter.putArray("receipts");
     db.jdbc().update("DELETE FROM receipts");
     var refs = references(next);
     for (var r : body.path("receipts")) {
       require(!r.path("id").asText().isBlank(), "流水ID无效");
-      db.receipt(normalizeReceipt(r, refs));
+      var normalized = normalizeReceipt(r, refs);
+      db.receipt(normalized);
+      afterRows.add(normalized);
     }
     for (var shipment : shipmentsToImport)
       db.jdbc().update("INSERT IGNORE INTO jst_shipments(order_id,payload) VALUES(?,?)", shipment.path("orderId").asText(), db.encode(shipment));
+    auditRecords("orders", "订单（恢复备份）", old, next, actor);
+    auditRecords("customers", "客户（恢复备份）", old, next, actor);
+    auditRecords("receipts", "收款流水（恢复备份）", receiptsBefore, receiptsAfter, actor);
     db.audit(actor.name(), "恢复数据备份");
   }
 

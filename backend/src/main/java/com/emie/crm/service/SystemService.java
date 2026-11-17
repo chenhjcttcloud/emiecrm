@@ -284,15 +284,6 @@ public class SystemService implements ApplicationRunner {
   }
 
   public List<JsonNode> audit() {
-    return db.rows("SELECT id,payload FROM audit ORDER BY seq DESC LIMIT 500").stream()
-        .map(
-            r -> {
-              var node =
-                  (com.fasterxml.jackson.databind.node.ObjectNode)
-                      db.parse(r.get("payload").toString());
-              node.put("id", r.get("id").toString());
-              return (JsonNode) node;
-            })
-        .toList();
+    return db.documents("audit", true, 500);
   }
 }
