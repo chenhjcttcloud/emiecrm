@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.*;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -84,6 +85,32 @@ class JushuitanDocumentServiceTest {
     assertFalse(mapper.writeValueAsString(result).contains("Do not return"));
     verify(client).query(RETURNS, Map.of("shop_id", "7", "o_ids", List.of("9007199254740993", "9007199254740994"),
         "page_index", 1, "page_size", 50));
+  }
+
+  @Test void settlementPickerUsesShipmentDatesAndExcludesUnavailableOrders() throws Exception {
+    var current = json("""
+        {"code":0,"data":{"orders":[
+          {"shop_id":7,"o_id":11,"so_id":"a","send_date":"2026-10-01 12:00:00","status":"Sent","pay_amount":20},
+          {"shop_id":7,"o_id":12,"so_id":"b","send_date":"2026-10-02","status":"Sent"},
+          {"shop_id":8,"o_id":13,"so_id":"c","send_date":"2026-10-02","status":"Sent"},
+          {"shop_id":7,"o_id":14,"so_id":"d","send_date":"2026-09-30","status":"Sent"},
+          {"shop_id":7,"o_id":15,"so_id":"e","send_date":"2026-10-01","status":"Cancelled"}]}}
+        """);
+    var archived = json("""
+        {"code":0,"data":{"orders":[
+          {"shop_id":7,"o_id":16,"so_id":"f","send_date":"2026-10-08","status":"Sent","pay_amount":30}]}}
+        """);
+    var empty = json("{\"code\":0,\"data\":{\"orders\":[]}}");
+    when(client.query(eq(SALES), anyMap())).thenReturn(current, current, empty, archived);
+    when(db.rows(contains("FROM jst_document_sales"), eq("production"), eq(""), eq("12"), eq("7"), eq("b")))
+        .thenReturn(List.of(Map.of("order_id", "existing")));
+
+    var sales = service.settlementCandidates(json("7"), LocalDate.parse("2026-10-01"), LocalDate.parse("2026-10-08"));
+
+    assertEquals(List.of("16", "11"), sales.stream().map(Sale::id).toList());
+    verify(client).query(SALES, Map.of("shop_id", 7L, "date_type", 3, "status", "Sent",
+        "modified_begin", "2026-10-08 00:00:00", "modified_end", "2026-10-08 23:59:59",
+        "archive", true, "page_index", 1, "page_size", 50));
   }
 
   @Test void exactSaleVerificationRejectsMismatchedShopWithoutWriting() throws Exception {

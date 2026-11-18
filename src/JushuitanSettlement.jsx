@@ -1,5 +1,6 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import PaymentMethodPicker from './PaymentMethodPicker';
+import Pagination from './Pagination';
 import { customerOptions } from './customerOptions';
 import { moneyCents } from './orderMoney';
 
@@ -110,9 +111,16 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
   const [end, setEnd] = useState(today);
   const [month, setMonth] = useState('');
   const [customerId, setCustomerId] = useState('');
-  const [draftSales, setDraftSales] = useState([]);
-  const [preview, setPreview] = useState(null);
-  const [selected, setSelected] = useState(new Set());
+  const [shops, setShops] = useState([]);
+  const [shopsLoading, setShopsLoading] = useState(true);
+  const [shopError, setShopError] = useState('');
+  const [shopAttempt, setShopAttempt] = useState(0);
+  const [shopId, setShopId] = useState('');
+  const [searchStart, setSearchStart] = useState('');
+  const [searchEnd, setSearchEnd] = useState('');
+  const [candidates, setCandidates] = useState(null);
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [selected, setSelected] = useState(new Map());
   const [total, setTotal] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
   const [note, setNote] = useState('');
@@ -123,44 +131,73 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
   const [periodStart, periodEnd] = cycle === 'month' ? monthPeriod(month) : [start, end];
   const periodValid = periodStart && periodEnd && periodStart <= periodEnd && periodEnd <= today;
   const invalidPeriod = periodStart && periodEnd && !periodValid;
-  const chosen = preview?.sales.filter(sale => selected.has(sale.id)) ?? [];
+  const queryStart = searchStart || periodStart;
+  const queryEnd = searchEnd || periodEnd;
+  const days = (Date.parse(queryEnd) - Date.parse(queryStart)) / 86400000 + 1;
+  const queryValid = periodValid && queryStart >= periodStart && queryEnd <= periodEnd && days >= 1 && days <= 31;
+  const chosen = [...selected.values()];
+
+  useEffect(() => {
+    let active = true;
+    setShopsLoading(true);
+    setShopError('');
+    api('jst/settlements/shops').then(rows => {
+      if (active) setShops(rows);
+    }).catch(problem => {
+      if (active) setShopError(problem.message);
+    }).finally(() => {
+      if (active) setShopsLoading(false);
+    });
+    return () => { active = false; };
+  }, [api, shopAttempt]);
   const erpCents = salesAmountCents(chosen);
   const totalCents = moneyCents(total);
   const requiresReason = erpCents == null || totalCents !== erpCents;
   const canCreate = Boolean(customerId && chosen.length && totalCents > 0 && confirmed &&
     (!requiresReason || adjustmentReason.trim()));
 
-  function clearPreview() {
-    setPreview(null);
-    setSelected(new Set());
-    setTotal('');
-    setAdjustmentReason('');
-    setConfirmed(false);
+  function clearCandidates() {
+    setCandidates(null);
+    setCandidatePage(1);
     setError('');
   }
 
-  function selectSale(id, checked) {
-    const next = new Set(selected);
-    if (checked) next.add(id);
-    else next.delete(id);
+  function changePeriod() {
+    setSearchStart('');
+    setSearchEnd('');
+    clearCandidates();
+    setSelected(new Map());
+    setTotal('');
+    setAdjustmentReason('');
+    setConfirmed(false);
+  }
+
+  function selectSale(sale, checked) {
+    if (checked && !selected.has(sale.id) && selected.size >= 500) {
+      setError('每张结算单最多关联 500 张销售单。');
+      return;
+    }
+    const next = new Map(selected);
+    if (checked) next.set(sale.id, sale);
+    else next.delete(sale.id);
     setSelected(next);
-    const cents = salesAmountCents(preview.sales.filter(sale => next.has(sale.id)));
+    const cents = salesAmountCents([...next.values()]);
     setTotal(next.size && cents != null ? String(cents / 100) : '');
     setAdjustmentReason('');
     setConfirmed(false);
     setError('');
   }
 
-  async function loadPreview() {
-    if (pending.current || !periodValid || !draftSales.length) return;
+  async function loadCandidates() {
+    if (pending.current || !queryValid || !shopId) return;
     pending.current = true;
-    clearPreview();
-    setAction('preview');
+    clearCandidates();
+    setAction('search');
     try {
-      const result = await api('jst/settlements/preview', { cycle, periodStart, periodEnd, sales: draftSales });
-      setPreview(result);
-      setSelected(new Set(result.sales.map(sale => sale.id)));
-      setTotal(result.erpAmount == null ? '' : String(result.erpAmount));
+      const rows = await api('jst/settlements/candidates', {
+        cycle, periodStart, periodEnd, shopId, searchStart: queryStart, searchEnd: queryEnd,
+      });
+      setCandidates(rows);
     } catch (problem) {
       setError(problem.message);
     } finally {
@@ -200,33 +237,61 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
         onChange={value => { setCustomerId(value); setConfirmed(false); setError(''); }} /></div>
       <div className="settlement-field-row">
         <label className="field"><span>结算方式</span><select value={cycle} disabled={busy}
-          onChange={event => { setCycle(event.target.value); clearPreview(); }}>
+          onChange={event => { setCycle(event.target.value); changePeriod(); }}>
           <option value="day">日结</option><option value="month">月结</option>
         </select></label>
         {cycle === 'month'
           ? <label className="field"><span>发货账期</span><input type="month" required value={month}
-              max={today.slice(0, 7)} disabled={busy} onChange={event => { setMonth(event.target.value); clearPreview(); }} /></label>
+              max={today.slice(0, 7)} disabled={busy} onChange={event => { setMonth(event.target.value); changePeriod(); }} /></label>
           : <><label className="field"><span>发货开始日</span><input type="date" required value={start}
-                max={today} disabled={busy} onChange={event => { setStart(event.target.value); clearPreview(); }} /></label>
+                max={today} disabled={busy} onChange={event => { setStart(event.target.value); changePeriod(); }} /></label>
               <label className="field"><span>发货结束日</span><input type="date" required value={end}
-                min={start} max={today} disabled={busy} onChange={event => { setEnd(event.target.value); clearPreview(); }} /></label></>}
+                min={start} max={today} disabled={busy} onChange={event => { setEnd(event.target.value); changePeriod(); }} /></label></>}
       </div>
       {invalidPeriod && <p role="alert">{cycle === 'month'
         ? '月结账期须为已结束的自然月。'
         : '发货结束日须在开始日与今天之间。'}</p>}
       <section className="jst-document-section">
         <h3>聚水潭销售单</h3>
-        <SaleBatchInput sales={draftSales} disabled={busy}
-          onAdd={batch => { setDraftSales([...draftSales, ...batch]); clearPreview(); }} />
-        {!!draftSales.length && <SettlementSalesTable sales={preview?.sales ?? draftSales} selected={selected}
-          onSelect={preview ? selectSale : undefined} disabled={busy}
-          onRemove={id => { setDraftSales(draftSales.filter(sale => sale.oId !== id)); clearPreview(); }} />}
-        <div className="settlement-action-row">
-          <button type="button" className="secondary" onClick={loadPreview}
-            disabled={busy || !periodValid || !draftSales.length}>{action === 'preview' ? '正在查询…' : '查询销售单'}</button>
+        <div className="field"><span>聚水潭店铺</span>
+          <PaymentMethodPicker label="聚水潭店铺" value={shopId}
+            options={shops.map(shop => ({ value: String(shop.id), label: shop.name || String(shop.id), keywords: String(shop.id) }))}
+            disabled={busy || shopsLoading} onChange={value => { setShopId(value); clearCandidates(); }} />
         </div>
+        {shopsLoading && <p role="status">正在加载店铺…</p>}
+        {shopError && <p role="alert">{shopError} <button type="button" className="link-btn" disabled={busy}
+          onClick={() => setShopAttempt(value => value + 1)}>重新加载店铺</button></p>}
+        {!shopsLoading && !shopError && !shops.length && <p>聚水潭没有返回可选店铺。</p>}
+        {periodValid && <details open={days > 31 ? true : undefined}>
+          <summary>缩小查询日期范围</summary>
+          <div className="settlement-field-row">
+            <label className="field"><span>查询开始日</span><input type="date" value={queryStart} min={periodStart}
+              max={periodEnd} disabled={busy} onChange={event => { setSearchStart(event.target.value); clearCandidates(); }} /></label>
+            <label className="field"><span>查询结束日</span><input type="date" value={queryEnd} min={queryStart}
+              max={periodEnd} disabled={busy} onChange={event => { setSearchEnd(event.target.value); clearCandidates(); }} /></label>
+          </div>
+          {!queryValid && <p role="alert">查询日期须在发货账期内，每次最多查询 31 天。</p>}
+        </details>}
+        <div className="settlement-action-row">
+          <button type="button" className="secondary" onClick={loadCandidates} disabled={busy || !queryValid || !shopId}>
+            {action === 'search' ? '正在查询…' : '查询可选销售单'}
+          </button>
+        </div>
+        {candidates?.length > 0 && <>
+          <SettlementSalesTable sales={candidates.slice((candidatePage - 1) * 10, candidatePage * 10)}
+            selected={selected} disabled={busy}
+            onSelect={(id, checked) => selectSale(candidates.find(sale => sale.id === id), checked)} />
+          <Pagination total={candidates.length} page={candidatePage} pageSize={10}
+            onPage={setCandidatePage} label="可选销售单分页" />
+        </>}
+        {candidates?.length === 0 && <p>该店铺在所选日期内没有可选销售单。</p>}
+        {!!chosen.length && <details>
+          <summary>查看已选销售单（{chosen.length} 张）</summary>
+          <SettlementSalesTable sales={chosen} disabled={busy}
+            onRemove={id => selectSale(selected.get(id), false)} />
+        </details>}
       </section>
-      {preview && <>
+      {!!chosen.length && <>
         <div className="read-field">所选 {chosen.length} 张销售单 · 聚水潭合计 <strong>{saleAmount(erpCents == null ? null : erpCents / 100)}</strong></div>
         <label className="field"><span>确认结算金额</span><input required inputMode="decimal" value={total} disabled={busy}
           onChange={event => setTotal(event.target.value)} /></label>

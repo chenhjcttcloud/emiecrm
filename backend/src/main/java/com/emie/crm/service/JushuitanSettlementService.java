@@ -34,6 +34,19 @@ public class JushuitanSettlementService {
 
   public record Preview(List<JushuitanDocumentService.Sale> sales, BigDecimal erpAmount) {}
 
+  public List<JushuitanDocumentService.Sale> candidates(JsonNode body, Actor actor) {
+    actor.require("business.read");
+    actor.require("business.write");
+    var period = period(body);
+    var start = date(period.path("periodStart").asText());
+    var end = date(period.path("periodEnd").asText());
+    var searchStart = date(body.path("searchStart").asText(start.toString()));
+    var searchEnd = date(body.path("searchEnd").asText(end.toString()));
+    require(!searchStart.isBefore(start) && !searchEnd.isAfter(end) && !searchEnd.isBefore(searchStart)
+        && searchEnd.isBefore(searchStart.plusDays(31)), "查询日期须在发货账期内，每次最多查询31天");
+    return documents.settlementCandidates(body.path("shopId"), searchStart, searchEnd);
+  }
+
   public Preview preview(JsonNode body, Actor actor) {
     actor.require("business.read");
     actor.require("business.write");

@@ -36,6 +36,11 @@ public class BusinessController {
     return service.save(body, auth.actor(req));
   }
 
+  @PostMapping("/jst/settlements/candidates")
+  public Object settlementCandidates(@RequestBody JsonNode body, HttpServletRequest req) {
+    return settlements.candidates(body, auth.actor(req));
+  }
+
   @PostMapping("/jst/settlements/preview")
   public JushuitanSettlementService.Preview previewSettlement(@RequestBody JsonNode body, HttpServletRequest req) {
     return settlements.preview(body, auth.actor(req));

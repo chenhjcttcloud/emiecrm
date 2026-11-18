@@ -124,6 +124,29 @@ public class JushuitanDocumentService {
     });
   }
 
+  List<Sale> settlementCandidates(JsonNode shop, LocalDate start, LocalDate end) {
+    String shopId = requiredId(shop, "店铺编号");
+    var candidates = new LinkedHashMap<String, Sale>();
+    // The ERP accepts at most seven calendar days per date query.
+    for (var from = start; !from.isAfter(end); from = from.plusDays(7)) {
+      var through = from.plusDays(6).isBefore(end) ? from.plusDays(6) : end;
+      for (boolean archive : List.of(false, true)) {
+        var filters = Map.of("shop_id", Long.parseLong(shopId), "date_type", 3, "status", "Sent",
+            "modified_begin", from + " 00:00:00", "modified_end", through + " 23:59:59", "archive", archive);
+        for (var row : queryRows(SALES, "orders", filters)) {
+          var sale = settlementSale(row, shopId);
+          if (sale == null || !"Sent".equals(sale.status()) || sale.shippedOn() == null
+              || sale.shippedOn().compareTo(from.toString()) < 0 || sale.shippedOn().compareTo(through.toString()) > 0)
+            continue;
+          candidates.putIfAbsent(sale.id(), sale);
+        }
+      }
+      require(candidates.size() <= 1000, "候选销售单超过1000张，请缩小查询日期范围");
+    }
+    return candidates.values().stream().filter(sale -> availableSale("", sale))
+        .sorted(Comparator.comparing(Sale::shippedOn).reversed().thenComparing(Sale::id)).toList();
+  }
+
   public List<Sale> verifySales(JsonNode rows) {
     var keys = saleKeys(rows, false);
     var byShop = new LinkedHashMap<String, List<String>>();
@@ -162,13 +185,18 @@ public class JushuitanDocumentService {
   private static void collectSettlementSales(Map<String, Set<Sale>> matches, List<JsonNode> rows,
                                              String shopId, List<String> requestedIds) {
     for (var row : rows) {
-      String id = identifier(row.path("o_id"));
-      String soId = text(row, "so_id", 191);
-      if (soId.isBlank() || !requestedIds.contains(id) || !sameSale(row, shopId, id)) continue;
-      var sale = new Sale(id, shopId, soId, "manual", shipmentDate(row.path("send_date").asText()),
-          optionalId(row.path("wms_co_id")), text(row, "status", 64), documentAmount(row.path("pay_amount")), items(row));
-      matches.computeIfAbsent(id, ignored -> new HashSet<>()).add(sale);
+      var sale = settlementSale(row, shopId);
+      if (sale != null && requestedIds.contains(sale.id()))
+        matches.computeIfAbsent(sale.id(), ignored -> new HashSet<>()).add(sale);
     }
+  }
+
+  private static Sale settlementSale(JsonNode row, String shopId) {
+    String id = identifier(row.path("o_id"));
+    String soId = text(row, "so_id", 191);
+    if (id.isEmpty() || soId.isBlank() || !sameSale(row, shopId, id)) return null;
+    return new Sale(id, shopId, soId, "manual", shipmentDate(row.path("send_date").asText()),
+        optionalId(row.path("wms_co_id")), text(row, "status", 64), documentAmount(row.path("pay_amount")), items(row));
   }
 
   public static void requireSettlementPeriod(List<Sale> sales, JsonNode settlement) {
@@ -403,11 +431,15 @@ public class JushuitanDocumentService {
   }
 
   private void requireAvailableSale(String orderId, Sale sale) {
+    require(availableSale(orderId, sale), "该聚水潭销售单已关联其他 CRM 订单");
+  }
+
+  private boolean availableSale(String orderId, Sale sale) {
     var manual = db.rows("""
         SELECT order_id FROM jst_document_sales WHERE environment=? AND order_id<>?
           AND (o_id=? OR (shop_id=? AND so_id=?))
         """, environment, orderId, sale.id(), sale.shopId(), sale.soId());
-    require(manual.isEmpty(), "该聚水潭销售单已关联其他 CRM 订单");
+    if (!manual.isEmpty()) return false;
     var sent = db.rows("""
         SELECT order_id FROM jst_shipments WHERE order_id<>?
           AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.environment'))=?
@@ -416,7 +448,7 @@ public class JushuitanDocumentService {
               AND (JSON_UNQUOTE(JSON_EXTRACT(payload,'$.soId'))=?
                 OR JSON_SEARCH(payload,'one',?,NULL,'$.amendment.oldSoId','$.amendments[*].oldSoId') IS NOT NULL)))
         """, orderId, environment, sale.id(), sale.shopId(), sale.soId(), sale.soId());
-    require(sent.isEmpty(), "该聚水潭销售单已关联其他 CRM 订单");
+    return sent.isEmpty();
   }
 
   private Sale verifySale(String shopId, String id) {

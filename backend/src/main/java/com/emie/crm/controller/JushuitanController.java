@@ -20,6 +20,13 @@ public class JushuitanController {
   @GetMapping("/config") public Object config(HttpServletRequest req) { auth.actor(req).require("business.read"); return service.config(); }
   @GetMapping("/shipments") public Object list(HttpServletRequest req) { auth.actor(req).require("business.read"); return service.list(); }
   @GetMapping("/shops") public Object shops(HttpServletRequest req) { auth.actor(req).require("order.approve"); return service.shops(); }
+  @GetMapping("/settlements/shops")
+  public Object settlementShops(HttpServletRequest req) {
+    var actor = auth.actor(req);
+    actor.require("business.read");
+    actor.require("business.write");
+    return service.shops(false);
+  }
   @GetMapping("/warehouses") public Object warehouses(HttpServletRequest req) { auth.actor(req).require("business.read"); return service.warehouses(); }
   @PostMapping("/products/sync") public Object syncProducts(@RequestBody JsonNode body, HttpServletRequest req) { return service.syncProducts(auth.actor(req), body); }
   @PostMapping("/inventory") public Object inventory(@RequestBody JsonNode body, HttpServletRequest req) {

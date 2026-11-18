@@ -98,11 +98,15 @@ public class JushuitanService {
   }
 
   public Object shops() {
+    return shops(true);
+  }
+
+  public ArrayNode shops(boolean uploadOnly) {
     ArrayNode shops = mapper.createArrayNode();
     for (int page = 1; page <= 100; page++) {
       JsonNode result = data(client.query("/open/shops/query", Map.of("page_index", page, "page_size", 100)));
       for (var shop : result.path("datas"))
-        if (Set.of("商家自有商城", "线下店铺", "B2B").contains(shop.path("shop_site").asText()))
+        if (!uploadOnly || Set.of("商家自有商城", "线下店铺", "B2B").contains(shop.path("shop_site").asText()))
           shops.addObject().put("id", shop.path("shop_id").asLong()).put("name", shop.path("shop_name").asText());
       if (!result.path("has_next").asBoolean()) return shops;
     }
