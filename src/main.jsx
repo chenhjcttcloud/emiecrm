@@ -3,6 +3,7 @@ import FileDropZone from './FileDropZone';
 import React,{useState,useEffect,useRef} from 'react';
 import AuthBoundary from './AuthBoundary';
 import {api,uploadImage} from './authApi';
+import useDatabase from './useDatabase';
 import {recordId} from './recordId';
 import BusinessImage from './BusinessImage';
 import JushuitanProducts,{matchesProductPrefix} from './JushuitanProducts';
@@ -28,49 +29,6 @@ import {emptyOrderFilters,matchesOrderFilters} from './orderFilterLogic';
 import PaymentMethodPicker from './PaymentMethodPicker';
 const owners=[];
 const stamp=()=>new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'});
-const initial={customers:[],products:[],orders:[]};
-function useDatabase(canWrite){
-  const[data,set]=useState(initial);
-  const[loading,setLoading]=useState(true);
-  const[loadError,setLoadError]=useState('');
-  const[loadAttempt,setLoadAttempt]=useState(0);
-
-  useEffect(()=>{
-    let active=true;
-    async function load(){
-      try{
-        let stored=await api('state');
-        if(active&&stored==null&&canWrite){
-          try{stored=await api('state',{data:initial})}
-          catch(error){
-            if(error.status!==409)throw error;
-            stored=await api('state');
-          }
-        }
-        if(active)set(stored??initial);
-      }catch(error){
-        if(active)setLoadError(error.message||'请稍后重试。');
-      }finally{
-        if(active)setLoading(false);
-      }
-    }
-    load();
-    return()=>{active=false};
-  },[canWrite,loadAttempt]);
-
-  function retry(){
-    setLoadError('');
-    setLoading(true);
-    setLoadAttempt(attempt=>attempt+1);
-  }
-
-  async function save(next,receiptVerification){
-    const stored=await api('state',{data:next,revision:data.revision,...(receiptVerification?{receiptVerification}:{})});
-    set(stored);
-  }
-
-  return [data,save,set,loading,loadError,retry];
-}
 function Icon({name,size=18,...props}){
 const paths={logout:'M9 4H4v16h5 M14 8l4 4-4 4 M8 12h12',orders:'M8 3h8v4H8z M6 5H4v16h16V5h-2 M8 12h8 M8 16h5',cash:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v10 M15 9h-4a2 2 0 0 0 0 4h2a2 2 0 0 1 0 4H9',customers:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M17 4a4 4 0 0 1 0 8 M22 21v-2a4 4 0 0 0-3-3.87',products:'M3 7l9-4 9 4v10l-9 4-9-4V7 M3 7l9 4 9-4 M12 11v10 M7 5l10 4',search:'M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16 M17 17l4 4',filter:'M4 5h16l-6 7v7l-4 2v-9L4 5',sort:'M8 3v18 M4 7l4-4 4 4 M16 21V3 M12 17l4 4 4-4',export:'M12 3v12 M8 11l4 4 4-4 M4 15v6h16v-6',settings:'M4 7h16 M4 17h16 M8 4v6 M16 14v6',plus:'M12 5v14 M5 12h14',edit:'M15 5l4 4 M4 20l4-1L21 6a2.8 2.8 0 0 0-4-4L4 15l-1 6z',chevron:'M8 10l4 4 4-4',close:'M6 6l12 12 M6 18L18 6',upload:'M12 16V3 M7 8l5-5 5 5 M4 15v6h16v-6',check:'M5 12l4 4L19 6',layers:'M3 7l9-4 9 4-9 4-9-4 M3 12l9 4 9-4 M3 17l9 4 9-4',clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',arrow:'M5 12h14 M14 7l5 5-5 5',image:'M3 3h18v18H3z M3 16l5-5 4 4 3-3 6 6 M15 7h.01'};
 return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="ui-icon" {...props}><path d={paths[name]||paths.products}/></svg>}
@@ -101,9 +59,10 @@ function DialogLayer({open,onClose,children,kind='modal',label}){
   if(!open&&!present)return null;
   return <div ref={layer} tabIndex={-1} role="dialog" aria-modal="true" aria-label={label||(kind==='drawer'?'订单与收款表单':'记录表单')} className={'overlay dialog-layer '+(open?'is-open':'is-closing')+' dialog-'+kind} onMouseDown={e=>{if(e.target===e.currentTarget&&open)close.current()}}>{content.current}</div>;
 }
-function App({user,onLogout}){const[customerFilters,setCustomerFilters]=useState(emptyCustomerFilters);const[bulkProducts,setBulkProducts]=useState(false);const[orderFilters,setOrderFilters]=useState(emptyOrderFilters);const[db,save,setDatabase,loading,loadError,retryLoad]=useDatabase(user.permissions.includes('business.write'));const[page,setPage]=usePageNavigation();const[expanded,expand]=useState(()=>['advance','receipts'].includes(page));const[query,search]=useState('');const[filter,setFilter]=useState('');const[sort,setSort]=useState(false);const[modal,setModal]=useState(null);const[draft,setDraft]=useState({});const[message,notify]=useState('');const[showFilter,toggleFilter]=useState(false);
+function App({user,onLogout}){const[customerFilters,setCustomerFilters]=useState(emptyCustomerFilters);const[bulkProducts,setBulkProducts]=useState(false);const[orderFilters,setOrderFilters]=useState(emptyOrderFilters);const[db,save,setDatabase,loading,loadError,retryLoad,refreshData,refreshing,refreshError]=useDatabase(user.permissions.includes('business.write'));const[page,setPage]=usePageNavigation();const[expanded,expand]=useState(()=>['advance','receipts'].includes(page));const[query,search]=useState('');const[filter,setFilter]=useState('');const[sort,setSort]=useState(false);const[modal,setModal]=useState(null);const[draft,setDraft]=useState({});const[message,notify]=useState('');const[showFilter,toggleFilter]=useState(false);
 const[jstOrder,setJstOrder]=useState(null);const[documentOrder,setDocumentOrder]=useState(null);const[settlementOpen,setSettlementOpen]=useState(false);const jst=useJushuitan(api,db.revision);
 const[uploading,setUploading]=useState(false);const[listPage,setListPage]=useState(1);
+const[opening,setOpening]=useState(false);const openingRequest=useRef(false);const activePage=useRef(page);activePage.current=page;
 const[tablePageSize,setTablePageSize]=useState(20);
 const[customerPageSize,setCustomerPageSize]=useState(50);
 const isCustomerPage=page==='customers';
@@ -125,7 +84,33 @@ useEffect(()=>{if(['advance','receipts'].includes(page))expand(true);if(page.sta
 const title={orders:'订单管理',receipts:'收款',advance:'预收款',customers:'客户管理',products:'产品管理','sys-users':'用户管理','sys-roles':'角色权限','sys-departments':'部门管理','sys-audit':'操作日志','sys-backup':'数据备份'}[page];
 function toast(text){notify(text);setTimeout(()=>notify(''),3000)}
 function go(p){setOrderFilters(emptyOrderFilters());setCustomerFilters(emptyCustomerFilters());setPage(p);search('');setFilter('');toggleFilter(false)}
-function open(kind,row){setModal(kind);setDraft(row?{...structuredClone(row),...(kind==='payment'?{method:paymentMethods[0]||''}:{})}:kind==='customer'?{name:'',entity:'',owner:'',status:'',channel:'',links:'',contact:'',position:'',phone:'',wechat:'',balance:0}:kind==='product'?{name:'',code:'',category:'',unit:'',price:'',model:'',cost:'',image:''}:{type:page==='advance'?'预收款订单':'销售订单',owner:user.displayName||user.name,customer:'',note:'',total:'',method:'',items:[{product:'',qty:'',price:''}],attachments:[]})}
+async function withFreshData(show){
+ if(openingRequest.current)return;
+ openingRequest.current=true;setOpening(true);
+ const requestedPage=page;
+ try{
+  const current=await refreshData();
+  if(activePage.current!==requestedPage)return;
+  if(!current){toast('数据刷新失败，请重试后再打开表单');return}
+  show(current);
+ }catch(error){toast(error.message)}
+ finally{openingRequest.current=false;setOpening(false)}
+}
+function open(kind,row){return withFreshData(current=>{
+ const collection=kind==='customer'?'customers':kind==='product'?'products':'orders';
+ const latest=row?current[collection].find(entry=>entry.id===row.id):null;
+ if(row&&!latest)throw Error('这条记录已更新或移除，请刷新列表后重试');
+ setModal(kind);setDraft(latest?{...structuredClone(latest),...(kind==='payment'?{method:paymentMethods[0]||''}:{})}:kind==='customer'?{name:'',entity:'',owner:'',status:'',channel:'',links:'',contact:'',position:'',phone:'',wechat:'',balance:0}:kind==='product'?{name:'',code:'',category:'',unit:'',price:'',model:'',cost:'',image:''}:{type:page==='advance'?'预收款订单':'销售订单',owner:user.displayName||user.name,customer:'',note:'',total:'',method:'',items:[{product:'',qty:'',price:''}],attachments:[]});
+})}
+const canRefresh=!loading&&!modal&&!jstOrder&&!documentOrder&&!settlementOpen&&!admin&&!opening;
+useEffect(()=>{
+ if(!canRefresh)return;
+ const refreshVisible=()=>{if(document.visibilityState!=='hidden')void refreshData()};
+ if(page==='customers')refreshVisible();
+ window.addEventListener('focus',refreshVisible);
+ document.addEventListener('visibilitychange',refreshVisible);
+ return()=>{window.removeEventListener('focus',refreshVisible);document.removeEventListener('visibilitychange',refreshVisible)};
+},[page,canRefresh,refreshData]);
 function patch(k,v){setDraft(d=>({...d,[k]:v,...(k==='customerId'?{customer:db.customers.find(c=>c.id===v)?.name||''}:{})}))}
 async function submit(e,status){e.preventDefault();if(uploading)return;try{const kind=modal;let entry={...draft};if(kind==='customer'||kind==='product'){if(kind==='customer'){const required=[['name','客户名称'],['entity','客户主体'],['owner','负责人'],['status','客户状态'],['channel','销售渠道'],['contact','联系人名称'],['phone','联系人手机']];const missing=required.find(([key])=>!String(entry[key]??'').trim());if(missing)return toast('请填写'+missing[1])}if(!entry.name.trim())return toast('请填写名称');const key=kind==='customer'?'customers':'products';entry.id ||= recordId(kind==='customer'?'c':'p');await save({...db,[key]:entry.id&&db[key].some(r=>r.id===entry.id)?db[key].map(r=>r.id===entry.id?entry:r):[entry,...db[key]]})}else if(kind==='payment'){const paymentCents=moneyCents(entry.payment);if(paymentCents===null)return toast('收款金额最多两位小数，请填写有效金额');const amount=paymentCents/100;if(!paymentMethods.includes(entry.method)&&entry.method!=='预收款核销')return toast('请选择已启用的收款方式');if(paymentCents<=0||paymentCents>moneyCents(entry.total)-moneyCents(entry.paid||0))return toast('请输入有效收款金额，不能超过未收金额');await save({...db,orders:db.orders.map(r=>r.id===entry.id?{...r,paid:(moneyCents(r.paid||0)+paymentCents)/100,method:entry.method||paymentMethods[0],updated:stamp(),note:entry.note,attachments:entry.attachments}:r)},
  entry.source==='jushuitan-settlement'?{amount,customerId:entry.customerId,customer:entry.customer,method:entry.method,receivedOn:entry.receivedOn}:undefined)}else{if(!entry.id)entry.type=page==='advance'?'预收款订单':'销售订单';if(!entry.customerId)return toast('请选择客户，历史订单需重新确认客户关联');if(entry.type==='预收款订单'){const amountCents=moneyCents(entry.total);if(amountCents===null||amountCents<=0)return toast('预收款金额须大于零且最多两位小数');const amount=amountCents/100;if(!paymentMethods.includes(entry.method))return toast('请选择已启用的收款方式');entry.total=amount;if(!entry.id)entry.items=[]}else{if(!entry.items.length||entry.items.some(x=>!x.product||!(Number(x.qty)>0)||x.price===''||Number(x.price)<0))return toast('请完整填写产品、数量和销售价');entry.total=orderTotal(entry.items);if(entry.total===null)return toast('数量最多六位小数，销售价最多两位小数，请检查金额与数量');}entry.id ||= new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'}).slice(0,7)+'-'+String(Math.max(0,...db.orders.filter(o=>/^\d{4}-\d{2}-\d{8,}$/.test(o.id)).map(o=>Number(o.id.split('-').at(-1))))+1).padStart(8,'0');entry.created ||= stamp();entry.updated=stamp();entry.status=status||(draft.status==='已批准'?'已批准':'审批中');entry.paid ||= 0;await save({...db,orders:db.orders.some(r=>r.id===entry.id)?db.orders.map(r=>r.id===entry.id?entry:r):[entry,...db.orders]})}setModal(null);toast(status==='草稿'?'草稿已保存':'保存成功')}catch(error){toast(error.message)}}
@@ -146,13 +131,13 @@ async function upload(files,product=false){
  try{const images=await Promise.all(files.map(uploadImage));if(product)patch('image',images[0]?.url||'');else setDraft(d=>({...d,attachments:[...(d.attachments||[]),...images]}))}catch(e){toast(e.message)}finally{setUploading(false)}
 }
 const catalogProducts=page==='products'?db.products.filter(matchesProductPrefix):[];
-let rows=page==='customers'?db.customers:page==='products'?catalogProducts:db.orders.filter(r=>page==='advance'?r.type==='预收款订单':true);rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(query.toLowerCase())&&(!filter||[r.status,r.owner,r.customer,r.channel].includes(filter)));if(page==='customers')rows=rows.filter(r=>matchesCustomerFilters(r,customerFilters));if(page==='orders')rows=rows.filter(r=>matchesOrderFilters(r,orderFilters));if(sort)rows=[...rows].reverse();
+let rows=page==='customers'?db.customers:page==='products'?catalogProducts:db.orders.filter(r=>page==='advance'?r.type==='预收款订单':true);rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(query.trim().toLowerCase())&&(!filter||[r.status,r.owner,r.customer,r.channel].includes(filter)));if(page==='customers')rows=rows.filter(r=>matchesCustomerFilters(r,customerFilters));if(page==='orders')rows=rows.filter(r=>matchesOrderFilters(r,orderFilters));if(sort)rows=[...rows].reverse();
 useEffect(()=>setListPage(1),[page,query,filter,sort,orderFilters,customerFilters,pageSize]);
 const currentListPage=Math.min(listPage,Math.max(1,Math.ceil(rows.length/pageSize)));const visibleRows=rows.slice((currentListPage-1)*pageSize,currentListPage*pageSize);
 function exportData(){const keys=page==='customers'?['name','entity','balance','owner','status','channel','contact','phone','wechat']:page==='products'?['code','name','category','unit','price']:['id','owner','type','status','customer','total','paid','note'];const csv='\uFEFF'+[keys,...rows.map(r=>keys.map(k=>r[k]??''))].map(a=>a.map(csvCell).join(',')).join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=title+'.csv';a.click();URL.revokeObjectURL(url)}
 const fields=(label,key,options,type='text',required=false)=><label className="field"><span>{label}{required&&<em>*</em>}</span>{options?<select required={required} value={draft[key]||''} onChange={e=>patch(key,e.target.value)}><option value="">请选择</option>{options.map(o=><option key={o} value={o}>{o==='预收款订单'?'预收款':o}</option>)}</select>:<input required={required} type={type} step={type==='number'?'any':undefined} min={type==='number'?0:undefined} value={draft[key]??''} placeholder={type==='number'?'请输入数字':'请输入文本'} onChange={e=>patch(key,e.target.value)}/>}</label>;
-const newButton=<button className="primary" onClick={()=>open(page==='customers'?'customer':page==='products'?'product':'order')}><Icon name="plus" size={17}/>新建</button>;
-const tools=<div className="toolbar-actions"><div className="search"><Icon name="search" size={17}/><input aria-label="搜索" placeholder="搜索" value={query} onChange={e=>search(e.target.value)}/></div><button title="筛选" aria-label="筛选" aria-expanded={showFilter} className="icon-btn" onClick={()=>toggleFilter(!showFilter)}><Icon name="filter"/></button><button title="切换排序" className="icon-btn" onClick={()=>setSort(!sort)}><Icon name="sort"/></button>{page!=='products'&&<><button title="导出CSV" className="icon-btn" onClick={exportData}><Icon name="export"/></button></>}</div>;
+const newButton=<button className="primary" disabled={opening} onClick={()=>open(page==='customers'?'customer':page==='products'?'product':'order')}><Icon name="plus" size={17}/>新建</button>;
+const tools=<div className="toolbar-actions">{isCustomerPage&&<button type="button" className="secondary" aria-label="刷新客户" disabled={refreshing||opening} onClick={()=>refreshData()}>{refreshing?'正在刷新…':'刷新客户'}</button>}<div className="search"><Icon name="search" size={17}/><input aria-label="搜索" placeholder="搜索" value={query} onChange={e=>search(e.target.value)}/></div><button title="筛选" aria-label="筛选" aria-expanded={showFilter} className="icon-btn" onClick={()=>toggleFilter(!showFilter)}><Icon name="filter"/></button><button title="切换排序" className="icon-btn" onClick={()=>setSort(!sort)}><Icon name="sort"/></button>{page!=='products'&&<><button title="导出CSV" className="icon-btn" onClick={exportData}><Icon name="export"/></button></>}</div>;
 const money=n=>'¥ '+Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const summary=page==='products'?[['产品总数',catalogProducts.length,'products'],['产品分类',new Set(catalogProducts.map(p=>p.category).filter(Boolean)).size,'layers'],['已设置售价',catalogProducts.filter(p=>p.price!==''&&p.price!=null).length,'cash']]:page==='customers'?[['客户总数',db.customers.length,'customers'],['合作客户',db.customers.filter(c=>c.status==='达成合作').length,'check'],['预收款余额',money(db.customers.reduce((a,c)=>a+Number(c.balance||0),0)),'cash']]:page==='advance'?[['预收款',rows.length,'orders'],['预收款金额',money(rows.reduce((a,r)=>a+r.total,0)),'cash'],['已收金额',money(rows.reduce((a,r)=>a+r.paid,0)),'check']]:[['订单总数',db.orders.length,'orders'],['待审批',db.orders.filter(r=>r.status==='审批中').length,'clock'],['订单总额',money(db.orders.reduce((a,r)=>a+Number(jst.records[r.id]?.effectiveOrder?.total??r.total),0)),'cash']];
 if(loading)return <div className="login-screen" role="status">正在加载数据…</div>;
@@ -166,9 +151,10 @@ if(loadError)return <main className="login-screen">
 return <div className="app"><header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="layers" size={22}/></span><span>亿觅 CRM</span></div><div className="header-end"><span className="current-user"><span className="status-dot"></span><span title={user.displayName||user.name}>{user.displayName||user.name}</span></span><button type="button" className="logout-button" onClick={onLogout}><Icon name="logout" size={16}/>退出登录</button></div></header><div className="shell"><nav className="sidebar"><div className="nav-section-label">业务管理</div><button className={'nav-item '+(page==='orders'?'active':'')} onClick={()=>go('orders')}><Icon name="orders"/><span>订单管理</span></button><button className={'nav-item '+(['advance','receipts'].includes(page)?'active-parent':'')} onClick={()=>expand(!expanded)}><Icon name="cash"/><span>收款管理</span><span className="nav-caret"><Icon name="chevron" style={{transform:expanded?'rotate(180deg)':undefined}}/></span></button>{expanded&&<div className="nav-sub">{['advance','receipts'].map(p=><button key={p} className={page===p?'active':''} onClick={()=>go(p)}>{p==='advance'?'预收款':'收款'}</button>)}</div>}<button className={'nav-item '+(page==='customers'?'active':'')} onClick={()=>go('customers')}><Icon name="customers"/><span>客户管理</span></button><button className={'nav-item '+(page==='products'?'active':'')} onClick={()=>go('products')}><Icon name="products"/><span>产品管理</span></button>{user.permissions.includes('system.manage')&&<><div className="nav-section-label system-section-label">系统设置</div><button className={'nav-item '+(isSystem?'active-parent':'')} onClick={()=>{setSystemExpanded(!systemExpanded);if(!systemExpanded)go('sys-users')}}><Icon name="settings"/><span>系统管理</span><span className="nav-caret"><Icon name="chevron" style={{transform:systemExpanded?'rotate(180deg)':undefined}}/></span></button>{systemExpanded&&<div className="nav-sub">{[['sys-users','用户管理'],['sys-roles','角色权限'],['sys-departments','部门管理'],['sys-audit','操作日志'],['sys-payment-methods','收款方式'],['sys-backup','数据备份']].map(([key,label])=><button className={page===key?'active':''} key={key} onClick={()=>go(key)}>{label}</button>)}</div>}</>}</nav><main className="main" ref={mainArea}>{page==='sys-payment-methods'?<PaymentMethods api={api} Icon={Icon} DialogLayer={DialogLayer}/>:isSystem?<SystemManagement page={page} api={api} Icon={Icon} DialogLayer={DialogLayer}/>:page==='receipts'?<ReceiptOrders api={api} db={db} Icon={Icon} save={save} DialogLayer={DialogLayer} paymentMethods={paymentMethods}/>:<><div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> {title}</div><h1>{title}</h1><p>{({orders:'有序管理每一笔订单，让业务进展清晰可见。',advance:'统一管理客户预收款及收款记录。',customers:'沉淀客户信息，让每一次合作都有迹可循。',products:'商品资料和仓库库存以聚水潭为准，CRM只读使用。'})[page]}</p></div><div className="page-heading-symbol"><Icon name={page==='products'?'products':page==='customers'?'customers':'orders'} size={30}/></div></div><div className="summary-grid">{summary.map(([label,value,icon])=><div className="summary-card" key={label}><span className="summary-icon"><Icon name={icon} size={21}/></span><div><span className="summary-label">{label}</span><strong>{value}</strong></div></div>)}</div>{page==='orders'&&<OrderFilters orders={db.orders} customers={db.customers} members={memberNames} value={orderFilters} onChange={setOrderFilters} expanded={showFilter} onExpanded={toggleFilter} Icon={Icon}/>}
 {page==='customers'&&<CustomerFilters customers={db.customers} members={memberNames} value={customerFilters} onChange={setCustomerFilters} expanded={showFilter} onExpanded={toggleFilter} Icon={Icon}/>}
 {showFilter&&!['orders','customers'].includes(page)&&<div className="filter-panel"><span>筛选条件</span><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="">全部记录</option>{[...new Set([...memberNames,...db.customers.map(c=>c.name),'审批中','已批准','草稿','达成合作','线下门店','其他'])].map(v=><option key={v}>{v}</option>)}</select><button className="link-btn" onClick={()=>{setFilter('');search('')}}>清除</button></div>}
-{page==='products'?<JushuitanProducts Icon={Icon} DialogLayer={DialogLayer} db={db} api={api} onSynced={next=>setDatabase(previous=>Number(next.revision)>=Number(previous.revision)?next:previous)} canWrite={user.permissions.includes('business.write')}/>:<section className="panel"><div className="table-toolbar"><div className="toolbar-actions">{newButton}{page==='orders'&&user.permissions.includes('business.write')&&<button type="button" className="secondary" onClick={()=>setSettlementOpen(true)}>聚水潭结算补录</button>}</div>{tools}</div>
+{page==='products'?<JushuitanProducts Icon={Icon} DialogLayer={DialogLayer} db={db} api={api} onSynced={next=>setDatabase(previous=>Number(next.revision)>=Number(previous.revision)?next:previous)} canWrite={user.permissions.includes('business.write')}/>:<section className="panel"><div className="table-toolbar"><div className="toolbar-actions">{newButton}{opening&&<span role="status">正在更新数据…</span>}{page==='orders'&&user.permissions.includes('business.write')&&<button type="button" className="secondary" disabled={opening} onClick={()=>withFreshData(()=>setSettlementOpen(true))}>聚水潭结算补录</button>}</div>{tools}</div>
 {isCustomerPage&&<div className="customer-list-results">
   <span aria-live="polite">共 {db.customers.length} 位客户，当前匹配 {rows.length} 位</span>
+  {refreshError&&<span role="alert">刷新失败：{refreshError}，当前保留上次数据，请重试。</span>}
   {hasCustomerFilters&&<button type="button" className="link-btn" onClick={clearCustomerSearch}>清除搜索和筛选</button>}
 </div>}
 <div className="table-scroll"><table className={'data-table'+(isCustomerPage?' customer-table':'')}><thead><tr>{(page==='customers'?['客户名称','客户主体','客户预付款','负责人','客户状态','销售渠道','线上销售店铺&链接','联系人名称','联系人职位','联系人手机','联系人微信','操作']:page==='advance'?['订单编号','签单人','客户名称','订单类型','审批状态','备注','图片附件','预收款金额','创建时间','更新时间','操作']:['订单编号','签单人','订单类型','审批状态','客户名称','订单总额','备注','图片附件','创建时间','更新时间','发货状态','操作']).map(h=><th key={h}>{page==='advance'?h.replaceAll('订单',''):h}</th>)}</tr></thead><tbody>{visibleRows.map(r=><tr key={r.id}>{page==='customers'?<><td title={r.name}>{r.name}</td><td title={r.entity||''}>{r.entity||'--'}</td><td>{money(r.balance)}</td><td><OwnerBadge name={r.owner}/></td><td><Badge>{r.status}</Badge></td><td><Badge tone={r.channel==='其他'?'lilac':'yellow'}>{r.channel}</Badge></td><td>{r.links||'--'}</td><td>{r.contact||'--'}</td><td>{r.position||'--'}</td><td>{r.phone||'--'}</td><td>{r.wechat||'--'}</td><td><button className="link-btn" onClick={()=>open('customer',r)}>编辑</button>{user.permissions.includes('business.write')&&<button className="link-btn" onClick={()=>deleteCustomer(r)}>删除</button>}</td></>:<><td>{r.id}</td><td><Person name={r.owner}/></td>{page==='advance'?<><td><Badge>{r.customer}</Badge></td><td><Badge tone="green">{r.type==='预收款订单'?'预收款':r.type}</Badge></td><td><Badge tone="cyan">{r.status}</Badge></td></>:<><td><Badge tone={r.type==='预收款订单'?'green':'purple'}>{r.source==='jushuitan-settlement'?(r.settlement.cycle==='month'?'月结补录':'日结补录'):r.type}</Badge></td><td><Badge tone={r.status==='审批中'?'green':r.status==='草稿'?'warning':'cyan'}>{r.status}</Badge></td><td><Badge>{r.customer}</Badge></td><td>¥ {r.total}{jst.records[r.id]?.effectiveOrder&&<small className="form-hint">当前执行 ¥ {Number(jst.records[r.id].effectiveOrder.total).toFixed(2)}</small>}</td></>}<td>{r.note||'--'}</td><td>{r.attachments?.length?r.attachments.map((a,i)=><BusinessImage key={i} link className="attachment" src={a.url} alt={a.name||"图片附件"} title={a.name}/>):'--'}</td>{<>{page==='advance'&&<td>¥ {r.total}{jst.records[r.id]?.effectiveOrder&&<small className="form-hint">当前执行 ¥ {Number(jst.records[r.id].effectiveOrder.total).toFixed(2)}</small>}</td>}<td>{r.created}</td><td>{r.updated}</td>{page==='orders'&&<td>{['销售订单','海外提货单'].includes(r.type)?<span className="order-shipping-actions">{r.type==='销售订单'&&r.source!=='jushuitan-settlement'&&<button type="button" className="link-btn" onClick={()=>setJstOrder(r)}>{jst.error?'进度加载失败':shipmentLabel(jst.records[r.id])}</button>}{user.permissions.includes('business.read')&&<button type="button" className="link-btn" aria-label={'关联单据 '+r.id} onClick={()=>setDocumentOrder(r)}>关联单据</button>}</span>:'—'}</td>}</>}<td>{r.source!=='jushuitan-settlement'&&<button className="link-btn" onClick={()=>open('order',r)}>编辑</button>}{page==='orders'&&r.type==='销售订单'&&r.source!=='jushuitan-settlement'&&r.status==='已批准'&&user.permissions.includes('order.approve')&&user.permissions.includes('business.write')&&<button className="link-btn" onClick={()=>setJstOrder(r)}>{jst.records[r.id]?'发货详情':'提交发货'}</button>}{r.status==='已批准'&&r.paid<r.total&&user.permissions.includes('payment.write')&&<button className="link-btn" onClick={()=>open('payment',r)}>收款</button>}{r.status==='审批中'&&user.permissions.includes('order.approve')&&<button className="link-btn" onClick={async()=>{try{await save({...db,orders:db.orders.map(o=>o.id===r.id?{...o,status:'已批准',updated:stamp()}:o)});toast('订单已批准')}catch(e){toast(e.message)}}}>批准</button>}</td></>}</tr>)}</tbody></table>{!rows.length&&<div className="empty">暂无符合条件的记录</div>}</div><Pagination total={rows.length} page={currentListPage} pageSize={pageSize} onPage={setListPage} onPageSize={setPageSize} pageSizes={isCustomerPage?[5,10,20,50]:undefined}/></section>}</>}</main></div>

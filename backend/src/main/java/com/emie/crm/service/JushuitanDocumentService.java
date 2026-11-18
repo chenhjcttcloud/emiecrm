@@ -202,13 +202,12 @@ public class JushuitanDocumentService {
       var updated = next.stream().map(sale -> snapshots.getOrDefault(new SaleKey(sale.shopId(), sale.id()), sale)).toList();
       boolean paid = Optional.ofNullable(documentAmount(current.path("paid"))).orElse(BigDecimal.ZERO).signum() > 0;
       if (paid) actor.require("payment.write");
-      if (paid || "已批准".equals(current.path("status").asText())) {
-        var before = totalAmount(previous);
-        var after = totalAmount(next);
-        var stored = totalAmount(updated);
-        require(before != null && after != null && stored != null && before.compareTo(after) == 0 && before.compareTo(stored) == 0,
-            "已批准或已收款订单需要保持聚水潭合计一致，请先与财务核对");
-      }
+      // Relinking does not amend the total or its recorded adjustment reason, even before approval.
+      var before = totalAmount(previous);
+      var after = totalAmount(next);
+      var stored = totalAmount(updated);
+      require(before != null && after != null && stored != null && before.compareTo(after) == 0 && before.compareTo(stored) == 0,
+          "调整销售单关联须保持聚水潭合计一致；金额不同请核对后重新补录");
       replaceSales(orderId, previous, updated, actor);
     });
   }

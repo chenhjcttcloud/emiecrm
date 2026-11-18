@@ -83,7 +83,7 @@ function SettlementLinks({ order, sales, canEdit, busy, onSave }) {
       onClick={() => edit(previousSales)}>调整销售单关联</button>}
     {paid && !canEdit && <p className="form-hint">已登记收款的结算单由财务调整关联。</p>}
     {draft && <div className="settlement-link-editor">
-      {(paid || order.status === '已批准') && <p className="form-hint">请核对新旧销售单合计一致。已批准的结算金额和收款流水将保留。</p>}
+      <p className="form-hint">调整关联须保持新旧销售单合计一致，原结算金额、差额说明和收款流水将保留。金额不同请核对后重新补录。</p>
       <SaleBatchInput sales={draft} disabled={busy}
         onAdd={batch => edit([...draft, ...batch])} />
       {!!draft.length && <SettlementSalesTable sales={draft.map(ref =>

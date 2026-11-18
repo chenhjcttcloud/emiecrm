@@ -200,6 +200,42 @@ class JushuitanDocumentServiceTest {
             && detail.path("after").get(0).path("id").asText().equals("13")));
   }
 
+  @Test void pendingSettlementRelinkCannotSilentlyChangeTheFinancialBaseline() throws Exception {
+    var state = json("""
+        {"orders":[{"id":"crm-1","type":"销售订单","source":"jushuitan-settlement",
+                    "status":"审批中","total":"20.00","paid":"0.00",
+                    "settlement":{"periodStart":"2026-10-01","periodEnd":"2026-10-31","erpAmount":20.00}}]}
+        """);
+    when(db.state(false)).thenReturn(state);
+    when(db.state(true)).thenReturn(state);
+    when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+    String persisted = """
+        {"shippedOn":"2026-10-01","status":"Sent","amount":"20.00","items":[]}
+        """;
+    when(db.parse(persisted)).thenReturn(json(persisted));
+    when(db.rows(SALES_BY_ORDER, "production", "crm-1")).thenReturn(List.of(
+        Map.of("shop_id", "7", "o_id", "12", "so_id", "online-12", "sale_metadata", persisted)));
+    when(client.query(eq(SALES), anyMap())).thenReturn(json("""
+        {"code":0,"data":{"orders":[{"shop_id":7,"o_id":13,"so_id":"online-13","status":"Sent",
+                                    "send_date":"2026-10-04","pay_amount":21.00}]}}
+        """));
+    when(db.jdbc()).thenReturn(mock(JdbcTemplate.class));
+    when(db.tree(any())).thenAnswer(invocation -> mapper.valueToTree(invocation.getArgument(0)));
+    when(db.encode(any())).thenAnswer(invocation -> mapper.writeValueAsString(invocation.getArgument(0)));
+    when(db.object()).thenAnswer(invocation -> mapper.createObjectNode());
+    var replacement = json("""
+        {"previousSales":[{"shopId":"7","oId":"12"}],"sales":[{"shopId":"7","oId":"13"}],"customerConfirmed":true}
+        """);
+
+    var error = assertThrows(ApiException.class, () -> service.replaceSettlementSales("crm-1", replacement, actor));
+
+    assertTrue(error.getMessage().contains("合计一致"));
+    verify(db, never()).jdbc();
+    verify(db, never()).state(any(JsonNode.class));
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+    assertEquals("20.00", state.path("orders").get(0).path("total").asText());
+  }
+
   @Test void settlementBackupCannotRemoveAnExistingChild() throws Exception {
     var state = json("""
         {"orders":[{"id":"crm-1","type":"销售订单","source":"jushuitan-settlement",
