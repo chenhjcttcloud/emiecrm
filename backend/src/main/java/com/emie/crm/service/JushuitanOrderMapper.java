@@ -4,12 +4,24 @@ import static com.emie.crm.common.exception.ApiException.require;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.*;
 import java.math.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /** Converts an authoritative CRM order, with explicit SKU mapping and recipient data. */
 public class JushuitanOrderMapper {
+  static String buyerAccount(String customerId) {
+    require(customerId != null && !customerId.isBlank(), "请先确认客户关联");
+    try {
+      // Keep one bounded, name-independent buyer identity across this customer's orders.
+      return "CRM-C-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+          .digest(customerId.getBytes(StandardCharsets.UTF_8))).substring(0, 40);
+    } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+  }
+
   public static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
       JsonNode input, String soId, boolean sandbox) {
     require(!order.path("customerId").asText().isBlank(), "请先在订单中确认客户关联并保存");
@@ -24,7 +36,7 @@ public class JushuitanOrderMapper {
     ObjectNode out = mapper.createObjectNode();
     out.put("wms_co_id", input.path("warehouseId").asLong());
     out.put("shop_id", input.path("shopId").asLong()).put("so_id", soId)
-        .put("shop_buyer_id", soId).put("shop_status", "WAIT_SELLER_SEND_GOODS")
+        .put("shop_buyer_id", buyerAccount(order.path("customerId").asText())).put("shop_status", "WAIT_SELLER_SEND_GOODS")
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
         .put("pay_amount", total).put("freight", 0)
         .put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + order.path("id").asText());

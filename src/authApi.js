@@ -25,3 +25,9 @@ export async function uploadImage(file){
  const result=await jsonResponse(await authorizedFetch('/api/assets',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}));
  return {name:file.name,url:result.url};
 }
+
+export async function uploadCustomerFile(file){
+ return jsonResponse(await authorizedFetch('/api/customers/import/parse?filename='+encodeURIComponent(file.name),{
+  method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file
+ }));
+}

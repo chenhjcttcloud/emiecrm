@@ -33,6 +33,18 @@ class JushuitanOrderMapperTest {
     assertEquals("SKU-1",r.path("items").get(0).path("sku_id").asText());
     assertTrue(r.path("remark").asText().contains("禁止实际发货"));
   }
+  @Test void customerBuyerIdentityStaysStableAcrossOrdersAndRenames() throws Exception {
+    var first = JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-order-1",true);
+    var renamed = order().put("id","o2").put("customer","客户已改名");
+    var second = JushuitanOrderMapper.build(m,renamed,products(),input(),"CRM-order-2",true);
+    assertEquals(first.path("shop_buyer_id"), second.path("shop_buyer_id"));
+    assertNotEquals(first.path("so_id"), second.path("so_id"));
+    assertNotEquals(first.path("pay").path("outer_pay_id"), second.path("pay").path("outer_pay_id"));
+    assertTrue(first.path("shop_buyer_id").asText().length() <= 50);
+    var other = order().put("customerId", "c2");
+    assertNotEquals(first.path("shop_buyer_id"), JushuitanOrderMapper.build(m,other,products(),input(),"CRM-order-3",true).path("shop_buyer_id"));
+    assertTrue(JushuitanOrderMapper.buyerAccount("长客户编号".repeat(100)).length() <= 50);
+  }
   @Test void unapprovedOrUnpaidCannotCreateShippingOrder() throws Exception {
     var o=order();o.put("status","审批中");
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,o,products(),input(),"CRM-id",true));

@@ -70,6 +70,7 @@ public class BusinessService {
                 && ids.add(entry.path("id").asText()),
             "记录ID无效或重复");
     }
+    CustomerExternalLinks.validate(n.path("customers"));
   }
 
   private Map<String, JsonNode> index(JsonNode nodes) {

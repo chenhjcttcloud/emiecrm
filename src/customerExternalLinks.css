@@ -1,0 +1,9 @@
+.customer-external-links{grid-column:1/-1}
+.customer-external-links>.form-hint{margin:0 0 12px}
+.customer-external-links>span small{font-size:12px;font-weight:400;color:#777;margin-left:6px}
+.customer-external-link{display:grid;grid-template-columns:90px 120px minmax(150px,1fr) auto;gap:10px;align-items:end;margin-bottom:12px}
+.customer-external-link label{display:grid;gap:6px;font-size:12px;color:#555}
+.customer-external-link select,.customer-external-link input{min-width:0;width:100%;border:1px solid #e1e4e9;border-radius:7px;padding:9px;background:#fff;color:inherit}
+.customer-external-link .link-btn{padding:9px 0}
+.customer-identity-note{display:block;font-size:11px;color:#73809a;line-height:1.55;max-width:220px;white-space:normal;margin-top:4px}
+@media(max-width:680px){.customer-external-link{grid-template-columns:1fr 1fr}.customer-external-link label:nth-child(3){grid-column:1/-1}}
