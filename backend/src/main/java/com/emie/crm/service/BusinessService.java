@@ -28,6 +28,21 @@ public class BusinessService {
     return state;
   }
 
+  /** A refresh only needs the document again when its saved revision has changed. */
+  public JsonNode state(Long knownRevision) {
+    if (knownRevision != null) {
+      require(knownRevision >= 0, "业务数据版本无效");
+      var rows = db.rows("SELECT JSON_UNQUOTE(JSON_EXTRACT(payload,'$.revision')) AS revision"
+          + " FROM state WHERE id=1 AND payload IS NOT NULL");
+      if (!rows.isEmpty()) {
+        Object value = rows.getFirst().get("revision");
+        if (value != null && value.toString().equals(knownRevision.toString()))
+          return db.object().put("unchanged", true).put("revision", knownRevision);
+      }
+    }
+    return state();
+  }
+
   private BigDecimal number(JsonNode value, boolean optional) {
     if (value.isMissingNode() || value.isNull()) {
       if (optional) return BigDecimal.ZERO;

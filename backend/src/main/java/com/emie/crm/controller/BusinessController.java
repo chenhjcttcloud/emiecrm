@@ -1,5 +1,6 @@
 package com.emie.crm.controller;
 
+import com.emie.crm.common.exception.ApiException;
 import com.emie.crm.repository.CrmRepository;
 import com.emie.crm.security.AuthService;
 import com.emie.crm.service.BusinessService;
@@ -7,6 +8,7 @@ import com.emie.crm.service.JushuitanSettlementService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -26,9 +28,16 @@ public class BusinessController {
   }
 
   @GetMapping("/state")
-  public JsonNode state(HttpServletRequest req) {
+  public ResponseEntity<JsonNode> state(HttpServletRequest req,
+      @RequestParam(name = "knownRevision", required = false) String knownRevision) {
     auth.actor(req).require("business.read");
-    return service.state();
+    Long revision = null;
+    if (knownRevision != null) {
+      if (!knownRevision.matches("[0-9]{1,19}")) throw new ApiException("业务数据版本无效");
+      try { revision = Long.parseLong(knownRevision); }
+      catch (NumberFormatException e) { throw new ApiException("业务数据版本无效"); }
+    }
+    return ResponseEntity.ok().header("Cache-Control", "private, no-store").body(service.state(revision));
   }
 
   @PostMapping("/state")

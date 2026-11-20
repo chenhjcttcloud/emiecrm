@@ -18,7 +18,7 @@ export default function useDatabase(canWrite){
  const save=useCallback((next,receiptVerification)=>store.current.save(next,receiptVerification),[]);
  const setDatabase=useCallback(update=>store.current.setData(update),[]);
  const retry=useCallback(()=>store.current.retry(),[]);
- const refresh=useCallback(()=>store.current.refresh(),[]);
+ const refresh=useCallback(options=>store.current.refresh(options),[]);
  return[snapshot.data,save,setDatabase,snapshot.loading,snapshot.loadError,retry,
   refresh,snapshot.refreshing,snapshot.refreshError];
 }

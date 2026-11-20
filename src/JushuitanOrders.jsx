@@ -7,7 +7,7 @@ const labels={SUBMITTING:'提交中',UNKNOWN:'待核对',FAILED:'提交失败',A
 export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':record?labels[record.status]||'待核对':'未提交';
 export function useJushuitan(api,revision){
  const[records,setRecords]=useState({});const[config,setConfig]=useState(null);const[error,setError]=useState('');
- useEffect(()=>{let active=true;const load=()=>Promise.all([api('jst/config'),api('jst/shipments')]).then(([c,rows])=>{if(active){setConfig(c);setRecords(Object.fromEntries(rows.map(r=>[r.orderId,r])));setError('')}}).catch(e=>{if(active)setError(e.message)});load();const timer=setInterval(load,60000);return()=>{active=false;clearInterval(timer)}},[revision]);
+ useEffect(()=>{if(revision==null)return;let active=true;const load=()=>Promise.all([api('jst/config'),api('jst/shipments')]).then(([c,rows])=>{if(active){setConfig(c);setRecords(Object.fromEntries(rows.map(r=>[r.orderId,r])));setError('')}}).catch(e=>{if(active)setError(e.message)});load();const timer=setInterval(load,60000);return()=>{active=false;clearInterval(timer)}},[revision]);
  return {records,config,error,update:record=>setRecords(rows=>({...rows,[record.orderId]:record}))};
 }
 export default function ShipmentDialog({order,db,api,record,config,onUpdate,onClose,DialogLayer,canWrite,canSettle,paymentMethods=[]}){

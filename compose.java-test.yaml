@@ -37,7 +37,7 @@ services:
         condition: service_healthy
     networks:
       - crm
-    command: ['node','--test','--test-concurrency=1','tests/crm.test.mjs','tests/customer-import-api.test.mjs','tests/legacy-customer-api.test.mjs','tests/dashboard.test.mjs','tests/sales.test.mjs']
+    command: ['node','--test','--test-concurrency=1','tests/crm.test.mjs','tests/customer-import-api.test.mjs','tests/legacy-customer-api.test.mjs','tests/state-refresh-api.test.mjs','tests/dashboard.test.mjs','tests/sales.test.mjs']
 networks:
   crm:
     external: true

@@ -95,3 +95,116 @@ test('仅写权限账号初始化空库，初始化竞争409后重新读取',asy
  const viewer=createBusinessDataStore(async(_path,body)=>{assert.equal(body,undefined);return null});
  assert.deepEqual((await viewer.start(false)).customers,[]);
 });
+
+test('同版刷新只请求版本确认，保留数据对象及迁移原始资料',async()=>{
+ const loaded=state(2710,['旧客户']);
+ loaded.customers[0].openingBalance=86.5;
+ loaded.customers[0].legacySource={id:'0000000000000001',fields:{预收款金额:'86.50',负责人:null}};
+ const paths=[];
+ const store=createBusinessDataStore(async path=>{
+  paths.push(path);return paths.length===1?loaded:{unchanged:true,revision:2710};
+ });
+ await store.start(false);
+ assert.strictEqual(await store.refresh(),loaded);
+ assert.strictEqual(store.getSnapshot().data,loaded);
+ assert.deepEqual(paths,['state','state?knownRevision=2710']);
+ assert.deepEqual(loaded.customers[0].legacySource.fields,{预收款金额:'86.50',负责人:null});
+ assert.equal(store.getSnapshot().refreshing,false);
+});
+
+test('后台短时刷新复用最近确认，手动刷新始终向服务器核对版本',async()=>{
+ let clock=1000,calls=0;
+ const store=createBusinessDataStore(async()=>++calls===1?state(1,['c1']):{unchanged:true,revision:1},()=>{},{now:()=>clock});
+ const original=await store.start(false);
+ clock=3999;
+ assert.strictEqual(await store.refresh({maxAgeMs:3000}),original);
+ assert.equal(calls,1);
+ clock=4000;
+ assert.strictEqual(await store.refresh({maxAgeMs:3000}),original);
+ assert.equal(calls,2,'有效期结束须重新确认版本');
+ clock=4001;
+ await store.refresh();
+ assert.equal(calls,3,'显式刷新不受后台有效期影响');
+});
+
+test('已有强制刷新在途时，后台刷新复用同一请求而非返回旧缓存',async()=>{
+ const pending=deferred();let calls=0;
+ const store=createBusinessDataStore(async()=>++calls===1?state(1):pending.promise,()=>{},{now:()=>1000});
+ await store.start(false);
+ const strong=store.refresh();
+ assert.strictEqual(store.refresh({maxAgeMs:3000}),strong);
+ await Promise.resolve();assert.equal(calls,2);
+ pending.resolve(state(2,['latest']));
+ assert.equal((await strong).revision,2);
+});
+
+test('失败的版本确认不会伪装成近期成功，后台请求能立即重试',async()=>{
+ let clock=1000,calls=0;
+ const store=createBusinessDataStore(async()=>{
+  calls++;if(calls===1)return state(1,['c1']);
+  if(calls===2)throw Error('网络断开');
+  return state(2,['c1','c2']);
+ },()=>{},{now:()=>clock});
+ await store.start(false);clock=1100;
+ assert.equal(await store.refresh(),null);
+ assert.equal(store.getSnapshot().refreshError,'网络断开');
+ assert.equal((await store.refresh({maxAgeMs:3000})).revision,2);
+ assert.equal(calls,3);
+ assert.equal(store.getSnapshot().refreshError,'');
+});
+
+test('保存和服务端推送确认新版本，忽略旧推送不延长有效期',async()=>{
+ let clock=1000,reads=0;
+ const store=createBusinessDataStore(async(_path,body)=>body?state(2,['saved']):state(++reads),()=>{},{now:()=>clock});
+ await store.start(true);clock=5000;
+ await store.save(state(1,['draft']));
+ clock=7999;await store.refresh({maxAgeMs:3000});assert.equal(reads,1);
+ store.setData(previous=>({...previous,revision:3,customers:[{id:'server-push'}]}));
+ clock=10000;store.setData(state(2,['old-push']));
+ clock=10998;await store.refresh({maxAgeMs:3000});assert.equal(reads,1);
+ clock=10999;await store.refresh({maxAgeMs:3000});assert.equal(reads,2,'旧推送不能为当前缓存延期');
+ assert.equal(store.getSnapshot().data.revision,3);
+});
+
+test('迟到的旧版本确认不会回滚已保存数据或延长新版本确认时间',async()=>{
+ let clock=1000,reads=0;const old=deferred(),paths=[];
+ const store=createBusinessDataStore(async(path,body)=>{
+  if(body)return state(3,['saved']);
+  paths.push(path);reads++;return reads===1?state(1):reads===2?old.promise:{unchanged:true,revision:3};
+ },()=>{},{now:()=>clock});
+ await store.start(true);clock=5000;
+ const pending=store.refresh();await Promise.resolve();clock=5100;
+ const saved=await store.save(state(1,['draft']));
+ clock=10000;old.resolve({unchanged:true,revision:1});
+ assert.strictEqual(await pending,saved);
+ assert.strictEqual(store.getSnapshot().data,saved);
+ await store.refresh({maxAgeMs:3000});
+ assert.equal(reads,3);
+ assert.equal(paths[2],'state?knownRevision=3');
+});
+
+test('异常版本确认不能清空客户或变成可复用缓存',async()=>{
+ let reads=0;
+ const original=state(1,['kept']);
+ const store=createBusinessDataStore(async()=>++reads===1?original:reads===2?{unchanged:true,revision:2}:{unchanged:true,revision:1});
+ await store.start(false);
+ assert.equal(await store.refresh(),null);
+ assert.strictEqual(store.getSnapshot().data,original);
+ assert.match(store.getSnapshot().refreshError,/业务版本/);
+ assert.strictEqual(await store.refresh({maxAgeMs:3000}),original);
+ assert.equal(reads,3);
+ const initial=createBusinessDataStore(async()=>({unchanged:true,revision:1}));
+ assert.equal(await initial.start(false),null);
+ assert.match(initial.getSnapshot().loadError,/业务版本/);
+});
+
+test('旧权限生命周期的版本确认不能改变新生命周期数据',async()=>{
+ const pending=deferred();let reads=0;
+ const store=createBusinessDataStore(async()=>++reads===1?state(1):reads===2?pending.promise:state(2,['current']));
+ await store.start(true);const old=store.refresh();await Promise.resolve();
+ store.dispose();await store.start(false);
+ pending.resolve({unchanged:true,revision:1});
+ assert.equal(await old,null);
+ assert.equal(store.getSnapshot().data.revision,2);
+ assert.equal(store.getSnapshot().refreshing,false);
+});
