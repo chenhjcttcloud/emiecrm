@@ -6,7 +6,7 @@ import './dashboard.css';
 const loadFilters=()=>{try{return normalizeDashboardFilters(JSON.parse(localStorage.getItem(DASHBOARD_FILTER_KEY)))}catch{return normalizeDashboardFilters(null)}};
 const metricTitles={orders:'订单明细',settled:'已结清订单',pending:'待回款订单',amount:'订单金额明细',paid:'累计已回款明细',outstanding:'待回款明细',advance:'新增预收款明细',day:'每日订单明细'};
 
-export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=false,onManageTargets}){
+export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=false,onManageTargets,onSalesTargets}){
  const[filters,setFilters]=useState(loadFilters),[data,setData]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState(''),[refresh,setRefresh]=useState(0),[selection,setSelection]=useState(null),[detailPage,setDetailPage]=useState(1);
  const request=useRef(0);
  const filterKey=JSON.stringify(filters);
@@ -26,6 +26,7 @@ export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=fa
  const hasFilters=Boolean(filters.owner||filters.customerId);
  const options=data?.options||{owners:[],customers:[]};
  const progress=targetProgress(data?.summary?.orderAmount,data?.target?.amount,data?.targetApplicable);
+ const automaticTarget=data?.target?.source==='personnel';
  const maxAmount=Math.max(0,...(data?.daily||[]).map(day=>Number(day.amount)||0));
  const detailRows=useMemo(()=>dashboardDetailRows(data,selection),[data,selection]);
  const currentDetailPage=Math.min(detailPage,Math.max(1,Math.ceil(detailRows.length/20)));
@@ -60,8 +61,9 @@ export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=fa
   {!loading&&!error&&data&&<>
    <div className="dashboard-canvas">
     <div className="dashboard-top-grid">
-     <section className="dashboard-goal-card" aria-label="公司月度业绩目标"><div className="dashboard-card-heading"><h2>业绩目标</h2><span>公司月度目标</span></div>
-      {progress.state==='active'?<><strong className="dashboard-goal-percent">{progress.percent.toLocaleString('zh-CN',{maximumFractionDigits:1})}<small>%</small></strong><div className="dashboard-progress" role="progressbar" aria-label="月度业绩目标完成率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.width} aria-valuetext={progress.percent.toFixed(1)+'%'}><span style={{width:progress.width+'%'}}/></div><div className="dashboard-goal-amounts"><span>当前 {dashboardMoney(data.summary.orderAmount)}</span><span>目标 {dashboardMoney(data.target.amount)}</span></div></>:<div className="dashboard-goal-empty"><strong>{progress.state==='filtered'?'当前筛选不计算公司完成率':progress.state==='zero'?'本月目标为 0 元':'本月目标未设置'}</strong><span>{progress.state==='filtered'?'切换全部签单人与客户，查看公司目标进度。':progress.state==='zero'?'设置大于零的目标后显示完成率。':'设置月度目标，跟踪销售进展。'}</span>{canManageTargets&&progress.state!=='filtered'&&<button type="button" className="link-btn" onClick={onManageTargets}>设置业绩目标 <Icon name="arrow" size={14}/></button>}</div>}
+     <section className="dashboard-goal-card" aria-label="公司月度业绩目标"><div className="dashboard-card-heading"><h2>业绩目标</h2><span>{automaticTarget?'销售目标自动汇总':'公司月度目标'}</span></div>
+      {progress.state==='active'?<><strong className="dashboard-goal-percent">{progress.percent.toLocaleString('zh-CN',{maximumFractionDigits:1})}<small>%</small></strong><div className="dashboard-progress" role="progressbar" aria-label="月度业绩目标完成率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.width} aria-valuetext={progress.percent.toFixed(1)+'%'}><span style={{width:progress.width+'%'}}/></div><div className="dashboard-goal-amounts"><span>当前 {dashboardMoney(data.summary.orderAmount)}</span><span>目标 {dashboardMoney(data.target.amount)}</span></div></>:<div className="dashboard-goal-empty"><strong>{progress.state==='filtered'?'当前筛选不计算公司完成率':progress.state==='zero'?'本月目标为 0 元':'本月目标未设置'}</strong><span>{progress.state==='filtered'?'切换全部签单人与客户，查看公司目标进度。':progress.state==='zero'?(automaticTarget?'调整人员目标后显示完成率。':'设置大于零的目标后显示完成率。'):'设置销售人员月目标，自动汇总公司目标。'}</span>{canManageTargets&&!onSalesTargets&&progress.state!=='filtered'&&<button type="button" className="link-btn" onClick={onManageTargets}>设置公司目标 <Icon name="arrow" size={14}/></button>}</div>}
+      <div className="dashboard-goal-source"><span>{automaticTarget?<>已设置 {count(data.target.personCount)} 人{progress.state==='filtered'&&<> · 公司目标 {dashboardMoney(data.target.amount)}</>}</>:data.target.source==='manual'?'独立公司目标':'人员目标按月自动汇总'}</span>{onSalesTargets&&<button type="button" className="link-btn" onClick={()=>onSalesTargets(filters.month)}>{canManageTargets?(automaticTarget?'调整人员目标':'设置人员目标'):'查看人员目标'}<Icon name="arrow" size={13}/></button>}</div>
      </section>
      <button type="button" className="dashboard-count-card dashboard-count-settled" onClick={()=>openDetails('settled')}><span>已结清订单数量</span><strong>{count(data.summary.settledCount)}</strong><small>查看订单 <Icon name="arrow" size={14}/></small></button>
      <button type="button" className="dashboard-count-card dashboard-count-pending" onClick={()=>openDetails('pending')}><span>待回款订单数量</span><strong>{count(data.summary.pendingCount)}</strong><small>包含部分回款 <Icon name="arrow" size={14}/></small></button>

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {salesQuantity,salesItemsCsv,salesTargetStatus,salesOrderFinance} from '../src/salesModel.js';
+import {salesQuantity,salesItemsCsv,salesTargetStatus,salesOrderFinance,salesTargetDepartmentStatus,salesTargetDepartmentLabel,matchesSalesTargetFilters} from '../src/salesModel.js';
 
 test('sales quantities preserve six decimal places and large values',()=>{
  assert.equal(salesQuantity('1234567890123456.000001'),'1,234,567,890,123,456.000001');
@@ -22,4 +22,29 @@ test('order collection status uses the effective amount and exact cents',()=>{
  assert.equal(salesOrderFinance({total:100,paid:0},{total:60,paid:60}).status,'已回款');
  assert.equal(salesOrderFinance({total:0,paid:0}).status,'无需回款');
  assert.equal(salesOrderFinance({total:'unknown',paid:0}).status,'待核对');
+});
+
+test('target department filtering uses IDs and combines with owner search',()=>{
+ const first={owner:'Alice',departmentId:'d1',department:'销售部',departmentStatus:'assigned'};
+ const sameName={owner:'Alina',departmentId:'d2',department:'销售部',departmentStatus:'assigned'};
+ const reservedId={owner:'Alice',departmentId:'status:unassigned',department:'特殊部门',departmentStatus:'assigned'};
+ assert.equal(matchesSalesTargetFilters(first,{query:' ALI ',department:'department:d1'}),true);
+ assert.equal(matchesSalesTargetFilters(sameName,{query:'ali',department:'department:d1'}),false);
+ assert.equal(matchesSalesTargetFilters(first,{query:'Bob',department:'department:d1'}),false);
+ assert.equal(matchesSalesTargetFilters(reservedId,{department:'department:status:unassigned'}),true);
+ assert.equal(matchesSalesTargetFilters(reservedId,{department:'status:unassigned'}),false);
+ assert.equal(matchesSalesTargetFilters(first,{department:'invalid'}),false);
+});
+
+test('unresolved departments remain separate and old target rows display unassigned',()=>{
+ assert.equal(salesTargetDepartmentStatus({owner:'旧签单人'}),'unassigned');
+ assert.equal(salesTargetDepartmentLabel({owner:'旧签单人'}),'未分配部门');
+ assert.equal(salesTargetDepartmentLabel({departmentId:'d1',department:'销售一部',departmentStatus:'assigned'}),'销售一部');
+ for(const status of ['unassigned','unmatched','ambiguous']){
+  const row={owner:'旧签单人',departmentStatus:status};
+  assert.equal(matchesSalesTargetFilters(row,{department:'status:'+status}),true);
+  assert.equal(matchesSalesTargetFilters(row,{department:'department:d1'}),false);
+  assert.equal(matchesSalesTargetFilters(row,{department:'status:assigned'}),false);
+ }
+ assert.equal(salesTargetDepartmentLabel({departmentStatus:'ambiguous'}),'人员重名待确认');
 });

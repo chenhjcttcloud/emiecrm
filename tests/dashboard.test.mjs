@@ -23,7 +23,7 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     return data;
   }
   const snapshots=new Map();
-  const tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets'];
+  const tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets'];
   const suffix=Date.now().toString(36);
   const users=['dash-view-'+suffix,'dash-target-'+suffix];
   const roles=['看板查看测试'+suffix,'目标管理测试'+suffix];
@@ -73,6 +73,7 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     for(const entry of [receipt('dash-r1','dash-pre',100),receipt('dash-r2','dash-pre2',50),receipt('dash-r3','dash-pre2',-10),
       receipt('dash-r4','dash-paid',100,'销售订单','预收款核销'),receipt('dash-r5','dash-changed',-40,'订单变更')])
       await pool.query('INSERT INTO receipts(id,payload) VALUES(?,?)',[entry.id,JSON.stringify(entry)]);
+    const [receiptBaseline]=await pool.query('SELECT id,payload FROM receipts ORDER BY id');
 
     const report=await request('dashboard/sales?month=2026-11');
     const moneyFields=new Set(['orderAmount','settledAmount','outstandingAmount','advanceReceived','advanceBalance']);
@@ -85,6 +86,9 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     assert.equal(report.orders.length,5);
     assert.equal(report.advanceReceipts.length,3);
     assert.equal(report.target.amount,null);
+    assert.equal(report.target.source,'unset');
+    assert.equal(report.target.personCount,0);
+    assert.equal(report.target.manualAmount,null);
     assert.equal(report.targetApplicable,true);
     assert.ok(report.warnings.some(warning=>warning.includes('dash-duplicate')));
     const filtered=await request('dashboard/sales?'+new URLSearchParams({month:'2026-11',owner:'看板签单人',customerId:'dash-c1'}));
@@ -113,6 +117,8 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     const zero=await request('dashboard/targets',{month:'2026-11',amount:'0',revision:0},200,manager);
     assert.equal(Number(zero.amount),0);
     assert.equal(zero.revision,1);
+    assert.equal(zero.source,'manual');
+    assert.equal(zero.manualAmount,'0.00');
     assert.equal(Number((await request('dashboard/sales?month=2026-11')).target.amount),0);
     for(const amount of ['-1','0.001','1000000000000','NaN','1e3'])
       await request('dashboard/targets',{month:'2026-11',amount,revision:1},400,manager);
@@ -130,6 +136,58 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     assert.ok(event,'成功修改目标必须记录审计日志');
     assert.equal(event.details.before.revision,0);
     assert.equal(event.details.after.revision,1);
+
+    // Company targets are derived from personnel targets when any amount is explicitly set.
+    // The old company amount remains an intact fallback, including its own CAS revision.
+    const manual=await request('dashboard/targets',{month:'2026-11',amount:'1000.00',revision:1},200,manager);
+    assert.equal(manual.source,'manual'); assert.equal(manual.revision,2);
+    async function assertEffectiveTarget(month,amount,source,personCount,manualAmount){
+      const dashboard=await request('dashboard/sales?'+new URLSearchParams({month}),undefined,200,viewer);
+      const annual=await request('dashboard/targets?'+new URLSearchParams({year:month.slice(0,4)}),undefined,200,manager);
+      const target=annual.targets.find(target=>target.month===month);
+      for(const value of [dashboard.target,target]){
+        assert.equal(value.amount,amount); assert.equal(value.source,source);
+        assert.equal(value.personCount,personCount); assert.equal(value.manualAmount,manualAmount);
+      }
+      return dashboard.target;
+    }
+    await assertEffectiveTarget('2026-11','1000.00','manual',0,'1000.00');
+    await request('sales/targets',{month:'2026-11',owner:'看板签单人',amount:'0.10',revision:0},200,manager);
+    await request('sales/targets',{month:'2026-11',owner:roles[0],amount:'0.20',revision:0},200,manager);
+    const aggregate=await assertEffectiveTarget('2026-11','0.30','personnel',2,'1000.00');
+    assert.equal(aggregate.revision,2,'人员目标汇总不应改写旧公司目标版本');
+    await request('dashboard/targets',{month:'2026-11',amount:'999',revision:2},409,manager);
+    await request('sales/targets',{month:'2026-11',owner:'看板签单人',amount:'0.11',revision:1},200,manager);
+    await assertEffectiveTarget('2026-11','0.31','personnel',2,'1000.00');
+    const filteredAggregate=await request('dashboard/sales?'+new URLSearchParams({month:'2026-11',owner:'看板签单人'}),undefined,200,viewer);
+    assert.equal(filteredAggregate.target.amount,'0.31'); assert.equal(filteredAggregate.target.source,'personnel');
+    assert.equal(filteredAggregate.targetApplicable,false,'人员筛选不应将公司目标误用为个人完成率');
+    await request('sales/targets',{month:'2026-11',owner:'看板签单人',amount:'1',revision:2},403,viewer);
+
+    await request('sales/targets',{month:'2026-11',owner:'看板签单人',amount:'0',revision:2},200,manager);
+    await request('sales/targets',{month:'2026-11',owner:roles[0],amount:'0',revision:1},200,manager);
+    await assertEffectiveTarget('2026-11','0.00','personnel',2,'1000.00');
+    await pool.query('UPDATE sales_targets SET amount=NULL WHERE month_key=?',['2026-11']);
+    await assertEffectiveTarget('2026-11','1000.00','manual',0,'1000.00');
+    await pool.query('INSERT INTO sales_targets(month_key,owner,amount,revision) VALUES(?,?,NULL,0)',['2027-01','看板签单人']);
+    await assertEffectiveTarget('2027-01',null,'unset',0,null);
+
+    await assertEffectiveTarget('2026-12',december.amount,'manual',0,december.amount);
+    await request('sales/targets',{month:'2026-12',owner:'看板签单人',amount:'0.50',revision:0},200,manager);
+    await assertEffectiveTarget('2026-12','0.50','personnel',1,december.amount);
+    await assertEffectiveTarget('2026-11','1000.00','manual',0,'1000.00');
+
+    const simultaneous=await Promise.all([
+      ['dashboard/targets',{month:'2027-02',amount:'500.00',revision:0}],
+      ['sales/targets',{month:'2027-02',owner:'看板签单人',amount:'0.10',revision:0}],
+    ].map(([path,body])=>fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+manager},body:JSON.stringify(body)})));
+    assert.ok([200,409].includes(simultaneous[0].status),'公司与个人目标首次并发时，公司写入只能成功或报告来源冲突');
+    assert.equal(simultaneous[1].status,200);
+    await assertEffectiveTarget('2027-02','0.10','personnel',1,simultaneous[0].status===200?'500.00':null);
+    const [legacyCompany]=await pool.query('SELECT amount,revision FROM dashboard_targets WHERE month_key=?',['2026-11']);
+    assert.equal(legacyCompany[0].amount,'1000.00'); assert.equal(legacyCompany[0].revision,2);
+    const [receiptAfter]=await pool.query('SELECT id,payload FROM receipts ORDER BY id');
+    assert.deepEqual(receiptAfter,receiptBaseline,'目标维护与派生读取不得修改收款流水');
     const [stored]=await pool.query('SELECT payload FROM state WHERE id=1');
     assert.deepEqual(JSON.parse(stored[0].payload),fixture,'读取看板和维护目标不得修改业务数据');
   }finally{

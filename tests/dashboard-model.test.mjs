@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeDashboardFilters,shiftDashboardMonth,targetProgress,validTargetAmount,dashboardMoney,dashboardDetailRows,currentDashboardMonth,sumDashboardMoney} from '../src/dashboardModel.js';
+import {normalizeDashboardFilters,shiftDashboardMonth,targetProgress,validTargetAmount,dashboardMoney,dashboardDetailRows,currentDashboardMonth,sumDashboardMoney,summarizeSalesTargets} from '../src/dashboardModel.js';
 
 test('month shortcuts cross years and stop at the supported bounds',()=>{
   assert.equal(shiftDashboardMonth('2026-01',-1),'2025-12');
@@ -54,4 +54,13 @@ test('card and date details remain within the same returned order cohort',()=>{
   assert.deepEqual(dashboardDetailRows(data,{kind:'advance'}),[pre]);
   assert.deepEqual(dashboardDetailRows(data,{kind:'amount'}),data.orders);
   assert.deepEqual(dashboardDetailRows(null,{kind:'amount'}),[]);
+});
+
+test('personnel target totals preserve cents and distinguish unset from explicit zero',()=>{
+  assert.deepEqual(summarizeSalesTargets([{owner:'小王',amount:null}]),{amount:null,personCount:0});
+  assert.deepEqual(summarizeSalesTargets([{owner:'小王',amount:'0.00'},{owner:'小李',amount:null}]),{amount:'0.00',personCount:1});
+  const rows=[{owner:'小王',amount:'999999999999.99'},{owner:'小李',amount:'0.02'},{owner:'小张',amount:null},{owner:' ',amount:'100.00'}];
+  assert.deepEqual(summarizeSalesTargets(rows),{amount:'1000000000000.01',personCount:2});
+  assert.deepEqual(summarizeSalesTargets([{owner:'小王',amount:'1.001'}]),{amount:null,personCount:1});
+  assert.deepEqual(summarizeSalesTargets(null),{amount:null,personCount:0});
 });

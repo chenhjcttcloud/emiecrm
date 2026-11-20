@@ -28,6 +28,7 @@ class DashboardServiceTest {
   private List<Map<String, Object>> shipments;
   private List<Map<String, Object>> links;
   private List<Map<String, Object>> targetRows;
+  private List<Map<String, Object>> personnelTargetRows;
 
   @BeforeEach void setup() {
     state = mapper.createObjectNode();
@@ -37,6 +38,7 @@ class DashboardServiceTest {
     shipments = new ArrayList<>();
     links = new ArrayList<>();
     targetRows = new ArrayList<>();
+    personnelTargetRows = new ArrayList<>();
     db = mock(CrmRepository.class);
     jdbc = mock(JdbcTemplate.class);
     when(db.jdbc()).thenReturn(jdbc);
@@ -51,7 +53,13 @@ class DashboardServiceTest {
       String sql = call.getArgument(0);
       if (sql.contains("FROM jst_shipments")) return List.copyOf(shipments);
       if (sql.contains("FROM jst_document_sales")) return List.copyOf(links);
-      if (sql.contains("FROM dashboard_targets")) return List.copyOf(targetRows);
+      if (sql.contains("FROM dashboard_targets") || sql.contains("FROM sales_targets")) {
+        var rows = sql.contains("FROM dashboard_targets") ? targetRows : personnelTargetRows;
+        String start = call.getArgument(1);
+        String end = sql.contains("month_key>=?") ? call.getArgument(2) : start;
+        return rows.stream().filter(row -> row.get("month_key").toString().compareTo(start) >= 0
+            && row.get("month_key").toString().compareTo(end) <= 0).toList();
+      }
       return List.of();
     });
     when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
@@ -273,6 +281,136 @@ class DashboardServiceTest {
   private Map<String, Object> target(String month, String amount, long revision) {
     return new LinkedHashMap<>(Map.of("month_key", month, "amount", new BigDecimal(amount), "revision", revision,
         "updated_at", "2026-11-19T01:00:00Z", "updated_by", "manager"));
+  }
+
+  private Map<String, Object> personnelTarget(String month, String owner, String amount) {
+    var row = new LinkedHashMap<String, Object>();
+    row.put("month_key", month); row.put("owner", owner);
+    row.put("amount", amount == null ? null : new BigDecimal(amount));
+    return row;
+  }
+
+  @Test void personnelTargetSumOverridesManualWithoutRewritingItsValueOrVersion() {
+    targetRows.add(target("2026-11", "777", 4));
+    personnelTargetRows.add(personnelTarget("2026-11", "甲", "0.10"));
+    personnelTargetRows.add(personnelTarget("2026-11", "乙", "0.20"));
+    personnelTargetRows.add(personnelTarget("2026-12", "其他月份", "999"));
+    var goal = sales().path("target");
+    assertEquals("0.30", goal.path("amount").asText());
+    assertEquals("personnel", goal.path("source").asText());
+    assertEquals(2, goal.path("personCount").asInt());
+    assertEquals("777.00", goal.path("manualAmount").asText());
+    assertEquals(4, goal.path("revision").asInt());
+    assertEquals("2026-11-19T01:00:00Z", goal.path("updatedAt").asText());
+    assertEquals("manager", goal.path("updatedBy").asText());
+    assertFalse(goal.has("owners"));
+    assertFalse(goal.toString().contains("其他月份"));
+    verifyNoInteractions(jdbc);
+    assertEquals(new BigDecimal("777"), targetRows.get(0).get("amount"));
+  }
+
+  @Test void personnelSumStaysExactAboveJavascriptSafeCentsAndUpdatesOnEveryRead() {
+    for (int index = 0; index < 99; index++)
+      personnelTargetRows.add(personnelTarget("2026-11", "签单人" + index, "999999999999.99"));
+    assertEquals("98999999999999.01", sales().path("target").path("amount").asText());
+    personnelTargetRows.set(0, personnelTarget("2026-11", "签单人0", "0.01"));
+    var goal = sales().path("target");
+    assertEquals("97999999999999.03", goal.path("amount").asText());
+    assertTrue(goal.path("amount").isTextual());
+    assertEquals(99, goal.path("personCount").asInt());
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void explicitPersonnelZeroIsConfiguredButNullAndBlankOwnersCannotOverrideManualFallback() {
+    targetRows.add(target("2026-11", "888", 3));
+    personnelTargetRows.add(personnelTarget("2026-11", "未设置", null));
+    personnelTargetRows.add(personnelTarget("2026-11", "", "999"));
+    personnelTargetRows.add(personnelTarget("2026-11", " \u3000", "999"));
+    var manual = sales().path("target");
+    assertEquals("888.00", manual.path("amount").asText());
+    assertEquals("manual", manual.path("source").asText());
+    assertEquals(0, manual.path("personCount").asInt());
+    personnelTargetRows.add(personnelTarget("2026-11", "明确零目标", "0"));
+    var zero = sales().path("target");
+    assertEquals("0.00", zero.path("amount").asText());
+    assertEquals("personnel", zero.path("source").asText());
+    assertEquals(1, zero.path("personCount").asInt());
+    assertEquals("888.00", zero.path("manualAmount").asText());
+  }
+
+  @Test void annualAndMonthlyViewsUseTheSameEffectiveTargetAndOnlyTwoAnnualQueries() {
+    targetRows.add(target("2026-11", "123", 5));
+    targetRows.add(target("2026-10", "0", 2));
+    personnelTargetRows.add(personnelTarget("2026-11", "一", "10.01"));
+    personnelTargetRows.add(personnelTarget("2026-11", "二", "20.02"));
+    personnelTargetRows.add(personnelTarget("2027-11", "别的年份", "1000"));
+    var monthly = sales().path("target");
+    clearInvocations(db);
+    var report = mapper.valueToTree(service.targets(2026, manager));
+    assertEquals(monthly, report.path("targets").get(10));
+    assertEquals("manual", report.path("targets").get(9).path("source").asText());
+    assertEquals("0.00", report.path("targets").get(9).path("amount").asText());
+    assertEquals("unset", report.path("targets").get(0).path("source").asText());
+    assertTrue(report.path("targets").get(0).path("manualAmount").isNull());
+    verify(db, times(2)).rows(anyString(), any(Object[].class));
+    verify(db).rows(contains("FROM sales_targets WHERE month_key>=? AND month_key<=?"), eq("2026-01"), eq("2026-12"));
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void emptyTargetAndFilteringKeepGlobalTargetSourceAndApplicabilitySeparate() {
+    var unset = sales().path("target");
+    assertEquals("unset", unset.path("source").asText());
+    assertEquals(0, unset.path("personCount").asInt());
+    assertTrue(unset.path("amount").isNull());
+    assertTrue(unset.path("manualAmount").isNull());
+    personnelTargetRows.add(personnelTarget("2026-11", "甲", "100"));
+    var filtered = sales("2026-11", "小王", "c1");
+    assertEquals("100.00", filtered.path("target").path("amount").asText());
+    assertEquals("personnel", filtered.path("target").path("source").asText());
+    assertFalse(filtered.path("targetApplicable").asBoolean());
+  }
+
+  @Test void permissionsAreCheckedBeforePersonnelTargetsCanBeReadOrDisclosed() {
+    personnelTargetRows.add(personnelTarget("2026-11", "私有人名", "100"));
+    clearInvocations(db, jdbc);
+    var denied = new Actor("business", "销售", Set.of("business.read"));
+    assertEquals(403, assertThrows(ApiException.class, () -> service.sales("2026-11", "", "", denied)).status());
+    assertEquals(403, assertThrows(ApiException.class, () -> service.targets(2026, reader)).status());
+    assertEquals(403, assertThrows(ApiException.class, () -> service.saveTarget(mapper.createObjectNode(), reader)).status());
+    verifyNoInteractions(db, jdbc);
+  }
+
+  @Test void savingManualTargetIsRejectedBeforeAnyWriteWhenPersonnelEvenZeroIsConfigured() {
+    personnelTargetRows.add(personnelTarget("2026-11", "甲", "0"));
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "100").put("revision", 0);
+    var failure = assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    assertEquals(409, failure.status());
+    assertTrue(failure.getMessage().contains("销售业绩目标"));
+    verify(db).rows(contains("FROM sales_targets WHERE month_key=? FOR UPDATE"), eq("2026-11"));
+    verifyNoInteractions(jdbc);
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+  }
+
+  @Test void manualSaveLocksPersonnelMonthBeforeCompanyRowAndUsesExplicitRepeatableRead() throws Exception {
+    var annotation = DashboardService.class.getMethod("saveTarget", JsonNode.class, Actor.class)
+        .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+    assertEquals(org.springframework.transaction.annotation.Isolation.REPEATABLE_READ, annotation.isolation());
+    when(jdbc.update(anyString(), any(Object[].class))).thenAnswer(call -> {
+      if (((String)call.getArgument(0)).startsWith("UPDATE dashboard_targets")) {
+        targetRows.clear(); targetRows.add(target("2026-11", "500", 1));
+      }
+      return 1;
+    });
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "500").put("revision", 0);
+    var saved = mapper.valueToTree(service.saveTarget(body, manager));
+    assertEquals("manual", saved.path("source").asText());
+    assertEquals("500.00", saved.path("manualAmount").asText());
+    var sequence = inOrder(db, jdbc);
+    sequence.verify(db).rows(contains("FROM sales_targets WHERE month_key=? FOR UPDATE"), eq("2026-11"));
+    sequence.verify(jdbc).update(startsWith("INSERT IGNORE INTO dashboard_targets"), eq("2026-11"));
+    sequence.verify(db).rows(contains("FROM dashboard_targets WHERE month_key=? FOR UPDATE"), eq("2026-11"));
+    verify(db, times(1)).rows(contains("FROM sales_targets"), any(Object[].class));
+    verify(jdbc, never()).update(contains("sales_targets"), any(Object[].class));
   }
 
   @Test void invalidTargetAmountsAndRevisionsAreRejectedBeforeAnyWrite() {

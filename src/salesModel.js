@@ -25,3 +25,30 @@ export function salesTargetStatus(amount){
  if(amount===null||amount===undefined||amount==='')return'未设置';
  return Number(amount)===0?'目标为零':'已设置';
 }
+
+export const salesTargetDepartmentStates=[
+ {status:'unassigned',label:'未分配部门'},
+ {status:'unmatched',label:'人员未匹配'},
+ {status:'ambiguous',label:'人员重名待确认'}
+];
+
+export function salesTargetDepartmentStatus(row){
+ const status=row?.departmentStatus;
+ if(status==='assigned'||(!status&&row?.departmentId&&row?.department))
+  return typeof row?.departmentId==='string'&&row.departmentId&&typeof row?.department==='string'&&row.department?'assigned':'unassigned';
+ return salesTargetDepartmentStates.some(item=>item.status===status)?status:'unassigned';
+}
+
+export function salesTargetDepartmentLabel(row){
+ const status=salesTargetDepartmentStatus(row);
+ return status==='assigned'?row.department:salesTargetDepartmentStates.find(item=>item.status===status).label;
+}
+
+export function matchesSalesTargetFilters(row,{query='',department=''}={}){
+ const owner=typeof row?.owner==='string'?row.owner:'';
+ if(!owner.toLocaleLowerCase().includes(String(query).trim().toLocaleLowerCase()))return false;
+ if(!department)return true;
+ const status=salesTargetDepartmentStatus(row);
+ if(department.startsWith('department:'))return status==='assigned'&&row.departmentId===department.slice('department:'.length);
+ return department.startsWith('status:')&&status===department.slice('status:'.length);
+}

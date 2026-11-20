@@ -55,6 +55,12 @@ export function sumDashboardMoney(values){
  return(negative?'-':'')+String(absolute/100n)+'.'+String(absolute%100n).padStart(2,'0');
 }
 
+export function summarizeSalesTargets(rows){
+ const configured=(Array.isArray(rows)?rows:[]).filter(row=>typeof row?.owner==='string'&&row.owner.trim()&&row.amount!==null&&row.amount!==undefined);
+ if(!configured.length)return{amount:null,personCount:0};
+ return{amount:configured.every(row=>validTargetAmount(row.amount))?sumDashboardMoney(configured.map(row=>row.amount)):null,personCount:configured.length};
+}
+
 export function dashboardTime(value){
  const date=new Date(value);
  return Number.isNaN(date.getTime())?'—':date.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});

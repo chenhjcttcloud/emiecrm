@@ -29,6 +29,8 @@ class SalesServiceTest {
   private List<Map<String, Object>> links;
   private List<Map<String, Object>> targetRows;
   private List<Map<String, Object>> users;
+  private List<Map<String, Object>> userDepartments;
+  private List<Map<String, Object>> departments;
 
   @BeforeEach void setup() {
     state = mapper.createObjectNode(); state.putArray("orders");
@@ -37,6 +39,7 @@ class SalesServiceTest {
         .put("model", "型号甲").put("cost", "999.99");
     receipts = new ArrayList<>(); shipments = new ArrayList<>(); links = new ArrayList<>();
     targetRows = new ArrayList<>(); users = new ArrayList<>();
+    userDepartments = new ArrayList<>(); departments = new ArrayList<>();
     db = mock(CrmRepository.class); jdbc = mock(JdbcTemplate.class);
     when(db.jdbc()).thenReturn(jdbc);
     when(db.state(false)).thenAnswer(call -> state.deepCopy());
@@ -51,6 +54,8 @@ class SalesServiceTest {
       if (sql.contains("FROM jst_shipments")) return List.copyOf(shipments);
       if (sql.contains("FROM jst_document_sales")) return List.copyOf(links);
       if (sql.contains("FROM sales_targets")) return List.copyOf(targetRows);
+      if (sql.contains("LEFT JOIN departments")) return List.copyOf(userDepartments);
+      if (sql.contains("FROM departments")) return List.copyOf(departments);
       if (sql.contains("FROM users")) return List.copyOf(users);
       return List.of();
     });
@@ -381,5 +386,117 @@ class SalesServiceTest {
     var company = mapper.valueToTree(new DashboardService(db).sales("2026-11", "", "",
         new Actor("dashboard", "经营看板", Set.of("dashboard.read"))));
     money("60", company.path("summary").path("orderAmount"));
+  }
+
+  private Map<String, Object> accountDepartment(String owner, String id, String name) {
+    var row = new LinkedHashMap<String, Object>();
+    row.put("owner", owner); row.put("departmentId", id); row.put("department", name);
+    return row;
+  }
+
+  private JsonNode ownerRow(JsonNode report, String owner) {
+    for (var row : report.path("rows")) if (owner.equals(row.path("owner").asText())) return row;
+    throw new AssertionError("Missing owner " + owner);
+  }
+
+  @Test void personnelTargetsExposeOnlyTheUniquelyMatchedCurrentDepartmentToBusinessReaders() {
+    order("assigned", "21", "6"); targetRows.add(target("小王", "100", 4));
+    users.add(Map.of("owner", "小王"));
+    var account = accountDepartment("小王", "d1", "销售一部");
+    account.put("email", "private@example.invalid"); account.put("phone", "private-phone");
+    userDepartments.add(account); departments.add(Map.of("id", "d1", "name", "销售一部"));
+    var report = targets(); var row = ownerRow(report, "小王");
+    assertEquals("assigned", row.path("departmentStatus").asText());
+    assertEquals("d1", row.path("departmentId").asText()); assertEquals("销售一部", row.path("department").asText());
+    assertEquals("100.00", row.path("amount").asText()); assertEquals(4, row.path("revision").asInt());
+    money("21", row.path("orderAmount")); money("6", row.path("settledAmount")); money("79", row.path("remaining"));
+    assertEquals("小王", report.path("options").path("owners").get(0).asText());
+    assertEquals("d1", report.path("options").path("departments").get(0).path("id").asText());
+    assertFalse(report.toString().contains("private@example.invalid")); assertFalse(report.toString().contains("private-phone"));
+    verify(db).rows(eq("SELECT COALESCE(p.display_name,u.name) AS owner,d.id AS departmentId,d.name AS department FROM users u LEFT JOIN user_profiles p ON p.name=u.name LEFT JOIN departments d ON d.id=p.department_id"));
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void namesakesNeverReceiveAnArbitraryDepartmentEvenWhenTheyShareTheSameDepartment() {
+    order("namesake", "20", "10"); targetRows.add(target("小王", "100", 2));
+    users.add(Map.of("owner", "小王")); users.add(Map.of("owner", "小王"));
+    userDepartments.add(accountDepartment("小王", "d1", "一部"));
+    userDepartments.add(accountDepartment("小王", "d2", "二部"));
+    var report = targets(); var ambiguous = ownerRow(report, "小王");
+    assertEquals("ambiguous", ambiguous.path("departmentStatus").asText());
+    assertTrue(ambiguous.path("departmentId").isNull()); assertTrue(ambiguous.path("department").isNull());
+    assertEquals(1, report.path("rows").size()); assertEquals(1, report.path("options").path("owners").size());
+    money("100", ambiguous.path("amount")); money("20", ambiguous.path("orderAmount"));
+    userDepartments.set(1, accountDepartment("小王", "d1", "一部"));
+    var sameDepartment = ownerRow(targets(), "小王");
+    assertEquals("ambiguous", sameDepartment.path("departmentStatus").asText());
+    assertTrue(sameDepartment.path("departmentId").isNull()); assertTrue(sameDepartment.path("department").isNull());
+    assertEquals(2, sameDepartment.path("revision").asInt());
+  }
+
+  @Test void unassignedAccountsAndUnmatchedHistoricalSignersAreKeptDistinct() {
+    order("historic", "10", "0").put("owner", "历史签单人");
+    users.add(Map.of("owner", "无部门账户")); users.add(Map.of("owner", "无资料账户"));
+    users.add(Map.of("owner", "部门关联已失效"));
+    userDepartments.add(accountDepartment("无部门账户", null, null));
+    userDepartments.add(accountDepartment("无资料账户", null, null));
+    userDepartments.add(accountDepartment("部门关联已失效", null, null));
+    var report = targets();
+    assertEquals("unmatched", ownerRow(report, "历史签单人").path("departmentStatus").asText());
+    for (String name : List.of("无部门账户", "无资料账户", "部门关联已失效")) {
+      var row = ownerRow(report, name);
+      assertEquals("unassigned", row.path("departmentStatus").asText());
+      assertTrue(row.path("departmentId").isNull()); assertTrue(row.path("department").isNull());
+    }
+    assertTrue(report.path("options").path("departments").isEmpty());
+  }
+
+  @Test void disabledDepartmentsRemainVisibleAsCurrentAffiliationsAndFilterOptions() {
+    order("disabled-department", "20", "10");
+    userDepartments.add(accountDepartment("小王", "disabled", "已停用部门"));
+    departments.add(Map.of("id", "disabled", "name", "已停用部门", "status", "停用"));
+    var report = targets(); var row = ownerRow(report, "小王");
+    assertEquals("assigned", row.path("departmentStatus").asText());
+    assertEquals("disabled", row.path("departmentId").asText()); assertEquals("已停用部门", row.path("department").asText());
+    assertEquals("disabled", report.path("options").path("departments").get(0).path("id").asText());
+    assertEquals("已停用部门", report.path("options").path("departments").get(0).path("name").asText());
+    assertEquals(2, report.path("options").path("departments").get(0).size());
+    verify(db).rows(eq("SELECT id,name FROM departments ORDER BY name,id"));
+  }
+
+  @Test void departmentMovesAndRenamesAreResolvedFreshWithoutMovingTargetsBetweenOwners() {
+    order("moved", "20", "10"); targetRows.add(target("小王", "100", 8));
+    userDepartments.add(accountDepartment("小王", "d1", "原部门"));
+    assertEquals("d1", ownerRow(targets(), "小王").path("departmentId").asText());
+    userDepartments.set(0, accountDepartment("小王", "d2", "现部门"));
+    var moved = ownerRow(targets(), "小王");
+    assertEquals("d2", moved.path("departmentId").asText()); assertEquals("现部门", moved.path("department").asText());
+    assertEquals("小王", moved.path("owner").asText()); assertEquals(8, moved.path("revision").asInt());
+    money("100", moved.path("amount")); money("20", moved.path("orderAmount"));
+    userDepartments.set(0, accountDepartment("改名后的人员", "d2", "现部门"));
+    var historicalName = ownerRow(targets(), "小王");
+    assertEquals("unmatched", historicalName.path("departmentStatus").asText());
+    assertTrue(historicalName.path("departmentId").isNull()); money("100", historicalName.path("amount"));
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void departmentMatchingUsesExactOwnerStringsRatherThanCaseFoldingOrAliases() {
+    order("upper", "10", "0").put("owner", "ALICE");
+    order("lower", "20", "0").put("owner", "alice");
+    userDepartments.add(accountDepartment("ALICE", "upper-dept", "大写账户部门"));
+    userDepartments.add(accountDepartment("alice", "lower-dept", "小写账户部门"));
+    var report = targets();
+    assertEquals("upper-dept", ownerRow(report, "ALICE").path("departmentId").asText());
+    assertEquals("lower-dept", ownerRow(report, "alice").path("departmentId").asText());
+    assertEquals("assigned", ownerRow(report, "ALICE").path("departmentStatus").asText());
+    assertEquals("assigned", ownerRow(report, "alice").path("departmentStatus").asText());
+    assertEquals(2, report.path("rows").size());
+  }
+
+  @Test void departmentMetadataStillRequiresBusinessReadBeforeAnyDirectoryQuery() {
+    clearInvocations(db, jdbc);
+    var dashboardOnly = new Actor("dashboard", "看板观察员", Set.of("dashboard.read"));
+    assertEquals(403, assertThrows(ApiException.class, () -> service.targets("2026-11", dashboardOnly)).status());
+    verifyNoInteractions(db, jdbc);
   }
 }

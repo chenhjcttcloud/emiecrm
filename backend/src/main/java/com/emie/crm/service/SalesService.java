@@ -22,6 +22,7 @@ public class SalesService {
   private static final BigDecimal ZERO = new BigDecimal("0.00");
   private static final String TARGETS = "SELECT month_key,owner,amount,revision,updated_at,updated_by FROM sales_targets WHERE month_key=?";
   private static final String OWNERS = "SELECT COALESCE(p.display_name,u.name) AS owner FROM users u LEFT JOIN user_profiles p ON p.name=u.name ORDER BY owner";
+  private static final String OWNER_DEPARTMENTS = "SELECT COALESCE(p.display_name,u.name) AS owner,d.id AS departmentId,d.name AS department FROM users u LEFT JOIN user_profiles p ON p.name=u.name LEFT JOIN departments d ON d.id=p.department_id";
   private final CrmRepository db;
   private final DashboardService dashboard;
   @Value("${CRM_JST_ENV:sandbox}") private String environment = "sandbox";
@@ -364,6 +365,27 @@ public class SalesService {
     return row;
   }
 
+  private static void department(Map<String, Object> target, List<Map<String, Object>> accounts) {
+    target.put("departmentId", null);
+    target.put("department", null);
+    if (accounts == null || accounts.isEmpty()) {
+      target.put("departmentStatus", "unmatched");
+    } else if (accounts.size() > 1) {
+      // Display names are not account IDs: even identical departments cannot disambiguate namesakes.
+      target.put("departmentStatus", "ambiguous");
+    } else {
+      var account = accounts.getFirst();
+      String id = Objects.toString(account.get("departmentId"), "");
+      String name = Objects.toString(account.get("department"), "");
+      if (id.isBlank() || name.isBlank()) {
+        target.put("departmentStatus", "unassigned");
+      } else {
+        target.put("departmentId", id); target.put("department", name);
+        target.put("departmentStatus", "assigned");
+      }
+    }
+  }
+
   @Transactional(readOnly = true)
   @SuppressWarnings("unchecked")
   public Map<String, Object> targets(String selectedMonth, Actor actor) {
@@ -375,6 +397,15 @@ public class SalesService {
     stored.forEach(row -> configured.put(row.get("owner").toString(), row));
     var report = dashboard.salesReport(key, "", "");
     var warnings = new LinkedHashSet<String>((Collection<String>) report.get("warnings"));
+    var departmentsByOwner = new HashMap<String, List<Map<String, Object>>>();
+    for (var account : db.rows(OWNER_DEPARTMENTS)) {
+      String owner = Objects.toString(account.get("owner"), "");
+      if (!owner.isBlank()) departmentsByOwner.computeIfAbsent(owner, ignored -> new ArrayList<>()).add(account);
+    }
+    // Include disabled departments as current affiliations; their historical targets remain visible.
+    var departments = db.rows("SELECT id,name FROM departments ORDER BY name,id").stream()
+        .map(row -> Map.of("id", Objects.toString(row.get("id"), ""), "name", Objects.toString(row.get("name"), "")))
+        .filter(row -> !row.get("id").isBlank()).toList();
     var achieved = new HashMap<String, BigDecimal>(); var settled = new HashMap<String, BigDecimal>();
     for (var order : (List<Map<String, Object>>) report.get("orders")) {
       String owner = Objects.toString(order.get("owner"), "");
@@ -389,6 +420,7 @@ public class SalesService {
     var rows = new ArrayList<Map<String, Object>>();
     for (String owner : owners) {
       var row = target(key, owner, configured.get(owner));
+      department(row, departmentsByOwner.get(owner));
       var orderAmount = achieved.getOrDefault(owner, ZERO); var settledAmount = settled.getOrDefault(owner, ZERO);
       var goal = row.get("amount") == null ? null : new BigDecimal(row.get("amount").toString());
       row.put("orderAmount", money(orderAmount)); row.put("settledAmount", money(settledAmount));
@@ -396,7 +428,7 @@ public class SalesService {
       row.put("progress", goal == null || goal.signum() == 0 ? null : orderAmount.multiply(new BigDecimal("100")).divide(goal, 2, RoundingMode.HALF_UP));
       rows.add(row);
     }
-    return Map.of("month", key, "rows", rows, "options", Map.of("owners", owners), "warnings", new ArrayList<>(warnings));
+    return Map.of("month", key, "rows", rows, "options", Map.of("owners", owners, "departments", departments), "warnings", new ArrayList<>(warnings));
   }
 
   @Transactional

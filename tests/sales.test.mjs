@@ -15,6 +15,8 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
   let token='',originalState;
   const snapshots=new Map(),tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets'];
   const suffix=Date.now().toString(36),users=['sales-read-'+suffix,'sales-target-'+suffix],roles=['销售只读测试'+suffix,'销售目标测试'+suffix];
+  const departmentIds=['sales-dept-a-'+suffix,'sales-dept-b-'+suffix],departmentNames=['销售测试一部'+suffix,'销售测试二部'+suffix];
+  const departmentUsers=['sales-person-one-'+suffix,'sales-person-two-'+suffix];
   async function request(path,body,expected=200,auth=token){
     const response=await fetch(base+'/api/'+path,{method:body===undefined?'GET':'POST',
       headers:{'Content-Type':'application/json',...(auth?{Authorization:'Bearer '+auth}:{})},
@@ -64,6 +66,9 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     for(const row of receipts)await pool.query('INSERT INTO receipts(id,payload) VALUES(?,?)',[row.id,JSON.stringify(row)]);
     await pool.query('INSERT INTO dashboard_targets(month_key,amount,revision,updated_at,updated_by) VALUES(?,?,1,?,?)',
       ['2026-11','777.00','2026-11-20T01:00:00Z','admin']);
+    const [receiptBaseline]=await pool.query('SELECT id,payload FROM receipts ORDER BY id');
+    const beforePersonnel=(await request('dashboard/sales?month=2026-11')).target;
+    assert.equal(beforePersonnel.amount,'777.00'); assert.equal(beforePersonnel.source,'manual');
 
     const items=await request('sales/items?month=2026-11&pageSize=2');
     assert.equal(items.total,6); assert.equal(items.rows.length,2);
@@ -121,10 +126,61 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     const wang=progress.rows.find(row=>row.owner==='销售王'),li=progress.rows.find(row=>row.owner==='销售李');
     assert.equal(wang.orderAmount,'21.00'); assert.equal(wang.settledAmount,'6.00'); assert.equal(wang.remaining,'79.00'); assert.equal(Number(wang.progress),21);
     assert.equal(li.orderAmount,'20.00'); assert.equal(li.settledAmount,'20.00'); assert.equal(li.remaining,'0.00'); assert.equal(Number(li.progress),200);
+    const companyWithPersonnel=(await request('dashboard/sales?month=2026-11')).target;
+    assert.equal(companyWithPersonnel.amount,'110.00'); assert.equal(companyWithPersonnel.source,'personnel');
+    assert.equal(companyWithPersonnel.personCount,2); assert.equal(companyWithPersonnel.manualAmount,'777.00');
+
+    // Department attribution follows current CRM profiles; owner text is never guessed when ambiguous.
+    const financialFields=['owner','amount','revision','orderAmount','settledAmount','remaining','progress'];
+    const finances=row=>Object.fromEntries(financialFields.map(field=>[field,row[field]]));
+    const financialBaseline=[wang,li].map(finances);
+    const viewerPermissions=(await request('me',undefined,200,viewer)).permissions.sort();
+    assert.deepEqual(viewerPermissions,['business.read']);
+    const unmatched=progress.rows.find(row=>row.owner==='销售李');
+    assert.equal(unmatched.departmentStatus,'unmatched'); assert.equal(unmatched.departmentId,null); assert.equal(unmatched.department,null);
+    const unassigned=progress.rows.find(row=>row.owner===roles[0]);
+    assert.equal(unassigned.departmentStatus,'unassigned'); assert.equal(unassigned.departmentId,null); assert.equal(unassigned.department,null);
+    for(let index=0;index<departmentIds.length;index++)await pool.query('INSERT INTO departments(id,name,manager,status) VALUES(?,?,?,?)',
+      [departmentIds[index],departmentNames[index],'','启用']);
+    async function readDepartmentTarget(){
+      const result=await request('sales/targets?month=2026-11',undefined,200,viewer);
+      assert.deepEqual(['销售王','销售李'].map(owner=>finances(result.rows.find(row=>row.owner===owner))),financialBaseline,
+        '部门归属变更不得改变个人目标、业绩、回款和完成率');
+      for(let index=0;index<departmentIds.length;index++)assert.ok(result.options.departments.some(department=>
+        department.id===departmentIds[index]&&department.name===departmentNames[index]));
+      const company=(await request('dashboard/sales?month=2026-11')).target;
+      for(const field of ['amount','source','personCount','manualAmount'])assert.equal(company[field],companyWithPersonnel[field],
+        '部门归属不得改变公司目标汇总');
+      return result.rows.find(row=>row.owner==='销售王');
+    }
+    await request('system/users',{action:'create',name:departmentUsers[0],displayName:'销售王',role:roles[0],
+      departmentId:departmentIds[0],status:'启用',password:'sales-test-password'});
+    const assigned=await readDepartmentTarget();
+    assert.equal(assigned.departmentStatus,'assigned'); assert.equal(assigned.departmentId,departmentIds[0]); assert.equal(assigned.department,departmentNames[0]);
+    await request('system/users',undefined,403,viewer);
+    await request('system/users',{action:'create',name:departmentUsers[1],displayName:'销售王',role:roles[0],
+      departmentId:departmentIds[1],status:'启用',password:'sales-test-password'});
+    const ambiguous=await readDepartmentTarget();
+    assert.equal(ambiguous.departmentStatus,'ambiguous'); assert.equal(ambiguous.departmentId,null); assert.equal(ambiguous.department,null);
+    await request('system/users',{action:'update',name:departmentUsers[1],displayName:'部门二成员'+suffix,role:roles[0],
+      departmentId:departmentIds[1],status:'启用'});
+    const resolved=await readDepartmentTarget();
+    assert.equal(resolved.departmentStatus,'assigned'); assert.equal(resolved.departmentId,departmentIds[0]); assert.equal(resolved.department,departmentNames[0]);
+    await request('system/users',{action:'update',name:departmentUsers[0],displayName:'销售王',role:roles[0],
+      departmentId:departmentIds[1],status:'启用'});
+    const moved=await readDepartmentTarget();
+    assert.equal(moved.departmentStatus,'assigned'); assert.equal(moved.departmentId,departmentIds[1]); assert.equal(moved.department,departmentNames[1]);
+    assert.deepEqual((await request('me',undefined,200,viewer)).permissions.sort(),viewerPermissions);
+
     await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'0',revision:1},200,manager);
     const zero=(await request('sales/targets?month=2026-11')).rows.find(row=>row.owner==='销售王');
     assert.equal(zero.amount,'0.00'); assert.equal(zero.progress,null);
-    assert.equal((await request('dashboard/sales?month=2026-11')).target.amount,'777.00','人员目标不得覆盖公司目标');
+    const effectiveCompany=(await request('dashboard/sales?month=2026-11')).target;
+    assert.equal(effectiveCompany.amount,'10.00','公司有效目标应随人员目标修改立即汇总');
+    assert.equal(effectiveCompany.source,'personnel'); assert.equal(effectiveCompany.manualAmount,'777.00');
+    const [manualCompany]=await pool.query('SELECT amount,revision FROM dashboard_targets WHERE month_key=?',['2026-11']);
+    assert.equal(manualCompany[0].amount,'777.00','自动汇总不得改写历史公司手工目标');
+    assert.equal(manualCompany[0].revision,1);
     await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'100',revision:1},409,manager);
     await request('sales/targets',{month:'2026-11',owner:'不存在的用户',amount:'100',revision:0},400,manager);
     for(const amount of ['-1','0.001','1000000000000','NaN'])await request('sales/targets',{month:'2026-11',owner:'销售王',amount,revision:2},400,manager);
@@ -133,6 +189,11 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     assert.deepEqual(concurrent.map(response=>response.status).sort(),[200,409]);
     const event=(await request('system/audit')).find(event=>event.user===users[1]&&event.details?.type==='SALES_TARGET_CHANGED'&&event.details.month==='2026-12');
     assert.ok(event); assert.equal(event.details.owner,'销售王'); assert.equal(event.details.before.revision,0); assert.equal(event.details.after.revision,1);
+    const december=(await request('dashboard/sales?month=2026-12')).target;
+    assert.equal(december.source,'personnel'); assert.equal(december.personCount,1);
+    assert.ok(['0.01','0.02'].includes(december.amount));
+    const [receiptAfter]=await pool.query('SELECT id,payload FROM receipts ORDER BY id');
+    assert.deepEqual(receiptAfter,receiptBaseline,'人员目标维护不得改写收款流水');
     const [stored]=await pool.query('SELECT payload FROM state WHERE id=1');
     assert.deepEqual(JSON.parse(stored[0].payload),fixture,'销售读取和目标维护不得改写原始业务数据');
   }finally{
@@ -142,9 +203,10 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
         await connection.beginTransaction();
         for(const table of tables)if(snapshots.has(table))await restoreTable(connection,table,snapshots.get(table));
         if(originalState!==undefined)await connection.query('UPDATE state SET payload=? WHERE id=1',[originalState]);
-        for(const user of users){await connection.query('DELETE FROM feishu_identities WHERE user_name=?',[user]);
+        for(const user of [...users,...departmentUsers]){await connection.query('DELETE FROM feishu_identities WHERE user_name=?',[user]);
           await connection.query('DELETE FROM user_profiles WHERE name=?',[user]);await connection.query('DELETE FROM users WHERE name=?',[user])}
         for(const role of roles)await connection.query('DELETE FROM roles WHERE name=?',[role]);
+        for(const departmentId of departmentIds)await connection.query('DELETE FROM departments WHERE id=?',[departmentId]);
         await connection.commit();
       }catch(error){await connection.rollback();throw error}finally{connection.release()}
     }finally{await pool.end()}
