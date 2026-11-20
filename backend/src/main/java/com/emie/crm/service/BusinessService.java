@@ -71,6 +71,7 @@ public class BusinessService {
             "记录ID无效或重复");
     }
     CustomerExternalLinks.validate(n.path("customers"));
+    LegacyCustomerData.validate(n.path("customers"));
   }
 
   private Map<String, JsonNode> index(JsonNode nodes) {
@@ -220,6 +221,17 @@ public class BusinessService {
 
   @Transactional
   public JsonNode save(JsonNode body, Actor actor) {
+    return save(body, actor, false);
+  }
+
+  /** Only the audited offline migration service may add historical credit and provenance. */
+  JsonNode saveLegacyMigration(JsonNode body, Actor actor) {
+    actor.require("system.manage");
+    actor.require("payment.write");
+    return save(body, actor, true);
+  }
+
+  private JsonNode save(JsonNode body, Actor actor, boolean migration) {
     actor.require("business.read");
     actor.require("business.write");
     var old = db.state(true);
@@ -238,6 +250,14 @@ public class BusinessService {
     customersByName(next);
     var oldCustomers = index(old.path("customers"));
     var nextCustomers = index(next.path("customers"));
+    for (var c : next.path("customers")) {
+      var prior = oldCustomers.get(c.path("id").asText());
+      for (String field : LegacyCustomerData.PROTECTED_FIELDS) {
+        var before = prior == null ? MissingNode.getInstance() : prior.path(field);
+        if (migration && before.isMissingNode()) continue;
+        require(same(before, c.path(field)), "期初余额及旧系统来源只能通过专用迁移写入，不能修改或移除");
+      }
+    }
     var nameCounts = new HashMap<String, Integer>();
     for (var c : next.path("customers")) nameCounts.merge(c.path("name").asText(), 1, Integer::sum);
     for (var c : next.path("customers")) {
@@ -415,7 +435,7 @@ public class BusinessService {
     for (var customer : next.path("customers")) {
       String id = customer.path("id").asText();
       var prior = oldCustomers.get(id);
-      BigDecimal balance = balances.getOrDefault(id, BigDecimal.ZERO);
+      BigDecimal balance = LegacyCustomerData.opening(customer).add(balances.getOrDefault(id, BigDecimal.ZERO));
       if (prior != null && unresolvedNames.contains(prior.path("name").asText()))
         balance = money(prior.path("balance"), true);
       require(balance.signum() >= 0, "客户预收款余额不足");
@@ -532,6 +552,44 @@ public class BusinessService {
     } else if (node.isArray()) node.forEach(child -> collectSettlements(child, ids));
   }
 
+  private void protectLegacyRestore(JsonNode old, JsonNode next, JsonNode backupReceipts) {
+    var currentRefs = references(old);
+    var restoredCustomers = index(next.path("customers"));
+    var restoredReceipts = index(backupReceipts);
+    var historical = db.documents("receipts", false, 0).stream().map(r -> normalizeReceipt(r, currentRefs)).toList();
+    var legacyIds = new HashSet<String>();
+    for (var customer : old.path("customers")) {
+      if (!customer.has("legacySource") && !customer.has("openingBalance")) continue;
+      String id = customer.path("id").asText(); legacyIds.add(id);
+      var saved = restoredCustomers.get(id);
+      boolean hasHistory = historical.stream().anyMatch(r -> belongsTo(r, customer));
+      require(saved != null || (LegacyCustomerData.opening(customer).signum() == 0 && !hasHistory),
+          "备份缺少已有期初余额或收款历史的旧客户，请使用最新备份");
+      if (saved == null) continue;
+      for (String field : LegacyCustomerData.PROTECTED_FIELDS)
+        require(same(customer.path(field), saved.path(field)), "备份缺少或修改了旧客户期初余额及来源，请使用最新备份");
+    }
+    for (var current : historical) {
+      if (!legacyIds.contains(current.path("customerId").asText())) continue;
+      var saved = restoredReceipts.get(current.path("id").asText());
+      require(saved != null && sameRecord(current, normalizeReceipt(saved, currentRefs)),
+          "备份缺少或修改了旧客户收款及核销流水，请使用最新备份");
+    }
+    var restoredOrders = index(next.path("orders"));
+    for (var current : old.path("orders")) {
+      String id = current.path("customerId").asText();
+      if (id.isBlank()) {
+        var customer = currentRefs.names().get(current.path("customer").asText());
+        if (customer != null) id = customer.path("id").asText();
+      }
+      if (!legacyIds.contains(id) || money(current.path("paid"), true).signum() == 0) continue;
+      var saved = restoredOrders.getOrDefault(current.path("id").asText(), NullNode.instance);
+      require(!saved.isNull() && !coreChanged(current, saved) && same(current.path("paid"), saved.path("paid"))
+          && same(current.path("status"), saved.path("status")),
+          "备份早于旧客户订单的最新收款或核销，请使用最新备份");
+    }
+  }
+
   @Transactional
   public void restore(JsonNode body, Actor actor) {
     require(body.path("version").asInt() == 1 && body.path("receipts").isArray(), "备份格式无效");
@@ -541,6 +599,7 @@ public class BusinessService {
     var old = db.state(true);
     protectShipmentRestore(body);
     ObjectNode next = body.path("state").deepCopy();
+    protectLegacyRestore(old, next, body.path("receipts"));
     var restoredOrders = index(next.path("orders"));
     protectSubmittedOrders(restoredOrders);
     for (var current : old.path("orders")) {
@@ -619,6 +678,23 @@ public class BusinessService {
       if (JushuitanDocumentService.isSettlement(order))
         require(money(order.path("paid"), true).compareTo(settlementPayments.getOrDefault(
             order.path("id").asText(), BigDecimal.ZERO)) == 0, "备份中的结算总单和收款流水金额不一致");
+    // Opening credit travels with the JSON backup; it never becomes a synthetic receipt.
+    var openingDeltas = new HashMap<String, BigDecimal>();
+    var restoredRefs = references(next);
+    for (var receipt : body.path("receipts")) {
+      var normalized = normalizeReceipt(receipt, restoredRefs);
+      String id = normalized.path("customerId").asText();
+      BigDecimal delta = BigDecimal.ZERO;
+      if (normalized.path("type").asText().equals("预收款订单")) delta = delta.add(receiptAmount(normalized));
+      if (normalized.path("method").asText().equals("预收款核销")) delta = delta.subtract(receiptAmount(normalized));
+      openingDeltas.merge(id, delta, BigDecimal::add);
+    }
+    for (var customer : next.path("customers")) {
+      if (!customer.has("openingBalance")) continue;
+      var expected = LegacyCustomerData.opening(customer).add(openingDeltas.getOrDefault(customer.path("id").asText(), BigDecimal.ZERO));
+      require(expected.signum() >= 0 && money(customer.path("balance"), false).compareTo(expected) == 0,
+          "备份中的客户余额与期初余额及预收款流水不一致");
+    }
     JushuitanDocumentBackup.restoreLinks(db, body.path("jstDocumentLinks"), restoredOrders, shipmentsToImport, old);
     assets.restore(body.path("assets"));
     assets.externalize(next);

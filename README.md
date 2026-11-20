@@ -38,5 +38,6 @@ docker compose ps
 ## 聚水潭对接
 
 - [客户批量导入与编号关联](docs/CUSTOMER-IMPORT.md)
+- [旧系统客户及期初预收款迁移](docs/LEGACY-CUSTOMER-MIGRATION.md)
 - [使用及部署说明](docs/JUSHUITAN.md)
 - [正式环境接口开通与验收清单](docs/JUSHUITAN-PRODUCTION-API-CHECKLIST.md)（6项必需、2项辅助，正式权限尚待核对）
