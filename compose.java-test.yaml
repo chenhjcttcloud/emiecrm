@@ -31,12 +31,13 @@ services:
       CRM_DB_NAME: emiecrm_java_test
       CRM_DB_USER: emiecrm
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      CRM_JST_ENV: ${CRM_JST_ENV:-sandbox}
     depends_on:
       java-test:
         condition: service_healthy
     networks:
       - crm
-    command: ['node','--test','tests/crm.test.mjs']
+    command: ['node','--test','--test-concurrency=1','tests/crm.test.mjs','tests/dashboard.test.mjs','tests/sales.test.mjs']
 networks:
   crm:
     external: true

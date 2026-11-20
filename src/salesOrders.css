@@ -1,0 +1,20 @@
+/* Keep the richer sales columns readable; scroll the table instead of shrinking labels. */
+.sales-order-type-select{height:36px;max-width:165px;min-width:0;padding:0 10px;border:1px solid #e4e9f3;border-radius:8px;background:#fff;color:#7b8ba5;font-size:12px}
+.data-table.sales-orders-table{min-width:2340px;table-layout:fixed}
+.data-table.sales-orders-table th:nth-child(1){width:188px}
+.data-table.sales-orders-table th:nth-child(2){width:120px}
+.data-table.sales-orders-table th:nth-child(3){width:112px}
+.data-table.sales-orders-table th:nth-child(4){width:108px}
+.data-table.sales-orders-table th:nth-child(5){width:210px}
+.data-table.sales-orders-table th:nth-child(6),.data-table.sales-orders-table th:nth-child(8),.data-table.sales-orders-table th:nth-child(9){width:150px}
+.data-table.sales-orders-table th:nth-child(7){width:120px}
+.data-table.sales-orders-table th:nth-child(10){width:220px}
+.data-table.sales-orders-table th:nth-child(11){width:112px}
+.data-table.sales-orders-table th:nth-child(12),.data-table.sales-orders-table th:nth-child(13){width:176px}
+.data-table.sales-orders-table th:nth-child(14){width:160px}
+.data-table.sales-orders-table th:nth-child(15){width:180px}
+.data-table.sales-orders-table th:last-child,.data-table.sales-orders-table td:last-child{overflow:visible}
+
+.sales-order-toolbar{flex-wrap:wrap}
+.sales-order-toolbar>.toolbar-actions{max-width:100%;flex-wrap:wrap}
+.sales-order-toolbar>.toolbar-actions:first-child{margin-left:0}

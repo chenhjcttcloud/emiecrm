@@ -1,0 +1,7 @@
+.sales-receipts .sales-receipts-table{width:100%;min-width:1750px;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+.sales-receipts .sales-receipts-table th,.sales-receipts .sales-receipts-table td{padding:14px 16px;text-align:left;border-bottom:1px solid #edf1f6;color:#6e7e96;white-space:nowrap;vertical-align:middle}
+.sales-receipts .sales-receipts-table th{height:44px;padding:11px 16px;background:#f8fafd;color:#93a0b3;font-size:11px;font-weight:500}
+.sales-receipts .sales-receipts-table tbody tr:last-child td{border-bottom:0}
+.sales-receipts .sales-receipts-table tbody tr:hover{background:#fafcff}
+.sales-receipts .sales-receipts-table td:nth-child(2){min-width:160px;max-width:270px;white-space:normal;overflow-wrap:anywhere}
+.sales-receipts .sales-receipts-table .sales-refund{color:#b47a7d!important}

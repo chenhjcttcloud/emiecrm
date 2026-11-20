@@ -24,6 +24,8 @@ public class SystemService implements ApplicationRunner {
     p.put("payment.write", "登记收款与核销");
     p.put("system.manage", "管理系统设置");
     p.put("data.backup", "备份与恢复业务数据");
+    p.put("dashboard.read", "查看经营看板");
+    p.put("dashboard.targets.manage", "管理业绩目标");
     PERMISSIONS = Collections.unmodifiableMap(p);
   }
 
@@ -51,6 +53,11 @@ public class SystemService implements ApplicationRunner {
     seed("财务", "维护业务数据，登记收款与核销", List.of("business.read", "business.write", "payment.write"));
     seed("待授权", "飞书新成员，等待管理员分配角色", List.of());
     seed("销售", "维护客户、产品及订单", List.of("business.read", "business.write"));
+    // Existing administrators receive newly introduced module permissions as well.
+    // Other roles retain their configured grants and can be assigned these separately.
+    for (String permission : List.of("dashboard.read", "dashboard.targets.manage"))
+      db.jdbc().update("UPDATE roles SET permissions=JSON_ARRAY_APPEND(permissions,'$',?) WHERE name='管理员' AND NOT JSON_CONTAINS(permissions,JSON_QUOTE(?))",
+          permission, permission);
   }
 
   private void seed(String name, String desc, List<String> ps) {

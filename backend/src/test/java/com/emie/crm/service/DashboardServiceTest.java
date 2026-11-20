@@ -1,0 +1,326 @@
+package com.emie.crm.service;
+
+import com.emie.crm.common.exception.ApiException;
+import com.emie.crm.repository.CrmRepository;
+import com.emie.crm.security.Actor;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.math.BigDecimal;
+import java.util.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class DashboardServiceTest {
+  private final ObjectMapper mapper = new ObjectMapper();
+  private final Actor reader = new Actor("reader", "看板观察员", Set.of("dashboard.read"));
+  private final Actor manager = new Actor("manager", "目标管理员", Set.of("dashboard.targets.manage"));
+  private CrmRepository db;
+  private JdbcTemplate jdbc;
+  private DashboardService service;
+  private ObjectNode state;
+  private List<JsonNode> receipts;
+  private List<Map<String, Object>> shipments;
+  private List<Map<String, Object>> links;
+  private List<Map<String, Object>> targetRows;
+
+  @BeforeEach void setup() {
+    state = mapper.createObjectNode();
+    state.putArray("orders");
+    state.putArray("customers").addObject().put("id", "c1").put("name", "客户甲").put("owner", "小王").put("balance", 0);
+    receipts = new ArrayList<>();
+    shipments = new ArrayList<>();
+    links = new ArrayList<>();
+    targetRows = new ArrayList<>();
+    db = mock(CrmRepository.class);
+    jdbc = mock(JdbcTemplate.class);
+    when(db.jdbc()).thenReturn(jdbc);
+    when(db.state(false)).thenAnswer(call -> state.deepCopy());
+    when(db.object()).thenAnswer(call -> mapper.createObjectNode());
+    when(db.array()).thenAnswer(call -> mapper.createArrayNode());
+    when(db.tree(any())).thenAnswer(call -> mapper.valueToTree(call.getArgument(0)));
+    when(db.parse(anyString())).thenAnswer(call -> mapper.readTree((String)call.getArgument(0)));
+    when(db.encode(any())).thenAnswer(call -> mapper.writeValueAsString(call.getArgument(0)));
+    when(db.documents("receipts", false, 0)).thenAnswer(call -> List.copyOf(receipts));
+    when(db.rows(anyString(), any(Object[].class))).thenAnswer(call -> {
+      String sql = call.getArgument(0);
+      if (sql.contains("FROM jst_shipments")) return List.copyOf(shipments);
+      if (sql.contains("FROM jst_document_sales")) return List.copyOf(links);
+      if (sql.contains("FROM dashboard_targets")) return List.copyOf(targetRows);
+      return List.of();
+    });
+    when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
+    service = new DashboardService(db);
+  }
+
+  private ObjectNode order(String id, String created, String total, String paid) {
+    return ((ArrayNode)state.path("orders")).addObject().put("id", id).put("type", "销售订单")
+        .put("status", "已批准").put("customerId", "c1").put("customer", "客户甲").put("owner", "小王")
+        .put("created", created).put("total", total).put("paid", paid);
+  }
+
+  private ObjectNode receipt(String id, String order, String type, String amount, String method, String time) {
+    var receipt = mapper.createObjectNode().put("id", id).put("order", order).put("customerId", "c1")
+        .put("customer", "客户甲").put("type", type).put("amount", amount).put("method", method).put("time", time);
+    receipts.add(receipt);
+    return receipt;
+  }
+
+  private JsonNode sales() { return sales("2026-11", "", ""); }
+  private JsonNode sales(String month, String owner, String customerId) {
+    return mapper.valueToTree(service.sales(month, owner, customerId, reader));
+  }
+  private void money(String expected, JsonNode actual) {
+    assertFalse(actual.isMissingNode(), "Missing monetary field");
+    assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(actual.asText())), actual.toString());
+  }
+
+  @Test void onlyApprovedSalesEnterTheOrderCohortAndPartialPaymentsRemainPending() {
+    order("paid", "2026-11-02 09:00:00", "100.01", "100.01");
+    order("partial", "2026-11-03 09:00:00", "200.02", "50.01");
+    order("draft", "2026-11-04 09:00:00", "900", "0").put("status", "草稿");
+    order("review", "2026-11-04 09:00:00", "800", "0").put("status", "审批中");
+    order("advance", "2026-11-04 09:00:00", "700", "700").put("type", "预收款订单");
+    order("overseas", "2026-11-04 09:00:00", "600", "600").put("type", "海外提货单");
+    var report = sales(); var summary = report.path("summary");
+    assertEquals(2, summary.path("orderCount").asInt());
+    assertEquals(1, summary.path("settledCount").asInt());
+    assertEquals(1, summary.path("pendingCount").asInt());
+    money("300.03", summary.path("orderAmount"));
+    money("150.02", summary.path("settledAmount"));
+    money("150.01", summary.path("outstandingAmount"));
+    assertEquals(2, report.path("orders").size());
+    assertEquals(30, report.path("daily").size());
+    money("0", report.path("daily").get(0).path("amount"));
+  }
+
+  @Test void utcTimestampsAreGroupedByShanghaiDateAtBothMonthBoundaries() {
+    order("november", "2026-10-31T16:00:00Z", "10", "0");
+    order("october", "2026-10-31T15:59:59Z", "20", "0");
+    order("december", "2026-11-30T16:00:00Z", "40", "0");
+    var report = sales();
+    money("10", report.path("summary").path("orderAmount"));
+    assertEquals("2026-11-01", report.path("orders").get(0).path("date").asText());
+    money("10", report.path("daily").get(0).path("amount"));
+  }
+
+  @Test void aggregateAmountsStayExactEvenAboveJavascriptSafeCents() {
+    for (int index = 0; index < 99; index++)
+      order("large-" + index, "2026-11-01", "999999999999.99", "0");
+    var report = sales();
+    assertTrue(report.path("summary").path("orderAmount").isTextual());
+    assertEquals("98999999999999.01", report.path("summary").path("orderAmount").asText());
+    assertEquals("98999999999999.01", report.path("daily").get(0).path("amount").asText());
+    assertEquals("999999999999.99", report.path("orders").get(0).path("total").asText());
+  }
+
+  @Test void onlyTheSavedEffectiveOrderChangesTotalsAndPendingAmendmentsDoNot() {
+    order("changed", "2026-11-04", "100", "100");
+    order("pending", "2026-11-05", "80", "40");
+    shipments.add(Map.of("order_id", "changed", "payload", "{\"environment\":\"sandbox\",\"effectiveOrder\":{\"total\":60,\"paid\":60}}"));
+    shipments.add(Map.of("order_id", "pending", "payload", "{\"environment\":\"sandbox\",\"amendment\":{\"status\":\"AWAITING_FUNDS\",\"effectiveOrder\":{\"total\":20,\"paid\":20}}}"));
+    var summary = sales().path("summary");
+    money("140", summary.path("orderAmount"));
+    money("100", summary.path("settledAmount"));
+    money("40", summary.path("outstandingAmount"));
+  }
+
+  @Test void shipmentFromAnotherEnvironmentCannotOverrideTheCurrentBusinessOrder() {
+    order("sale", "2026-11-04", "100", "50");
+    shipments.add(Map.of("order_id", "sale", "payload", "{\"environment\":\"production\",\"effectiveOrder\":{\"total\":10,\"paid\":10}}"));
+    money("100", sales().path("summary").path("orderAmount"));
+    money("50", sales().path("summary").path("settledAmount"));
+  }
+
+  @Test void missingOrderAmountIsNotInventedAsZeroButLegacyMissingPaidDefaultsToZero() {
+    order("missing-total", "2026-11-04", "100", "0").remove("total");
+    order("legacy-unpaid", "2026-11-05", "20", "0").remove("paid");
+    var report = sales();
+    money("20", report.path("summary").path("orderAmount"));
+    money("0", report.path("summary").path("settledAmount"));
+    assertEquals(1, report.path("summary").path("orderCount").asInt());
+    assertTrue(report.path("warnings").toString().contains("missing-total"));
+  }
+
+  @Test void cancellingShipmentDoesNotSilentlyInventARefundOrReduceSales() {
+    order("cancelled-shipment", "2026-11-04", "100", "100");
+    shipments.add(Map.of("order_id", "cancelled-shipment", "payload", "{\"environment\":\"sandbox\",\"status\":\"CANCELLED\"}"));
+    var report = sales();
+    money("100", report.path("summary").path("orderAmount"));
+    money("100", report.path("summary").path("settledAmount"));
+    assertFalse(report.path("warnings").isEmpty());
+  }
+
+  @Test void oneErpSaleCannotEnterTotalsThroughBothAnOrderAndASettlement() {
+    order("ordinary", "2026-11-03", "100", "100");
+    order("settlement", "2026-12-01", "300", "0").put("source", "jushuitan-settlement")
+        .putObject("settlement").put("periodStart", "2026-11-01").put("periodEnd", "2026-11-30");
+    shipments.add(Map.of("order_id", "ordinary", "payload", "{\"environment\":\"sandbox\",\"oId\":123,\"soId\":\"CRM-ordinary\",\"request\":{\"shop_id\":1}}"));
+    links.add(Map.of("environment", "sandbox", "order_id", "settlement", "shop_id", "1", "o_id", "123", "so_id", "CRM-ordinary"));
+    var report = sales();
+    money("100", report.path("summary").path("orderAmount"));
+    assertEquals(1, report.path("orders").size());
+    assertTrue(report.path("warnings").toString().contains("settlement"));
+  }
+
+  @Test void historicalSettlementUsesItsPeriodAndSameMonthUsesPeriodEndForDailyChart() {
+    order("historical", "2026-11-18", "900", "0").put("source", "jushuitan-settlement")
+        .putObject("settlement").put("periodStart", "2026-10-01").put("periodEnd", "2026-10-31").put("cycle", "month");
+    order("this-month", "2026-12-01", "120", "20").put("source", "jushuitan-settlement")
+        .putObject("settlement").put("periodStart", "2026-11-01").put("periodEnd", "2026-11-30").put("cycle", "month");
+    var report = sales();
+    money("120", report.path("summary").path("orderAmount"));
+    money("120", report.path("daily").get(29).path("amount"));
+    assertEquals("this-month", report.path("orders").get(0).path("id").asText());
+    assertFalse(report.path("warnings").isEmpty());
+  }
+
+  @Test void crossMonthSettlementAndMalformedDatesAreNotInventedOrEvenlyDistributed() {
+    order("cross-month", "2026-11-18", "300", "0").put("source", "jushuitan-settlement")
+        .putObject("settlement").put("periodStart", "2026-10-30").put("periodEnd", "2026-11-02").put("cycle", "day");
+    order("bad-date", "not-a-date", "400", "0");
+    var report = sales();
+    money("0", report.path("summary").path("orderAmount"));
+    assertFalse(report.path("warnings").isEmpty());
+    assertTrue(report.path("orders").isEmpty());
+  }
+
+  @Test void advanceReceiptsUseSignedRegistrationAmountsAndNeverCountAdvanceAllocationAsNewCash() {
+    order("pre", "2026-10-01", "100", "100").put("type", "预收款订单");
+    order("sale", "2026-11-02", "100", "100");
+    receipt("pre-receipt", "pre", "预收款订单", "100", "银行转账", "2026-11-01T01:00:00Z");
+    receipt("allocation", "sale", "销售订单", "100", "预收款核销", "2026-11-02T01:00:00Z");
+    receipt("refund", "pre", "预收款订单", "-10", "银行转账", "2026-11-03T01:00:00Z");
+    receipt("prior", "pre", "预收款订单", "300", "银行转账", "2026-10-01T01:00:00Z");
+    var report = sales();
+    money("90", report.path("summary").path("advanceReceived"));
+    money("0", report.path("summary").path("advanceBalance"));
+    money("100", report.path("summary").path("settledAmount"));
+    assertEquals(2, report.path("advanceReceipts").size());
+  }
+
+  @Test void ownerAndCustomerFiltersKeepDetailsAlignedAndDoNotCompareAgainstCompanyTarget() {
+    order("mine", "2026-11-02", "100", "20");
+    order("other-owner", "2026-11-03", "200", "100").put("owner", "小李");
+    ((ArrayNode)state.path("customers")).addObject().put("id", "c2").put("name", "客户乙").put("balance", 50);
+    order("other-customer", "2026-11-04", "400", "100").put("customerId", "c2").put("customer", "客户乙");
+    ((ObjectNode)state.path("customers").get(0)).put("balance", 30);
+    var filtered = sales("2026-11", "小王", "c1");
+    money("100", filtered.path("summary").path("orderAmount"));
+    assertEquals(1, filtered.path("orders").size());
+    assertFalse(filtered.path("targetApplicable").asBoolean());
+    assertTrue(filtered.path("summary").path("advanceBalance").isNull());
+    money("30", sales("2026-11", "", "c1").path("summary").path("advanceBalance"));
+    money("80", sales().path("summary").path("advanceBalance"));
+  }
+
+  @Test void historicalAdvanceReceiptUsesItsOrderIdentityWhenTheOldCustomerNameIsReused() {
+    ((ObjectNode)state.path("customers").get(0)).put("name", "客户改名后");
+    ((ArrayNode)state.path("customers")).addObject().put("id", "c2").put("name", "客户甲").put("balance", 0);
+    order("pre", "2026-11-01", "100", "100").put("type", "预收款订单").put("customer", "客户改名后");
+    receipt("legacy", "pre", "预收款订单", "100", "银行转账", "2026-11-02T01:00:00Z").remove("customerId");
+    var originalCustomer = sales("2026-11", "", "c1");
+    money("100", originalCustomer.path("summary").path("advanceReceived"));
+    assertEquals("客户改名后", originalCustomer.path("advanceReceipts").get(0).path("customer").asText());
+    money("0", sales("2026-11", "", "c2").path("summary").path("advanceReceived"));
+    assertTrue(sales("2026-11", "", "c2").path("advanceReceipts").isEmpty());
+
+    receipt("explicit", "pre", "预收款订单", "20", "银行转账", "2026-11-03T01:00:00Z").put("customerId", "c2");
+    money("100", sales("2026-11", "", "c1").path("summary").path("advanceReceived"));
+    var explicitCustomer = sales("2026-11", "", "c2");
+    money("20", explicitCustomer.path("summary").path("advanceReceived"));
+    assertEquals("客户甲", explicitCustomer.path("advanceReceipts").get(0).path("customer").asText());
+  }
+
+  @Test void orderMonthUsesCurrentCumulativeSettlementRatherThanOnlySameMonthReceipts() {
+    order("october-sale", "2026-10-20", "100", "100");
+    receipt("late-payment", "october-sale", "销售订单", "100", "银行转账", "2026-11-10T01:00:00Z");
+    money("0", sales().path("summary").path("settledAmount"));
+    money("100", sales("2026-10", "", "").path("summary").path("settledAmount"));
+  }
+
+  @Test void dashboardPermissionsAreIndependentOfExistingBusinessPermissions() {
+    var business = new Actor("sales", "销售", Set.of("business.read", "system.manage"));
+    assertEquals(403, assertThrows(ApiException.class, () -> service.sales("2026-11", "", "", business)).status());
+    assertEquals(403, assertThrows(ApiException.class, () -> service.targets(2026, reader)).status());
+    assertEquals(403, assertThrows(ApiException.class, () -> service.saveTarget(mapper.createObjectNode(), reader)).status());
+    verify(db, never()).state(anyBoolean());
+  }
+
+  @Test void invalidMonthYearAndOversizedFilterAreRejected() {
+    for (String month : List.of("2026-1", "2026-13", "2026-11-01", "anything"))
+      assertEquals(400, assertThrows(ApiException.class, () -> sales(month, "", "")).status(), month);
+    assertThrows(ApiException.class, () -> service.targets(0, manager));
+    assertThrows(ApiException.class, () -> service.targets(10000, manager));
+    assertThrows(ApiException.class, () -> sales("2026-11", "a".repeat(201), ""));
+  }
+
+  @Test void targetListIncludesEveryMonthAndDoesNotTurnUnsetTargetsIntoZero() {
+    var report = mapper.valueToTree(service.targets(2026, manager));
+    assertEquals(2026, report.path("year").asInt());
+    assertEquals(12, report.path("targets").size());
+    assertTrue(report.path("targets").get(0).path("amount").isNull());
+    assertTrue(sales().path("target").path("amount").isNull());
+    targetRows.add(target("2026-11", "0", 1));
+    money("0", sales().path("target").path("amount"));
+  }
+
+  private Map<String, Object> target(String month, String amount, long revision) {
+    return new LinkedHashMap<>(Map.of("month_key", month, "amount", new BigDecimal(amount), "revision", revision,
+        "updated_at", "2026-11-19T01:00:00Z", "updated_by", "manager"));
+  }
+
+  @Test void invalidTargetAmountsAndRevisionsAreRejectedBeforeAnyWrite() {
+    for (String amount : List.of("-1", "1.001", "1000000000000", "NaN", "", "1e3")) {
+      var body = mapper.createObjectNode().put("month", "2026-11").put("amount", amount).put("revision", 0);
+      assertEquals(400, assertThrows(ApiException.class, () -> service.saveTarget(body, manager)).status(), amount);
+    }
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "100");
+    assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    body.put("revision", -1);
+    assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    body.put("revision", 0.5);
+    assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void staleTargetRevisionIsAConflictAndDoesNotOverwriteTheLatestValue() {
+    targetRows.add(target("2026-11", "100", 3));
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "200").put("revision", 2);
+    assertEquals(409, assertThrows(ApiException.class, () -> service.saveTarget(body, manager)).status());
+    verify(jdbc, never()).update(startsWith("UPDATE dashboard_targets"), any(Object[].class));
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+  }
+
+  @Test void savingAnExplicitZeroTargetPersistsItsRevisionAndAuditsTheChange() {
+    when(jdbc.update(anyString(), any(Object[].class))).thenAnswer(call -> {
+      if (((String)call.getArgument(0)).startsWith("UPDATE dashboard_targets")) {
+        targetRows.clear();
+        targetRows.add(target(call.getArgument(4), call.getArgument(1).toString(), 1));
+      }
+      return 1;
+    });
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "0").put("revision", 0);
+    var saved = mapper.valueToTree(service.saveTarget(body, manager));
+    money("0", saved.path("amount"));
+    assertEquals(1, saved.path("revision").asInt());
+    var detail = org.mockito.ArgumentCaptor.forClass(JsonNode.class);
+    verify(db).audit(eq("manager"), contains("2026-11"), detail.capture());
+    assertEquals("DASHBOARD_TARGET_CHANGED", detail.getValue().path("type").asText());
+    assertTrue(detail.getValue().path("before").path("amount").isNull());
+    money("0", detail.getValue().path("after").path("amount"));
+  }
+
+  @Test void failedCompareAndSetDoesNotAuditASuccessfulTargetWrite() {
+    targetRows.add(target("2026-11", "100", 3));
+    when(jdbc.update(startsWith("UPDATE dashboard_targets"), any(Object[].class))).thenReturn(0);
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "200").put("revision", 3);
+    assertEquals(409, assertThrows(ApiException.class, () -> service.saveTarget(body, manager)).status());
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+  }
+}

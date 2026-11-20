@@ -8,13 +8,13 @@ import {moneyCents} from './orderMoney';
 const money=value=>'¥ '+Number(value||0).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const time=value=>value?new Date(value).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}):'--';
 
-export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods}){
-  const[receipts,setReceipts]=useState([]),[query,setQuery]=useState(''),[method,setMethod]=useState(''),[selecting,setSelecting]=useState(false),[customer,setCustomer]=useState(''),[payments,setPayments]=useState({}),[received,setReceived]=useState(''),[payMethod,setPayMethod]=useState('银行转账'),[saving,setSaving]=useState(false),[formError,setFormError]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState('');
+export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods,entryOnly=false,onEntryClose,onRegistered}){
+  const[receipts,setReceipts]=useState([]),[query,setQuery]=useState(''),[method,setMethod]=useState(''),[selecting,setSelecting]=useState(entryOnly),[customer,setCustomer]=useState(''),[payments,setPayments]=useState({}),[received,setReceived]=useState(''),[payMethod,setPayMethod]=useState(()=>paymentMethods[0]||''),[saving,setSaving]=useState(false),[formError,setFormError]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState('');
   const[receivedOn,setReceivedOn]=useState('');
   const[page,setPage]=useState(1),[pageSize,setPageSize]=useState(20),[stats,setStats]=useState({total:0,amount:0,customers:0,methods:[],page:1});
-  useEffect(()=>{let active=true;setLoading(true);setError('');const timer=setTimeout(()=>{
+  useEffect(()=>{if(entryOnly)return;let active=true;setLoading(true);setError('');const timer=setTimeout(()=>{
    api('receipts?'+new URLSearchParams({page,pageSize,q:query,method})).then(data=>{if(active){setReceipts(data.rows);setStats(data)}}).catch(e=>{if(active)setError(e.message)}).finally(()=>{if(active)setLoading(false)});
-  },200);return()=>{active=false;clearTimeout(timer)}},[db.revision,page,pageSize,query,method]);
+  },200);return()=>{active=false;clearTimeout(timer)}},[db.revision,page,pageSize,query,method,entryOnly]);
   const rows=receipts;
   const eligible=db.orders.filter(r=>r.customerId&&r.status==='已批准'&&Number(r.paid||0)<Number(r.total));
   const cents=value=>Math.round(Number(value||0)*100);
@@ -33,14 +33,13 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
     if(needsReceivedDate&&!receivedOn){setFormError('请填写结算单的实际到账日期');return}
     if(!reconciled){setFormError('实际收款金额必须与上方本次付款合计一致，请核对后提交');return}
     setSaving(true);
-    try{const ids=new Set(selected.map(r=>r.id));await save({...db,orders:db.orders.map(r=>ids.has(r.id)?{...r,paid:(cents(r.paid)+cents(payments[r.id]))/100,method:payMethod,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:r)},{amount:Number(received),customerId:customer,customer:db.customers.find(c=>c.id===customer)?.name,method:payMethod,...(needsReceivedDate?{receivedOn}:{})});setSelecting(false);setPayments({});setReceived('')}catch(e){setFormError(e.message)}finally{setSaving(false)}
+    try{const ids=new Set(selected.map(r=>r.id));await save({...db,orders:db.orders.map(r=>ids.has(r.id)?{...r,paid:(cents(r.paid)+cents(payments[r.id]))/100,method:payMethod,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:r)},{amount:Number(received),customerId:customer,customer:db.customers.find(c=>c.id===customer)?.name,method:payMethod,...(needsReceivedDate?{receivedOn}:{})});setSelecting(false);setPayments({});setReceived('');onRegistered?.()}catch(e){setFormError(e.message)}finally{setSaving(false)}
   }
   async function exportRows(){try{const all=await api('receipts');const exported=all.filter(r=>(!method||r.method===method)&&[r.order,r.customer,r.operator,r.method].some(v=>String(v||'').toLowerCase().includes(query.toLowerCase())));const table=[['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人'],...exported.map(r=>[r.order,r.customer,r.type,r.amount,r.method,r.receivedOn||'',time(r.time),r.operator])];const url=URL.createObjectURL(new Blob(['\uFEFF'+table.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='收款.csv';a.click();URL.revokeObjectURL(url)}catch(e){setError(e.message)}}
-  return <>
-    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>登记订单收款，查看每一笔收款记录。</p></div><div className="page-heading-symbol"><Icon name="cash" size={30}/></div></div>
-    <div className="summary-grid">{[['收款笔数',stats.total,'orders'],['收款总额',money(stats.amount),'cash'],['收款客户',stats.customers,'customers']].map(([label,value,icon])=><div className="summary-card" key={label}><span className="summary-icon"><Icon name={icon} size={21}/></span><div><span className="summary-label">{label}</span><strong>{value}</strong></div></div>)}</div>
-    <DialogLayer kind="drawer" open={selecting} onClose={()=>{if(!saving)setSelecting(false)}}><form className="drawer" onSubmit={submitPayment}>
-      <div className="modal-title"><h2>新建收款</h2><button type="button" disabled={saving} aria-label="关闭" onClick={()=>setSelecting(false)}><Icon name="close"/></button></div>
+  function closeEntry(){setSelecting(false);onEntryClose?.()}
+  const receiptForm=(
+    <DialogLayer kind="drawer" open={selecting} onClose={()=>{if(!saving)closeEntry()}}><form className="drawer" onSubmit={submitPayment}>
+      <div className="modal-title"><h2>新建收款</h2><button type="button" disabled={saving} aria-label="关闭" onClick={closeEntry}><Icon name="close"/></button></div>
       <div className="modal-body"><div className="field"><span>客户 <em>*</em></span><PaymentMethodPicker label="客户" options={customerOptions(db.customers)} value={customer} disabled={saving} onChange={name=>{setCustomer(name);setPayments({});setReceived('');setFormError('')}}/></div>
       <p className="form-hint">勾选需要收款的订单，填写每笔订单本次付款金额。仅显示已批准且未结清的订单。</p>
       <div className="table-scroll"><table className="receipt-selection"><thead><tr>{['选择','订单编号','订单总金额','已付金额','未收金额','本次付款'].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{customerOrders.map(r=><tr key={r.id}><td><input type="checkbox" aria-label={'选择订单 '+r.id} disabled={saving} checked={Object.hasOwn(payments,r.id)} onChange={e=>setPayments(prev=>{const next={...prev};if(e.target.checked)next[r.id]='';else delete next[r.id];return next})}/></td><td>{r.id}<small>{r.type}</small></td><td>{money(r.total)}</td><td>{money(r.paid)}</td><td>{money(r.total-Number(r.paid||0))}</td><td><input aria-label={r.id+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(r.total)-cents(r.paid))/100).toFixed(2)} required disabled={saving||!Object.hasOwn(payments,r.id)} placeholder="请输入金额" value={payments[r.id]??''} onChange={e=>setPayments(prev=>({...prev,[r.id]:e.target.value}))}/></td></tr>)}</tbody></table>{!customerOrders.length&&<div className="empty">{customer?'该客户暂无已批准且未结清的订单':'请先选择客户'}</div>}</div>
@@ -50,8 +49,14 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
         <input type="date" required disabled={saving} value={receivedOn} onChange={e=>setReceivedOn(e.target.value)}/>
       </label>}
       <div className={'receipt-reconciliation '+(received===''?'':reconciled?'is-matched':'is-mismatched')} role="status" aria-live="polite">{received===''?'请填写实际收款金额，与上方本次付款合计核对。':!receivedValid?'请输入大于零且最多两位小数的收款金额。':reconciled?'金额核对一致：实际收款与本次付款合计均为 '+money(totals.payment/100):'金额不一致：实际收款 '+money(Number(received))+'，本次付款合计 '+money(totals.payment/100)+'，'+(difference>0?'多收 ':'少收 ')+money(Math.abs(difference)/100)}</div>
-      {formError&&<p className="system-error" role="alert">{formError}</p>}</div><div className="modal-footer"><button className="secondary" type="button" disabled={saving} onClick={()=>setSelecting(false)}>取消</button><button className="primary" type="submit" disabled={saving||!selected.length||!reconciled}>{saving?'正在提交…':'确认收款'}</button></div>
+      {formError&&<p className="system-error" role="alert">{formError}</p>}</div><div className="modal-footer"><button className="secondary" type="button" disabled={saving} onClick={closeEntry}>取消</button><button className="primary" type="submit" disabled={saving||!selected.length||!reconciled}>{saving?'正在提交…':'确认收款'}</button></div>
     </form></DialogLayer>
+  );
+  if(entryOnly)return receiptForm;
+  return <>
+    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>登记订单收款，查看每一笔收款记录。</p></div><div className="page-heading-symbol"><Icon name="cash" size={30}/></div></div>
+    <div className="summary-grid">{[['收款笔数',stats.total,'orders'],['收款总额',money(stats.amount),'cash'],['收款客户',stats.customers,'customers']].map(([label,value,icon])=><div className="summary-card" key={label}><span className="summary-icon"><Icon name={icon} size={21}/></span><div><span className="summary-label">{label}</span><strong>{value}</strong></div></div>)}</div>
+    {receiptForm}
     <section className="panel"><div className="table-toolbar"><button className="primary" onClick={()=>{setCustomer('');setPayments({});setReceived('');setPayMethod(paymentMethods[0]||'');setReceivedOn('');setFormError('');setSelecting(true)}}><Icon name="plus" size={17}/>新建收款</button><div className="toolbar-actions"><div className="search"><Icon name="search" size={17}/><input aria-label="搜索收款" placeholder="搜索订单、客户或操作人" value={query} onChange={e=>{setQuery(e.target.value);setPage(1)}}/></div><select aria-label="收款方式筛选" value={method} onChange={e=>{setMethod(e.target.value);setPage(1)}}><option value="">全部收款方式</option>{stats.methods.map(m=><option key={m}>{m}</option>)}</select><button title="导出CSV" className="icon-btn" onClick={exportRows} disabled={loading||!!error}><Icon name="export"/></button></div></div><div className="table-scroll"><table className="data-table"><thead><tr>{['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人'].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{!loading&&!error&&rows.map(r=><tr key={r.id}><td>{r.order}</td><td><span className="badge badge-blue">{r.customer}</span></td><td>{r.type==='预收款订单'?'预收款':r.type}</td><td>{money(r.amount)}</td><td>{r.method}</td><td>{r.receivedOn||'—'}</td><td>{time(r.time)}</td><td>{r.operator}</td></tr>)}</tbody></table>{(loading||error||!rows.length)&&<div className="empty" role="status">{loading?'正在加载收款…':error||'暂无收款记录'}</div>}</div><Pagination total={stats.total} page={stats.page} pageSize={pageSize} onPage={setPage} onPageSize={size=>{setPageSize(size);setPage(1)}} label="收款分页"/></section>
   </>;
 }
