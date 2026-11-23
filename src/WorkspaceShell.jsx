@@ -8,7 +8,7 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
   const dashboard=page.startsWith('dashboard-');
   const system=page.startsWith('sys-');
   const orders=['sales-orders','orders'].includes(page);
-  const sales=['sales-items','sales-receipts','sales-targets','receipts'].includes(page);
+  const sales=['sales-items','sales-targets'].includes(page);
   const payments=['advance','receipt-orders'].includes(page);
   const[dashboardExpanded,setDashboardExpanded]=useState(dashboard);
   const[salesExpanded,setSalesExpanded]=useState(sales);
@@ -39,7 +39,7 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
       <div className="workspace-module">
         <div className="nav-section-label">销售管理</div>
         <button type="button" title="销售模块" aria-expanded={salesExpanded} className={'nav-item '+(sales?'active-parent':'')} onClick={()=>{setSalesExpanded(!salesExpanded);if(!salesExpanded)go('sales-items')}}><Icon name="orders"/><span>销售</span>{caret(salesExpanded)}</button>
-        {salesExpanded&&<div className="nav-sub">{[['sales-items','订单产品明细'],['sales-receipts','订单收款明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
+        {salesExpanded&&<div className="nav-sub">{[['sales-items','订单产品明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
       </div>
       <div className="nav-section-label">业务管理</div>
       <button type="button" title="订单管理" aria-current={orders?'page':undefined} className={'nav-item '+(orders?'active':'')} onClick={()=>go('sales-orders')}><Icon name="orders"/><span>订单管理</span></button>

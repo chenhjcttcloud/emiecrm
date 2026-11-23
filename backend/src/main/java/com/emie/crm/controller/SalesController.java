@@ -33,6 +33,15 @@ public class SalesController {
     return service.receipts(page, pageSize, q, month, owner, customerId, method, auth.actor(request));
   }
 
+  @GetMapping("/receipts/export")
+  public Object exportReceipts(@RequestParam(defaultValue = "") String q,
+                               @RequestParam(defaultValue = "") String month,
+                               @RequestParam(defaultValue = "") String owner,
+                               @RequestParam(defaultValue = "") String customerId,
+                               @RequestParam(defaultValue = "") String method, HttpServletRequest request) {
+    return service.exportReceipts(q, month, owner, customerId, method, auth.actor(request));
+  }
+
   @GetMapping("/targets")
   public Object targets(@RequestParam String month, HttpServletRequest request) {
     return service.targets(month, auth.actor(request));

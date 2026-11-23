@@ -1,44 +1,35 @@
-import {csvCell} from './csv';
 import React,{useEffect,useRef,useState} from 'react';
 import PaymentMethodPicker from './PaymentMethodPicker';
 import OrderSelect from './OrderSelect';
-import Pagination from './Pagination';
 import {customerOptions} from './customerOptions';
 import {moneyCents} from './orderMoney';
 import {recordId} from './recordId';
 import {orderExecutionView} from './feishuApprovalModel';
 import ReceiptApprovalPanel from './ReceiptApprovals';
 import {buildDirectReceiptChange,buildReceiptApprovalRequest,receiptApprovalLabels,receiptApprovalProblem,receiptPaymentMethods,reservedReceiptOrderIds} from './receiptApprovalModel';
-import ReceiptProductDetails,{ReceiptDetailDrawer} from './ReceiptProductDetails';
-import {canReceiveOrder,itemsFromOrder,productSummary,productDetailsText,productSourceLabel,receiptProducts} from './receiptProductModel';
+import ReceiptProductDetails from './ReceiptProductDetails';
+import ReceiptLedger from './ReceiptLedger';
+import {canReceiveOrder,itemsFromOrder,productSummary} from './receiptProductModel';
 
 const money=value=>'¥ '+Number(value||0).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
-const time=value=>value?new Date(value).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}):'--';
 const cents=value=>moneyCents(value)??0;
 
 export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods,entryOnly=false,onEntryClose,onRegistered,
-  approvals,canRegister=true,attempt=null,onAttemptChange,initialOrderId,shipments={}}){
+  approvals,canRegister=true,attempt=null,onAttemptChange,initialOrderId,shipments={},onOpenOrder}){
   const preset=db.orders.find(order=>order.id===initialOrderId);
-  const[receipts,setReceipts]=useState([]),[query,setQuery]=useState(''),[method,setMethod]=useState(''),[selecting,setSelecting]=useState(entryOnly),
+  const[selecting,setSelecting]=useState(entryOnly),
     [customer,setCustomer]=useState(attempt?.customerId||preset?.customerId||''),[payments,setPayments]=useState(()=>attempt?Object.fromEntries(attempt.allocations.map(row=>[row.orderId,String(row.amount)])):preset?{[preset.id]:''}:{}),
     [received,setReceived]=useState(attempt?String(attempt.amount):''),[payMethod,setPayMethod]=useState(attempt?.method||paymentMethods[0]||''),
-    [saving,setSaving]=useState(false),[formError,setFormError]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState('');
+    [saving,setSaving]=useState(false),[formError,setFormError]=useState('');
   const[receiptDate,setReceiptDate]=useState(attempt?.receiptDate||''),[receiptCategory,setReceiptCategory]=useState(attempt?.receiptCategory||''),[note,setNote]=useState(attempt?.note||''),
-    [expandedOrder,setExpandedOrder]=useState(null),[detail,setDetail]=useState(null),[checkingSubmission,setCheckingSubmission]=useState(Boolean(attempt)),[feedback,setFeedback]=useState('');
+    [expandedOrder,setExpandedOrder]=useState(null),[checkingSubmission,setCheckingSubmission]=useState(Boolean(attempt)),[feedback,setFeedback]=useState('');
   const submission=useRef(attempt),submitting=useRef(false);
-  const orderIndex=new Map(db.orders.map(order=>[order.id,order]));
-  const receiptView=row=>({...row,owner:row.owner??orderIndex.get(row.orderId||row.order)?.owner,...receiptProducts(row,orderIndex.get(row.orderId||row.order),db.products)});
-  const[page,setPage]=useState(1),[pageSize,setPageSize]=useState(20),[stats,setStats]=useState({total:0,amount:0,customers:0,methods:[],page:1});
-  useEffect(()=>{if(entryOnly)return;let active=true;setLoading(true);setError('');const timer=setTimeout(()=>{
-   api('receipts?'+new URLSearchParams({page,pageSize,q:query,method})).then(data=>{if(active){setReceipts(data.rows);setStats(data)}}).catch(e=>{if(active)setError(e.message)}).finally(()=>{if(active)setLoading(false)});
-  },200);return()=>{active=false;clearTimeout(timer)}},[api,db.revision,page,pageSize,query,method,entryOnly]);
   useEffect(()=>{
     const pending=submission.current;
     if(!pending||!checkingSubmission)return;
     const record=approvals.rows.find(row=>row.id===pending.requestId||row.requestId===pending.requestId);
     if(record)completeSubmission(record);
   },[approvals.rows,checkingSubmission]);
-  const rows=receipts;
   const eligible=db.orders.map(order=>({...order,...orderExecutionView(order,shipments[order.id])})).filter(canReceiveOrder);
   const customerOrders=eligible.filter(order=>order.customerId===customer);
   const selected=customerOrders.filter(order=>Object.hasOwn(payments,order.id));
@@ -90,7 +81,6 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
       }else{submission.current=null;onAttemptChange?.(null);setCheckingSubmission(false);setFormError(failure.message)}
     }finally{submitting.current=false;setSaving(false)}
   }
-  async function exportRows(){try{const all=await api('receipts');const exported=all.filter(row=>(!method||row.method===method)&&[row.order,row.customer,row.operator,row.method].some(value=>String(value||'').toLowerCase().includes(query.toLowerCase())));const table=[['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人','产品资料来源','产品明细'],...exported.map(receiptView).map(row=>[row.order,row.customer,row.type,row.amount,row.method,row.receivedOn||'',time(row.time),row.operator,productSourceLabel(row.itemsSource),productDetailsText(row.items)])];const url=URL.createObjectURL(new Blob(['\uFEFF'+table.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='收款.csv';link.click();URL.revokeObjectURL(url)}catch(failure){setError(failure.message)}}
   function closeEntry(){if(saving)return;setSelecting(false);onEntryClose?.()}
   function openEntry(){
     if(submission.current){setCheckingSubmission(true);setSelecting(true);return}
@@ -125,14 +115,10 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
   </form></DialogLayer>;
   if(entryOnly)return receiptForm;
   return <>
-    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>审批通过后登记订单收款，查看每一笔收款记录。</p></div><div className="page-heading-symbol"><Icon name="cash" size={30}/></div></div>
-    <div className="summary-grid">{[['收款笔数',stats.total,'orders'],['收款总额',money(stats.amount),'cash'],['收款客户',stats.customers,'customers']].map(([label,value,icon])=><div className="summary-card" key={label}><span className="summary-icon"><Icon name={icon} size={21}/></span><div><span className="summary-label">{label}</span><strong>{value}</strong></div></div>)}</div>
+    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>统一登记收款、跟踪审批，筛选并核对已入账流水。</p></div><button type="button" className="primary" disabled={!canRegister||(!submission.current&&Boolean(problem))} title={problem||undefined} onClick={openEntry}><Icon name="plus" size={17}/>{submission.current?'继续核对收款申请':'新建收款'}</button></div>
     {feedback&&<p className="receipt-approval-feedback" role="status">{feedback}</p>}
     <ReceiptApprovalPanel approvals={approvals} api={api} DialogLayer={DialogLayer} Icon={Icon}/>
-    {receiptForm}<ReceiptDetailDrawer receipt={detail} DialogLayer={DialogLayer} Icon={Icon} onClose={()=>setDetail(null)}/>
-    <section className="panel"><div className="table-toolbar"><button className="primary" disabled={!canRegister||(!submission.current&&Boolean(problem))} onClick={openEntry}><Icon name="plus" size={17}/>{submission.current?'继续核对收款申请':'新建收款'}</button><div className="toolbar-actions"><div className="search"><Icon name="search" size={17}/><input aria-label="搜索收款" placeholder="搜索订单、客户或操作人" value={query} onChange={event=>{setQuery(event.target.value);setPage(1)}}/></div><select aria-label="收款方式筛选" value={method} onChange={event=>{setMethod(event.target.value);setPage(1)}}><option value="">全部收款方式</option>{stats.methods.map(value=><option key={value}>{value}</option>)}</select><button title="导出CSV" className="icon-btn" onClick={exportRows} disabled={loading||!!error}><Icon name="export"/></button></div></div>
-      <div className="table-scroll"><table className="data-table"><thead><tr>{['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人','产品明细','操作'].map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{!loading&&!error&&rows.map(receiptView).map(row=><tr key={row.id}><td>{row.order}</td><td><span className="badge badge-blue">{row.customer}</span></td><td>{row.type==='预收款订单'?'预收款':row.type}</td><td>{money(row.amount)}</td><td>{row.method}</td><td>{row.receivedOn||'—'}</td><td>{time(row.time)}</td><td>{row.operator}</td><td><span className="receipt-products-summary">{productSummary(row.items)}</span></td><td><button type="button" className="link-btn" aria-label={'查看收款详情 '+row.id} onClick={()=>setDetail(row)}>查看详情</button></td></tr>)}</tbody></table>{(loading||error||!rows.length)&&<div className="empty" role="status">{loading?'正在加载收款…':error||'暂无收款记录'}</div>}</div>
-      <Pagination total={stats.total} page={stats.page} pageSize={pageSize} onPage={setPage} onPageSize={size=>{setPageSize(size);setPage(1)}} label="收款分页"/>
-    </section>
+    {receiptForm}
+    <ReceiptLedger api={api} Icon={Icon} DialogLayer={DialogLayer} revision={db.revision} onOpenOrder={onOpenOrder}/>
   </>;
 }

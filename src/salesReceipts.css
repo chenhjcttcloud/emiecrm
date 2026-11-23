@@ -5,3 +5,5 @@
 .sales-receipts .sales-receipts-table tbody tr:hover{background:#fafcff}
 .sales-receipts .sales-receipts-table td:nth-child(2){min-width:160px;max-width:270px;white-space:normal;overflow-wrap:anywhere}
 .sales-receipts .sales-receipts-table .sales-refund{color:#b47a7d!important}
+.receipt-ledger-export-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+@media(max-width:650px){.receipt-ledger .sales-list-heading{align-items:flex-start;flex-wrap:wrap;gap:12px}.receipt-ledger .sales-list-heading>span{white-space:normal}.receipt-ledger .sales-list-heading small{display:block;line-height:1.7}.receipt-ledger-export-actions{gap:8px}}

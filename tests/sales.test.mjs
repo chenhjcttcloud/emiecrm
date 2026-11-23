@@ -93,6 +93,10 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     const ledger=await request('sales/receipts?month=2026-11&pageSize=1');
     assert.equal(ledger.total,6); assert.equal(ledger.rows.length,1); assert.equal(ledger.summary.amount,'33.00'); assert.equal(ledger.summary.tax,null);
     const fullLedger=await request('sales/receipts?month=2026-11&pageSize=100');
+    const exportedLedger=await request('sales/receipts/export?month=2026-11');
+    assert.equal(exportedLedger.total,ledger.total); assert.equal(exportedLedger.rows.length,ledger.total);
+    assert.ok(exportedLedger.rows.length>ledger.rows.length,'全量导出不能只返回当前分页');
+    assert.deepEqual(exportedLedger.rows,fullLedger.rows); assert.deepEqual(exportedLedger.summary,ledger.summary);
     assert.ok(fullLedger.rows.some(row=>row.amount==='-80.00'));
     assert.ok(fullLedger.rows.some(row=>row.method==='预收款核销'&&row.amount==='5.00'));
     assert.equal(fullLedger.rows.find(row=>row.id==='sales-r2').customer,'改名后的客户');
@@ -103,6 +107,13 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     const taxed=await request('sales/receipts?'+new URLSearchParams({month:'2026-11',method:'企业账户'}));
     assert.equal(taxed.summary.tax,'0.65'); assert.equal(taxed.rows[0].taxRate,'0.13');
     assert.equal(taxed.rows[0].tax,'0.65');
+    const exportFilters=new URLSearchParams({month:'2026-11',owner:'销售王',customerId:'sales-c1',method:'企业账户',q:'sales-paid'});
+    const filteredLedger=await request('sales/receipts?'+exportFilters);
+    const filteredExport=await request('sales/receipts/export?'+exportFilters);
+    assert.equal(filteredExport.total,1); assert.equal(filteredExport.rows[0].id,'sales-r6');
+    assert.deepEqual(filteredExport.rows,filteredLedger.rows); assert.deepEqual(filteredExport.summary,filteredLedger.summary);
+    await request('sales/receipts/export?month=2026-13',undefined,400);
+    await request('sales/receipts/export',undefined,401,'');
     const noDateShift=await request('sales/receipts?month=2026-12'); assert.equal(noDateShift.total,0);
 
     await request('system/roles',{action:'create',name:roles[0],permissions:['business.read']});
@@ -113,6 +124,7 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     const manager=(await request('login',{name:users[1],password:'sales-test-password'})).token;
     await request('sales/items?month=2026-11',undefined,200,viewer);
     await request('sales/receipts?month=2026-11',undefined,200,viewer);
+    await request('sales/receipts/export?month=2026-11',undefined,200,viewer);
     await request('dashboard/sales?month=2026-11',undefined,403,viewer);
     const targets=await request('sales/targets?month=2026-11',undefined,200,viewer);
     assert.ok(targets.rows.every(row=>row.amount===null));
@@ -121,6 +133,7 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     await request('sales/targets?month=2026-11',undefined,403,manager);
     await request('sales/items?month=2026-11',undefined,403,manager);
     await request('sales/receipts?month=2026-11',undefined,403,manager);
+    await request('sales/receipts/export?month=2026-11',undefined,403,manager);
     await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'100',revision:0},200,manager);
     await request('sales/targets',{month:'2026-11',owner:'销售李',amount:'10',revision:0},200,manager);
     const progress=await request('sales/targets?month=2026-11',undefined,200,viewer);

@@ -16,11 +16,12 @@ test('target management and viewing are separate permissions',()=>{
 test('existing business entry and browser routes remain available',()=>{
   const permissions=['business.read','dashboard.read','dashboard.targets.manage','system.manage'];
   assert.equal(defaultWorkspacePage(permissions),'sales-orders');
-  for(const page of ['sales-orders','sales-items','sales-receipts','sales-targets','advance','receipt-orders','customers','products','sys-roles','dashboard-sales','dashboard-targets'])assert.equal(resolveWorkspacePage(page,permissions),page);
+  for(const page of ['sales-orders','sales-items','sales-targets','advance','receipt-orders','customers','products','sys-roles','dashboard-sales','dashboard-targets'])assert.equal(resolveWorkspacePage(page,permissions),page);
   assert.equal(resolveWorkspacePage('unknown',permissions),'sales-orders');
   assert.equal(resolveWorkspacePage('toString',permissions),'sales-orders');
   assert.equal(resolveWorkspacePage('orders',permissions),'sales-orders');
-  assert.equal(resolveWorkspacePage('receipts',permissions),'sales-receipts');
+  assert.equal(resolveWorkspacePage('receipts',permissions),'receipt-orders');
+  assert.equal(resolveWorkspacePage('sales-receipts',permissions),'receipt-orders');
   assert.equal(resolveWorkspacePage('receipt-orders',['business.read']),'receipt-orders');
   assert.equal(resolveWorkspacePage('receipt-orders',['dashboard.read']),'dashboard-sales');
   assert.equal(resolveWorkspacePage('receipt-orders',[]),'');

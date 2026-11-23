@@ -355,6 +355,58 @@ class SalesServiceTest {
     assertTrue(allocation.path("warnings").toString().contains("核销"));
   }
 
+  @Test void receiptExportIncludesAllMatchingPagesUsingTheSameFiltersAndTotalsWithoutWriting() {
+    order("paid", "200", "105");
+    order("other-owner", "200", "0").put("owner", "小李");
+    for (int i = 0; i < 105; i++) {
+      receipt("matching-" + i, "paid", "1", "银行转账", "2026-12-02T01:00:00Z")
+          .put("receivedOn", "2026-11-30").put("operator", "统一到账")
+          .put("taxRate", "13%").put("tax", "0.13");
+    }
+    receipt("wrong-owner", "other-owner", "7", "银行转账", "2026-11-02T01:00:00Z").put("operator", "统一到账");
+    receipt("wrong-customer", "paid", "8", "银行转账", "2026-11-02T01:00:00Z").put("operator", "统一到账").put("customerId", "c2");
+    receipt("wrong-method", "paid", "9", "预收款核销", "2026-11-02T01:00:00Z").put("operator", "统一到账");
+    receipt("wrong-month", "paid", "10", "银行转账", "2026-11-02T01:00:00Z").put("operator", "统一到账").put("receivedOn", "2026-10-31");
+    receipt("wrong-query", "paid", "11", "银行转账", "2026-11-02T01:00:00Z");
+    var beforeState = state.deepCopy();
+    var beforeReceipts = receipts.stream().map(JsonNode::deepCopy).toList();
+
+    var exported = mapper.valueToTree(service.exportReceipts("统一到账", "2026-11", "小王", "c1", "银行转账", reader));
+    assertEquals(105, exported.path("rows").size()); assertEquals(105, exported.path("total").asInt());
+    verify(db, times(1)).documents("receipts", false, 0);
+    assertTrue(exported.path("rows").findValuesAsText("id").stream().allMatch(id -> id.startsWith("matching-")));
+    money("105", exported.path("summary").path("amount")); money("13.65", exported.path("summary").path("tax"));
+    var secondPage = receiptList(2, 20, "统一到账", "2026-11", "小王", "c1", "银行转账");
+    assertEquals(20, secondPage.path("rows").size()); assertEquals(2, secondPage.path("page").asInt());
+    assertEquals(exported.path("summary"), secondPage.path("summary"));
+    assertEquals(exported.path("options"), secondPage.path("options"));
+    assertEquals(exported.path("warnings"), secondPage.path("warnings"));
+    assertEquals(beforeState, state); assertEquals(beforeReceipts, receipts);
+    verify(db, never()).state(true); verify(db, never()).receipt(any());
+    verify(jdbc, never()).update(anyString(), any(Object[].class));
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+  }
+
+  @Test void receiptExportRequiresBusinessReadAndValidatesAllFiltersBeforeReading() {
+    var dashboardOnly = new Actor("dash", "看板", Set.of("dashboard.read"));
+    assertEquals(403, assertThrows(ApiException.class,
+        () -> service.exportReceipts("", "2026-11", "", "", "", dashboardOnly)).status());
+    assertThrows(ApiException.class, () -> service.exportReceipts("x".repeat(201), "", "", "", "", reader));
+    assertThrows(ApiException.class, () -> service.exportReceipts("", "", "x".repeat(192), "", "", reader));
+    assertThrows(ApiException.class, () -> service.exportReceipts("", "", "", "x".repeat(192), "", reader));
+    assertThrows(ApiException.class, () -> service.exportReceipts("", "", "", "", "x".repeat(51), reader));
+    assertThrows(ApiException.class, () -> service.exportReceipts("", "2026-13", "", "", "", reader));
+    verify(db, never()).state(anyBoolean()); verify(db, never()).documents(anyString(), anyBoolean(), anyInt());
+  }
+
+  @Test void receiptExportWithNoMatchesKeepsAnEmptyReportAndUnknownTax() {
+    receipt("cash", "missing", "5", "银行转账", "2026-11-02T01:00:00Z");
+    var exported = mapper.valueToTree(service.exportReceipts("", "2026-12", "", "", "", reader));
+    assertEquals(0, exported.path("total").asInt()); assertTrue(exported.path("rows").isEmpty());
+    money("0", exported.path("summary").path("amount")); assertTrue(exported.path("summary").path("tax").isNull());
+    assertTrue(exported.path("options").path("methods").toString().contains("银行转账"));
+  }
+
   @Test void receiptMonthPrefersReceivedOnAndFallsBackToShanghaiRegistrationDateOnlyWhenAbsent() {
     order("paid", "100", "100");
     receipt("actual-nov", "paid", "10", "银行转账", "2026-12-02T01:00:00Z").put("receivedOn", "2026-11-30");

@@ -251,6 +251,19 @@ public class SalesService {
                                       String selectedCustomer, String method, Actor actor) {
     actor.require("business.read");
     validate(page, pageSize, q, owner, selectedCustomer);
+    return receiptReport(page, pageSize, q, selectedMonth, owner, selectedCustomer, method, true);
+  }
+
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public Map<String, Object> exportReceipts(String q, String selectedMonth, String owner,
+                                           String selectedCustomer, String method, Actor actor) {
+    actor.require("business.read");
+    validate(1, 100, q, owner, selectedCustomer);
+    return receiptReport(1, 100, q, selectedMonth, owner, selectedCustomer, method, false);
+  }
+
+  private Map<String, Object> receiptReport(int page, int pageSize, String q, String selectedMonth, String owner,
+                                           String selectedCustomer, String method, boolean paginated) {
     require(method.length() <= 50, "收款方式筛选无效");
     var period = selectedMonth.isEmpty() ? null : month(selectedMonth);
     String query = q.trim().toLowerCase(Locale.ROOT);
@@ -352,7 +365,9 @@ public class SalesService {
     summary.put("customers", paidCustomers.size());
     var options = new LinkedHashMap<String, Object>(); options.put("owners", owners); options.put("methods", methods);
     options.put("customers", customerOptions.entrySet().stream().map(e -> Map.of("id", e.getKey(), "name", e.getValue())).toList());
-    var result = page(matched, page, pageSize); result.put("summary", summary); result.put("options", options); result.put("warnings", new ArrayList<>(warnings));
+    var result = paginated ? page(matched, page, pageSize) : new LinkedHashMap<String, Object>();
+    if (!paginated) { result.put("rows", matched); result.put("total", matched.size()); }
+    result.put("summary", summary); result.put("options", options); result.put("warnings", new ArrayList<>(warnings));
     return result;
   }
 
