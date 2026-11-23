@@ -1,0 +1,18 @@
+services:
+  crm:
+    extra_hosts:
+      - "crm.emie.cn=${CRM_JST_BRIDGE_GATEWAY:?Set CRM_JST_BRIDGE_GATEWAY to the CRM Docker bridge gateway}"
+    environment:
+      CRM_JST_GATEWAY_URL: https://crm.emie.cn:9002/_internal/jst
+      CRM_JST_ENV: production
+      CRM_JST_READ_ONLY: ${CRM_JST_READ_ONLY:-true}
+
+  jst-gateway:
+    extends:
+      file: jst-gateway/compose.yaml
+      service: gateway
+    environment:
+      JST_ENV: production
+      JST_AUTO_REFRESH: ${JST_AUTO_REFRESH:-0}
+      JST_ALLOW_ORDER_UPLOAD: ${JST_ALLOW_ORDER_UPLOAD:-0}
+      JST_ALLOW_ORDER_CHANGE: ${JST_ALLOW_ORDER_CHANGE:-0}

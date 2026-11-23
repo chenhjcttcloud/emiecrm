@@ -53,3 +53,24 @@ CREATE TABLE IF NOT EXISTS jst_catalog_jobs(environment VARCHAR(16) PRIMARY KEY,
 CREATE TABLE IF NOT EXISTS audit_archives(id VARCHAR(64) PRIMARY KEY,quarter VARCHAR(7) NOT NULL,record_count INT NOT NULL,raw_bytes INT NOT NULL,compressed_bytes INT NOT NULL,sha256 CHAR(64) NOT NULL,content LONGBLOB NOT NULL,created_at VARCHAR(32) NOT NULL,INDEX audit_archive_quarter(quarter)) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS dashboard_targets(month_key CHAR(7) PRIMARY KEY,amount DECIMAL(14,2) NULL,revision BIGINT NOT NULL DEFAULT 0,updated_at VARCHAR(32) NULL,updated_by VARCHAR(191) NULL) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS sales_targets(month_key CHAR(7) NOT NULL,owner VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,amount DECIMAL(14,2) NULL,revision BIGINT NOT NULL DEFAULT 0,updated_at VARCHAR(32) NULL,updated_by VARCHAR(191) NULL,PRIMARY KEY(month_key,owner)) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS sales_target_scope(id TINYINT PRIMARY KEY,mode VARCHAR(16) NOT NULL,department_ids JSON NOT NULL,revision BIGINT NOT NULL DEFAULT 0,updated_at VARCHAR(32) NULL,updated_by VARCHAR(191) NULL,CHECK(id=1),CHECK(mode IN ('all','selected'))) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS feishu_order_approvals(
+  order_id VARCHAR(191) PRIMARY KEY,
+  status VARCHAR(16) NOT NULL,
+  instance_code VARCHAR(191) NULL,
+  payload LONGTEXT NOT NULL,
+  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY feishu_approval_poll(status,updated_at),
+  UNIQUE KEY feishu_approval_instance(instance_code)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS feishu_receipt_approvals(
+  id VARCHAR(64) PRIMARY KEY,
+  status VARCHAR(16) NOT NULL,
+  instance_code VARCHAR(191) NULL,
+  payload LONGTEXT NOT NULL,
+  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY feishu_receipt_poll(status,updated_at),
+  UNIQUE KEY feishu_receipt_instance(instance_code)
+) ENGINE=InnoDB;

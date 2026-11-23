@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {salesQuantity,salesItemsCsv,salesTargetStatus,salesOrderFinance,salesTargetDepartmentStatus,salesTargetDepartmentLabel,matchesSalesTargetFilters} from '../src/salesModel.js';
+import {salesQuantity,salesItemsCsv,salesTargetStatus,salesOrderFinance,salesTargetDepartmentStatus,salesTargetDepartmentLabel,matchesSalesTargetFilters,normalizeSalesTargetScopeSettings} from '../src/salesModel.js';
 
 test('sales quantities preserve six decimal places and large values',()=>{
  assert.equal(salesQuantity('1234567890123456.000001'),'1,234,567,890,123,456.000001');
@@ -47,4 +47,13 @@ test('unresolved departments remain separate and old target rows display unassig
   assert.equal(matchesSalesTargetFilters(row,{department:'status:assigned'}),false);
  }
  assert.equal(salesTargetDepartmentLabel({departmentStatus:'ambiguous'}),'人员重名待确认');
+});
+
+test('department participation settings preserve empty selection and reject unsafe version data',()=>{
+ const empty={mode:'selected',departmentIds:[],revision:0,departments:[{id:'d1',name:'销售部'}]};
+ assert.deepEqual(normalizeSalesTargetScopeSettings(empty),{...empty,missingDepartmentIds:[]});
+ const historical={...empty,departmentIds:['gone']};
+ assert.deepEqual(normalizeSalesTargetScopeSettings(historical).missingDepartmentIds,['gone']);
+ assert.deepEqual(normalizeSalesTargetScopeSettings(historical).departmentIds,['gone']);
+ for(const change of [{mode:'invalid'},{revision:-1},{revision:1.5},{departmentIds:['d1','d1']},{departments:[{id:'d1',name:'销售部'},{id:'d1',name:'同名部门'}]}])assert.throws(()=>normalizeSalesTargetScopeSettings({...empty,...change}));
 });

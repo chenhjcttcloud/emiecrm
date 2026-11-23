@@ -45,6 +45,11 @@ public class BusinessController {
     return service.save(body, auth.actor(req));
   }
 
+  @PostMapping("/orders/{id}/delete")
+  public JsonNode deleteOrder(@PathVariable String id, HttpServletRequest req) {
+    return service.deleteOrder(id, auth.actor(req));
+  }
+
   @PostMapping("/jst/settlements/candidates")
   public Object settlementCandidates(@RequestBody JsonNode body, HttpServletRequest req) {
     return settlements.candidates(body, auth.actor(req));

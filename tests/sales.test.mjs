@@ -13,10 +13,11 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     user:process.env.CRM_DB_USER||'emiecrm',password:process.env.CRM_DB_PASSWORD||process.env.MYSQL_PASSWORD,
     database:process.env.CRM_DB_NAME,connectionLimit:3});
   let token='',originalState;
-  const snapshots=new Map(),tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets'];
+  const snapshots=new Map(),tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets','sales_target_scope'];
   const suffix=Date.now().toString(36),users=['sales-read-'+suffix,'sales-target-'+suffix],roles=['销售只读测试'+suffix,'销售目标测试'+suffix];
   const departmentIds=['sales-dept-a-'+suffix,'sales-dept-b-'+suffix],departmentNames=['销售测试一部'+suffix,'销售测试二部'+suffix];
   const departmentUsers=['sales-person-one-'+suffix,'sales-person-two-'+suffix];
+  const scopeUser='sales-scope-'+suffix,scopeRole='范围管理测试'+suffix;
   async function request(path,body,expected=200,auth=token){
     const response=await fetch(base+'/api/'+path,{method:body===undefined?'GET':'POST',
       headers:{'Content-Type':'application/json',...(auth?{Authorization:'Bearer '+auth}:{})},
@@ -192,6 +193,112 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
     const december=(await request('dashboard/sales?month=2026-12')).target;
     assert.equal(december.source,'personnel'); assert.equal(december.personCount,1);
     assert.ok(['0.01','0.02'].includes(december.amount));
+
+    // Global department scope controls target participants and denominators, while preserving source records.
+    await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'100',revision:2},200,manager);
+    const actualBaseline=await request('dashboard/sales?month=2026-11');
+    assert.equal(actualBaseline.target.amount,'110.00');
+    const [personalTargetsBaseline]=await pool.query('SELECT * FROM sales_targets ORDER BY month_key,owner');
+    const [companyTargetsBaseline]=await pool.query('SELECT * FROM dashboard_targets ORDER BY month_key');
+    await request('system/roles',{action:'create',name:scopeRole,permissions:['system.manage']});
+    await request('system/users',{action:'create',name:scopeUser,displayName:scopeRole,role:scopeRole,status:'启用',password:'sales-test-password'});
+    const scopeAdmin=(await request('login',{name:scopeUser,password:'sales-test-password'})).token;
+    for(const auth of [viewer,manager]){
+      await request('sales/target-scope',undefined,403,auth);
+      await request('sales/target-scope',{mode:'all',departmentIds:[],revision:0},403,auth);
+    }
+    await request('sales/targets?month=2026-11',undefined,403,scopeAdmin);
+    await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'1',revision:3},403,scopeAdmin);
+    let scope=await request('sales/target-scope',undefined,200,scopeAdmin);
+    assert.equal(scope.mode,'all'); assert.deepEqual(scope.departmentIds,[]); assert.equal(scope.revision,0);
+    for(let index=0;index<departmentIds.length;index++)assert.ok(scope.departments.some(department=>department.id===departmentIds[index]));
+    for(const invalid of [
+      {mode:'invalid',departmentIds:[],revision:0},
+      {mode:'all',departmentIds:[departmentIds[0]],revision:0},
+      {mode:'selected',departmentIds:'invalid',revision:0},
+      {mode:'selected',departmentIds:['missing-department'],revision:0},
+      {mode:'selected',departmentIds:[departmentIds[0],departmentIds[0]],revision:0},
+      {mode:'selected',departmentIds:[],revision:0.5},
+    ])await request('sales/target-scope',invalid,400,scopeAdmin);
+    const scopeWrites=await Promise.all(departmentIds.map(departmentId=>fetch(base+'/api/sales/target-scope',{method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:'Bearer '+scopeAdmin},
+      body:JSON.stringify({mode:'selected',departmentIds:[departmentId],revision:0})})));
+    assert.deepEqual(scopeWrites.map(response=>response.status).sort(),[200,409]);
+    scope=await request('sales/target-scope',undefined,200,scopeAdmin);
+    assert.equal(scope.revision,1);
+    await request('sales/target-scope',{mode:'all',departmentIds:[],revision:0},409,scopeAdmin);
+    async function configureScope(mode,departmentIds){
+      scope=await request('sales/target-scope',{mode,departmentIds,revision:scope.revision},200,scopeAdmin);
+      const shared=await request('sales/target-scope');
+      assert.equal(shared.mode,mode); assert.deepEqual(shared.departmentIds,departmentIds); assert.equal(shared.revision,scope.revision);
+    }
+    async function assertScopedTargets(amount,personCount,expectedOwners){
+      const result=await request('sales/targets?month=2026-11',undefined,200,viewer);
+      assert.equal(result.scope.mode,scope.mode); assert.deepEqual(result.scope.departmentIds,scope.departmentIds); assert.equal(result.scope.revision,scope.revision);
+      assert.deepEqual(result.rows.map(row=>row.owner).sort(),[...expectedOwners].sort());
+      assert.deepEqual([...result.options.owners].sort(),[...expectedOwners].sort());
+      const dashboard=await request('dashboard/sales?month=2026-11');
+      assert.equal(dashboard.target.amount,amount); assert.equal(dashboard.target.source,'personnel');
+      assert.equal(dashboard.target.personCount,personCount); assert.equal(dashboard.target.manualAmount,'777.00');
+      assert.equal(dashboard.target.scope.mode,scope.mode); assert.deepEqual(dashboard.target.scope.departmentIds,scope.departmentIds);
+      assert.deepEqual(dashboard.summary,actualBaseline.summary,'目标范围不得改变实际销售与回款业绩');
+      assert.deepEqual(dashboard.orders,actualBaseline.orders); assert.deepEqual(dashboard.daily,actualBaseline.daily);
+      const annual=(await request('dashboard/targets?year=2026')).targets.find(target=>target.month==='2026-11');
+      assert.equal(annual.amount,amount); assert.equal(annual.source,'personnel'); assert.equal(annual.personCount,personCount);
+      return result;
+    }
+    const secondPerson='部门二成员'+suffix;
+    await configureScope('selected',[departmentIds[1]]);
+    const visible=await assertScopedTargets('100.00',1,['销售王',secondPerson]);
+    assert.deepEqual(visible.options.departments,[{id:departmentIds[1],name:departmentNames[1]}]);
+    const [storedScope]=await pool.query('SELECT mode,department_ids,revision FROM sales_target_scope WHERE id=1');
+    assert.equal(storedScope[0].mode,'selected');
+    assert.deepEqual(typeof storedScope[0].department_ids==='string'?JSON.parse(storedScope[0].department_ids):storedScope[0].department_ids,[departmentIds[1]]);
+    assert.equal(storedScope[0].revision,scope.revision);
+    const colleague=(await request('login',{name:departmentUsers[0],password:'sales-test-password'})).token;
+    const colleagueTargets=await request('sales/targets?month=2026-11',undefined,200,colleague);
+    assert.deepEqual(colleagueTargets.rows,visible.rows,'范围配置应被所有业务查看账号共享');
+    assert.deepEqual(colleagueTargets.scope,visible.scope);
+    await request('sales/targets',{month:'2026-11',owner:'销售李',amount:'99',revision:1},409,manager);
+
+    await request('system/users',{action:'update',name:departmentUsers[1],displayName:'销售王',role:roles[0],departmentId:departmentIds[1],status:'启用'});
+    await assertScopedTargets('0.00',0,[]);
+    await request('sales/targets',{month:'2026-11',owner:'销售王',amount:'99',revision:3},409,manager);
+    await request('system/users',{action:'update',name:departmentUsers[1],displayName:secondPerson,role:roles[0],departmentId:departmentIds[1],status:'启用'});
+    await assertScopedTargets('100.00',1,['销售王',secondPerson]);
+    await request('system/users',{action:'update',name:departmentUsers[0],displayName:'销售王',role:roles[0],departmentId:departmentIds[0],status:'启用'});
+    await assertScopedTargets('0.00',0,[secondPerson]);
+    await request('system/users',{action:'update',name:departmentUsers[0],displayName:'销售王',role:roles[0],departmentId:departmentIds[1],status:'启用'});
+    await assertScopedTargets('100.00',1,['销售王',secondPerson]);
+
+    await configureScope('selected',[departmentIds[0]]);
+    await pool.query('DELETE FROM departments WHERE id=?',[departmentIds[0]]);
+    const missingDepartment=await request('sales/target-scope',undefined,200,scopeAdmin);
+    assert.deepEqual(missingDepartment.missingDepartmentIds,[departmentIds[0]]);
+    const missingResult=await assertScopedTargets('0.00',0,[]); assert.deepEqual(missingResult.options.departments,[]);
+    await request('sales/target-scope',{mode:'selected',departmentIds:[departmentIds[0]],revision:scope.revision},400,scopeAdmin);
+    await pool.query('INSERT INTO departments(id,name,manager,status) VALUES(?,?,?,?)',[departmentIds[0],departmentNames[0],'','启用']);
+    await configureScope('selected',[]);
+    const emptyScope=await assertScopedTargets('0.00',0,[]); assert.deepEqual(emptyScope.options.departments,[]);
+    await request('dashboard/targets',{month:'2026-11',amount:'999',revision:1},409,manager);
+    const itemsAfterScope=await request('sales/items?month=2026-11&pageSize=100',undefined,200,viewer);
+    assert.equal(itemsAfterScope.total,allItems.total); assert.deepEqual(itemsAfterScope.summary,allItems.summary);
+    const receiptsAfterScope=await request('sales/receipts?month=2026-11&pageSize=100',undefined,200,viewer);
+    assert.equal(receiptsAfterScope.total,fullLedger.total); assert.deepEqual(receiptsAfterScope.summary,fullLedger.summary);
+    await configureScope('all',[]);
+    const restoredTargets=await request('sales/targets?month=2026-11',undefined,200,viewer);
+    assert.ok(restoredTargets.rows.some(row=>row.owner==='销售李'&&row.amount==='10.00'));
+    assert.ok(restoredTargets.rows.some(row=>row.owner==='销售王'&&row.amount==='100.00'));
+    const restoredCompany=(await request('dashboard/sales?month=2026-11')).target;
+    assert.equal(restoredCompany.amount,'110.00'); assert.equal(restoredCompany.personCount,2);
+    const [personalTargetsAfter]=await pool.query('SELECT * FROM sales_targets ORDER BY month_key,owner');
+    const [companyTargetsAfter]=await pool.query('SELECT * FROM dashboard_targets ORDER BY month_key');
+    assert.deepEqual(personalTargetsAfter,personalTargetsBaseline,'隐藏及恢复部门不得删改原始人员目标');
+    assert.deepEqual(companyTargetsAfter,companyTargetsBaseline,'范围配置不得写回原公司手工目标');
+    const scopeAudit=(await request('system/audit',undefined,200,scopeAdmin)).find(event=>event.user===scopeUser&&event.details?.type==='SALES_TARGET_SCOPE_CHANGED');
+    assert.ok(scopeAudit,'范围配置变更必须保留审计日志');
+    assert.ok(scopeAudit.details.after.revision>scopeAudit.details.before.revision);
+    assert.deepEqual((await request('me',undefined,200,viewer)).permissions.sort(),viewerPermissions);
     const [receiptAfter]=await pool.query('SELECT id,payload FROM receipts ORDER BY id');
     assert.deepEqual(receiptAfter,receiptBaseline,'人员目标维护不得改写收款流水');
     const [stored]=await pool.query('SELECT payload FROM state WHERE id=1');
@@ -203,9 +310,9 @@ test('销售模块：商品明细、收款明细、人员目标与权限',async(
         await connection.beginTransaction();
         for(const table of tables)if(snapshots.has(table))await restoreTable(connection,table,snapshots.get(table));
         if(originalState!==undefined)await connection.query('UPDATE state SET payload=? WHERE id=1',[originalState]);
-        for(const user of [...users,...departmentUsers]){await connection.query('DELETE FROM feishu_identities WHERE user_name=?',[user]);
+        for(const user of [...users,...departmentUsers,scopeUser]){await connection.query('DELETE FROM feishu_identities WHERE user_name=?',[user]);
           await connection.query('DELETE FROM user_profiles WHERE name=?',[user]);await connection.query('DELETE FROM users WHERE name=?',[user])}
-        for(const role of roles)await connection.query('DELETE FROM roles WHERE name=?',[role]);
+        for(const role of [...roles,scopeRole])await connection.query('DELETE FROM roles WHERE name=?',[role]);
         for(const departmentId of departmentIds)await connection.query('DELETE FROM departments WHERE id=?',[departmentId]);
         await connection.commit();
       }catch(error){await connection.rollback();throw error}finally{connection.release()}

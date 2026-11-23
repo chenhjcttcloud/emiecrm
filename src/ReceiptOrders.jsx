@@ -1,62 +1,138 @@
 import {csvCell} from './csv';
-import React,{useEffect,useState} from 'react';
+import React,{useEffect,useRef,useState} from 'react';
 import PaymentMethodPicker from './PaymentMethodPicker';
+import OrderSelect from './OrderSelect';
 import Pagination from './Pagination';
 import {customerOptions} from './customerOptions';
 import {moneyCents} from './orderMoney';
+import {recordId} from './recordId';
+import {orderExecutionView} from './feishuApprovalModel';
+import ReceiptApprovalPanel from './ReceiptApprovals';
+import {buildDirectReceiptChange,buildReceiptApprovalRequest,receiptApprovalLabels,receiptApprovalProblem,receiptPaymentMethods,reservedReceiptOrderIds} from './receiptApprovalModel';
+import ReceiptProductDetails,{ReceiptDetailDrawer} from './ReceiptProductDetails';
+import {canReceiveOrder,itemsFromOrder,productSummary,productDetailsText,productSourceLabel,receiptProducts} from './receiptProductModel';
 
 const money=value=>'¥ '+Number(value||0).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const time=value=>value?new Date(value).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}):'--';
+const cents=value=>moneyCents(value)??0;
 
-export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods,entryOnly=false,onEntryClose,onRegistered}){
-  const[receipts,setReceipts]=useState([]),[query,setQuery]=useState(''),[method,setMethod]=useState(''),[selecting,setSelecting]=useState(entryOnly),[customer,setCustomer]=useState(''),[payments,setPayments]=useState({}),[received,setReceived]=useState(''),[payMethod,setPayMethod]=useState(()=>paymentMethods[0]||''),[saving,setSaving]=useState(false),[formError,setFormError]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState('');
-  const[receivedOn,setReceivedOn]=useState('');
+export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods,entryOnly=false,onEntryClose,onRegistered,
+  approvals,canRegister=true,attempt=null,onAttemptChange,initialOrderId,shipments={}}){
+  const preset=db.orders.find(order=>order.id===initialOrderId);
+  const[receipts,setReceipts]=useState([]),[query,setQuery]=useState(''),[method,setMethod]=useState(''),[selecting,setSelecting]=useState(entryOnly),
+    [customer,setCustomer]=useState(attempt?.customerId||preset?.customerId||''),[payments,setPayments]=useState(()=>attempt?Object.fromEntries(attempt.allocations.map(row=>[row.orderId,String(row.amount)])):preset?{[preset.id]:''}:{}),
+    [received,setReceived]=useState(attempt?String(attempt.amount):''),[payMethod,setPayMethod]=useState(attempt?.method||paymentMethods[0]||''),
+    [saving,setSaving]=useState(false),[formError,setFormError]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState('');
+  const[receiptDate,setReceiptDate]=useState(attempt?.receiptDate||''),[receiptCategory,setReceiptCategory]=useState(attempt?.receiptCategory||''),[note,setNote]=useState(attempt?.note||''),
+    [expandedOrder,setExpandedOrder]=useState(null),[detail,setDetail]=useState(null),[checkingSubmission,setCheckingSubmission]=useState(Boolean(attempt)),[feedback,setFeedback]=useState('');
+  const submission=useRef(attempt),submitting=useRef(false);
+  const orderIndex=new Map(db.orders.map(order=>[order.id,order]));
+  const receiptView=row=>({...row,owner:row.owner??orderIndex.get(row.orderId||row.order)?.owner,...receiptProducts(row,orderIndex.get(row.orderId||row.order),db.products)});
   const[page,setPage]=useState(1),[pageSize,setPageSize]=useState(20),[stats,setStats]=useState({total:0,amount:0,customers:0,methods:[],page:1});
   useEffect(()=>{if(entryOnly)return;let active=true;setLoading(true);setError('');const timer=setTimeout(()=>{
    api('receipts?'+new URLSearchParams({page,pageSize,q:query,method})).then(data=>{if(active){setReceipts(data.rows);setStats(data)}}).catch(e=>{if(active)setError(e.message)}).finally(()=>{if(active)setLoading(false)});
-  },200);return()=>{active=false;clearTimeout(timer)}},[db.revision,page,pageSize,query,method,entryOnly]);
+  },200);return()=>{active=false;clearTimeout(timer)}},[api,db.revision,page,pageSize,query,method,entryOnly]);
+  useEffect(()=>{
+    const pending=submission.current;
+    if(!pending||!checkingSubmission)return;
+    const record=approvals.rows.find(row=>row.id===pending.requestId||row.requestId===pending.requestId);
+    if(record)completeSubmission(record);
+  },[approvals.rows,checkingSubmission]);
   const rows=receipts;
-  const eligible=db.orders.filter(r=>r.customerId&&r.status==='已批准'&&Number(r.paid||0)<Number(r.total));
-  const cents=value=>Math.round(Number(value||0)*100);
-  const customerOrders=eligible.filter(r=>r.customerId===customer);
-  const selected=customerOrders.filter(r=>Object.hasOwn(payments,r.id));
+  const eligible=db.orders.map(order=>({...order,...orderExecutionView(order,shipments[order.id])})).filter(canReceiveOrder);
+  const customerOrders=eligible.filter(order=>order.customerId===customer);
+  const selected=customerOrders.filter(order=>Object.hasOwn(payments,order.id));
+  const reserved=reservedReceiptOrderIds(approvals.rows),methods=receiptPaymentMethods(paymentMethods,selected);
   const needsReceivedDate=selected.some(order=>order.source==='jushuitan-settlement');
-  const totals=selected.reduce((s,r)=>({total:s.total+cents(r.total),paid:s.paid+cents(r.paid),unpaid:s.unpaid+cents(r.total)-cents(r.paid),payment:s.payment+cents(payments[r.id])}),{total:0,paid:0,unpaid:0,payment:0});
-  const receivedValid=received!==''&&Number.isFinite(Number(received))&&Number(received)>0&&/^\d+(?:\.\d{1,2})?$/.test(received);
-  const difference=cents(received)-totals.payment;
-  const reconciled=receivedValid&&totals.payment>0&&difference===0;
-  async function submitPayment(e){
-    e.preventDefault();if(saving)return;setFormError('');
-    if(!paymentMethods.includes(payMethod)){setFormError('请选择已启用的收款方式；如无可用方式，请在系统管理中启用');return}
-    if(!selected.length){setFormError('请至少选择一笔订单');return}
-    if(selected.some(r=>moneyCents(payments[r.id])===null||cents(payments[r.id])<=0||cents(payments[r.id])>cents(r.total)-cents(r.paid))){setFormError('本次付款须大于零，且不能超过该订单未收金额');return}
-    if(needsReceivedDate&&!receivedOn){setFormError('请填写结算单的实际到账日期');return}
-    if(!reconciled){setFormError('实际收款金额必须与上方本次付款合计一致，请核对后提交');return}
-    setSaving(true);
-    try{const ids=new Set(selected.map(r=>r.id));await save({...db,orders:db.orders.map(r=>ids.has(r.id)?{...r,paid:(cents(r.paid)+cents(payments[r.id]))/100,method:payMethod,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:r)},{amount:Number(received),customerId:customer,customer:db.customers.find(c=>c.id===customer)?.name,method:payMethod,...(needsReceivedDate?{receivedOn}:{})});setSelecting(false);setPayments({});setReceived('');onRegistered?.()}catch(e){setFormError(e.message)}finally{setSaving(false)}
+  const totals=selected.reduce((sum,order)=>({total:sum.total+cents(order.total),paid:sum.paid+cents(order.paid),unpaid:sum.unpaid+cents(order.total)-cents(order.paid),payment:sum.payment+cents(payments[order.id])}),{total:0,paid:0,unpaid:0,payment:0});
+  const receivedCents=moneyCents(received),receivedValid=received!==''&&receivedCents!==null&&receivedCents>0;
+  const difference=(receivedCents??0)-totals.payment,reconciled=receivedValid&&totals.payment>0&&difference===0;
+  const formLocked=saving||checkingSubmission;
+  const approvalRequired=!(approvals.config?.enabled===false&&approvals.config?.required===false);
+  const problem=receiptApprovalProblem(approvals.config,approvals.error,canRegister);
+  const balance=db.customers.find(row=>row.id===customer)?.balance??0;
+  function completeSubmission(record){
+    if(!submission.current)return;
+    submission.current=null;onAttemptChange?.(null);setCheckingSubmission(false);setFormError('');
+    const message=record.status==='APPROVED'&&record.booked!==true?'收款审批已通过，入账待处理，请在审批详情中核对。':
+      '收款申请已记录：'+(receiptApprovalLabels[record.status]||'请查看审批状态')+'。审批通过后入账，不触发发货。';
+    setFeedback(message);setSelecting(false);setPayments({});setReceived('');onRegistered?.(record);
   }
-  async function exportRows(){try{const all=await api('receipts');const exported=all.filter(r=>(!method||r.method===method)&&[r.order,r.customer,r.operator,r.method].some(v=>String(v||'').toLowerCase().includes(query.toLowerCase())));const table=[['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人'],...exported.map(r=>[r.order,r.customer,r.type,r.amount,r.method,r.receivedOn||'',time(r.time),r.operator])];const url=URL.createObjectURL(new Blob(['\uFEFF'+table.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='收款.csv';a.click();URL.revokeObjectURL(url)}catch(e){setError(e.message)}}
-  function closeEntry(){setSelecting(false);onEntryClose?.()}
-  const receiptForm=(
-    <DialogLayer kind="drawer" open={selecting} onClose={()=>{if(!saving)closeEntry()}}><form className="drawer" onSubmit={submitPayment}>
-      <div className="modal-title"><h2>新建收款</h2><button type="button" disabled={saving} aria-label="关闭" onClick={closeEntry}><Icon name="close"/></button></div>
-      <div className="modal-body"><div className="field"><span>客户 <em>*</em></span><PaymentMethodPicker label="客户" options={customerOptions(db.customers)} value={customer} disabled={saving} onChange={name=>{setCustomer(name);setPayments({});setReceived('');setFormError('')}}/></div>
-      <p className="form-hint">勾选需要收款的订单，填写每笔订单本次付款金额。仅显示已批准且未结清的订单。</p>
-      <div className="table-scroll"><table className="receipt-selection"><thead><tr>{['选择','订单编号','订单总金额','已付金额','未收金额','本次付款'].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{customerOrders.map(r=><tr key={r.id}><td><input type="checkbox" aria-label={'选择订单 '+r.id} disabled={saving} checked={Object.hasOwn(payments,r.id)} onChange={e=>setPayments(prev=>{const next={...prev};if(e.target.checked)next[r.id]='';else delete next[r.id];return next})}/></td><td>{r.id}<small>{r.type}</small></td><td>{money(r.total)}</td><td>{money(r.paid)}</td><td>{money(r.total-Number(r.paid||0))}</td><td><input aria-label={r.id+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(r.total)-cents(r.paid))/100).toFixed(2)} required disabled={saving||!Object.hasOwn(payments,r.id)} placeholder="请输入金额" value={payments[r.id]??''} onChange={e=>setPayments(prev=>({...prev,[r.id]:e.target.value}))}/></td></tr>)}</tbody></table>{!customerOrders.length&&<div className="empty">{customer?'该客户暂无已批准且未结清的订单':'请先选择客户'}</div>}</div>
+  async function submitPayment(event){
+    event.preventDefault();if(submitting.current)return;setFormError('');
+    if(!canRegister){setFormError('当前账号没有登记收款权限');return}
+    let payload=submission.current;
+    if(!payload&&!approvalRequired){
+      if(problem){setFormError(problem);return}
+      submitting.current=true;setSaving(true);
+      try{
+        const change=buildDirectReceiptChange({db,customerId:customer,selected,payments,amount:received,method:payMethod,
+          receiptDate,methods:paymentMethods,config:approvals.config,records:approvals.rows});
+        await save(change.data,change.verification);setSelecting(false);setPayments({});setReceived('');
+        setFeedback('收款已登记。');onRegistered?.({direct:true});
+      }catch(failure){setFormError(failure.message)}finally{submitting.current=false;setSaving(false)}
+      return;
+    }
+    if(!payload){
+      if(problem){setFormError(problem);return}
+      try{payload=buildReceiptApprovalRequest({requestId:recordId(''),db,customerId:customer,selected,payments,amount:received,
+        method:payMethod,receiptDate,receiptCategory,note,methods:paymentMethods,config:approvals.config,records:approvals.rows})}
+      catch(failure){setFormError(failure.message);return}
+      submission.current=payload;onAttemptChange?.(payload);
+    }
+    submitting.current=true;setSaving(true);
+    try{
+      const result=await approvals.request(null,null,payload);
+      if(result?.approval)completeSubmission(result.approval);
+    }catch(failure){
+      if(!failure.status||failure.status>=500){
+        setCheckingSubmission(true);setFormError('收款申请结果待核对，已保留原申请和填写内容。请核对原申请，避免重复提交。'+failure.message);
+      }else{submission.current=null;onAttemptChange?.(null);setCheckingSubmission(false);setFormError(failure.message)}
+    }finally{submitting.current=false;setSaving(false)}
+  }
+  async function exportRows(){try{const all=await api('receipts');const exported=all.filter(row=>(!method||row.method===method)&&[row.order,row.customer,row.operator,row.method].some(value=>String(value||'').toLowerCase().includes(query.toLowerCase())));const table=[['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人','产品资料来源','产品明细'],...exported.map(receiptView).map(row=>[row.order,row.customer,row.type,row.amount,row.method,row.receivedOn||'',time(row.time),row.operator,productSourceLabel(row.itemsSource),productDetailsText(row.items)])];const url=URL.createObjectURL(new Blob(['\uFEFF'+table.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='收款.csv';link.click();URL.revokeObjectURL(url)}catch(failure){setError(failure.message)}}
+  function closeEntry(){if(saving)return;setSelecting(false);onEntryClose?.()}
+  function openEntry(){
+    if(submission.current){setCheckingSubmission(true);setSelecting(true);return}
+    setCustomer('');setPayments({});setReceived('');setPayMethod(paymentMethods[0]||'');setReceiptDate('');setReceiptCategory('');setNote('');setExpandedOrder(null);setFormError('');setSelecting(true);
+  }
+  const receiptForm=<DialogLayer kind="drawer" label="收款审批申请" open={selecting} onClose={closeEntry}><form className="drawer receipt-approval-form" onSubmit={submitPayment}>
+    <div className="modal-title"><h2>{approvalRequired||checkingSubmission?'新建收款申请':'新建收款'}</h2><button type="button" disabled={saving} aria-label="关闭收款申请" onClick={closeEntry}><Icon name="close"/></button></div>
+    <div className="modal-body">
+      {approvalRequired&&<p className="receipt-approval-notice">提交后发起飞书收款审批，审批通过前不计入已收金额。预收款核销同样通过审批后扣减余额；收款审批不触发发货。</p>}
+      {problem&&<p className="system-error" role="status">{problem} <button type="button" className="link-btn" disabled={saving} onClick={approvals.retry}>重新加载</button></p>}
+      {checkingSubmission&&<p className="receipt-approval-notice" role="status">原收款申请结果待核对，已锁定本次填写内容。可核对原申请，关闭后也会保留原申请编号。</p>}
+      <div className="field"><span>客户 <em>*</em></span><PaymentMethodPicker label="客户" options={customerOptions(db.customers)} value={customer} disabled={formLocked} onChange={value=>{setCustomer(value);setPayments({});setReceived('');setExpandedOrder(null);setFormError('')}}/></div>
+      <p className="form-hint">勾选已批准且未结清的订单，填写每笔订单本次付款金额。已有未完成收款审批的订单暂不能重复申请。</p>
+      <div className="table-scroll"><table className="receipt-selection"><thead><tr>{['选择','订单编号','产品明细','订单总金额','已付金额','未收金额','本次付款'].map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{customerOrders.map(order=><React.Fragment key={order.id}><tr className={reserved.has(order.id)?'receipt-reserved-order':''}>
+        <td><input type="checkbox" aria-label={'选择订单 '+order.id} disabled={formLocked||reserved.has(order.id)} checked={Object.hasOwn(payments,order.id)} onChange={event=>setPayments(previous=>{const next={...previous};if(event.target.checked)next[order.id]='';else delete next[order.id];return next})}/></td>
+        <td>{order.id}<small>{order.type}</small>{reserved.has(order.id)&&<small className="receipt-reserved-label">已有未完成的收款审批</small>}</td>
+        <td><span className="receipt-products-summary">{productSummary(itemsFromOrder(order,db.products))}</span><button type="button" className="link-btn receipt-order-products-toggle" aria-label={'查看订单产品 '+order.id} aria-expanded={expandedOrder===order.id} aria-controls={'receipt-products-'+encodeURIComponent(order.id)} onClick={()=>setExpandedOrder(previous=>previous===order.id?null:order.id)}>{expandedOrder===order.id?'收起产品明细':'查看产品明细'}</button></td>
+        <td>{money(order.total)}</td><td>{money(order.paid)}</td><td>{money((cents(order.total)-cents(order.paid))/100)}</td>
+        <td><input aria-label={order.id+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(order.total)-cents(order.paid))/100).toFixed(2)} required disabled={formLocked||reserved.has(order.id)||!Object.hasOwn(payments,order.id)} placeholder="请输入金额" value={payments[order.id]??''} onChange={event=>setPayments(previous=>({...previous,[order.id]:event.target.value}))}/></td>
+      </tr>{expandedOrder===order.id&&<tr className="receipt-order-product-row"><td colSpan={7}><div id={'receipt-products-'+encodeURIComponent(order.id)}><ReceiptProductDetails items={itemsFromOrder(order,db.products)}/></div></td></tr>}</React.Fragment>)}</tbody></table>{!customerOrders.length&&<div className="empty">{customer?'该客户暂无已批准且未结清的订单':'请先选择客户'}</div>}</div>
       <div className="receipt-totals">{[['所选订单总金额',totals.total],['已付金额',totals.paid],['未收金额',totals.unpaid],['本次付款合计',totals.payment]].map(([label,value])=><div key={label}><span>{label}</span><strong>{money(value/100)}</strong></div>)}</div>
-      <div className="receipt-payment-row"><div className="field"><span>收款方式 <em>*</em></span><PaymentMethodPicker options={paymentMethods} value={payMethod} onChange={setPayMethod} disabled={saving}/></div><label className="field"><span>实际收款金额 <em>*</em></span><input aria-label="实际收款金额" type="number" min="0.01" step="0.01" required disabled={saving} placeholder="请输入实际收到的金额" value={received} onChange={e=>{setReceived(e.target.value);setFormError('')}}/></label></div>
-      {needsReceivedDate&&<label className="field"><span>实际到账日期 <em>*</em></span>
-        <input type="date" required disabled={saving} value={receivedOn} onChange={e=>setReceivedOn(e.target.value)}/>
-      </label>}
-      <div className={'receipt-reconciliation '+(received===''?'':reconciled?'is-matched':'is-mismatched')} role="status" aria-live="polite">{received===''?'请填写实际收款金额，与上方本次付款合计核对。':!receivedValid?'请输入大于零且最多两位小数的收款金额。':reconciled?'金额核对一致：实际收款与本次付款合计均为 '+money(totals.payment/100):'金额不一致：实际收款 '+money(Number(received))+'，本次付款合计 '+money(totals.payment/100)+'，'+(difference>0?'多收 ':'少收 ')+money(Math.abs(difference)/100)}</div>
-      {formError&&<p className="system-error" role="alert">{formError}</p>}</div><div className="modal-footer"><button className="secondary" type="button" disabled={saving} onClick={closeEntry}>取消</button><button className="primary" type="submit" disabled={saving||!selected.length||!reconciled}>{saving?'正在提交…':'确认收款'}</button></div>
-    </form></DialogLayer>
-  );
+      <div className="receipt-payment-row"><div className="field"><span>收款方式 <em>*</em></span><PaymentMethodPicker options={methods} value={payMethod} onChange={setPayMethod} disabled={formLocked}/></div><label className="field"><span>{payMethod==='预收款核销'?'本次核销金额':'实际收款金额'} <em>*</em></span><input aria-label="实际收款金额" type="number" min="0.01" step="0.01" required disabled={formLocked} placeholder="请输入金额" value={received} onChange={event=>{setReceived(event.target.value);setFormError('')}}/></label></div>
+      {payMethod==='预收款核销'&&<p className="receipt-approval-date-note">客户当前预收款余额 {money(balance)}；本次使用已有余额抵扣，不新增现金收款。{approvalRequired?'审批通过时再次核验余额，审批中暂不扣减。':'提交时再次核验余额。'}</p>}
+      {(approvalRequired||needsReceivedDate)&&<div className="receipt-approval-fields"><label className="field"><span>{payMethod==='预收款核销'?'核销日期':'实际到账日期'} <em>*</em></span><input type="date" aria-label={payMethod==='预收款核销'?'核销日期':'实际到账日期'} required disabled={formLocked} value={receiptDate} onChange={event=>setReceiptDate(event.target.value)}/></label>
+        {approvalRequired&&<OrderSelect label="收款类别" name="receiptCategory" required disabled={formLocked} placeholder="请选择收款类别" value={receiptCategory} options={(approvals.config?.receiptCategories||[]).map(value=>({value,label:value}))} onChange={setReceiptCategory}/>}
+      </div>}
+      {needsReceivedDate&&<p className="receipt-approval-date-note">所选包含聚水潭结算单，请填写真实到账日期。结算单不支持预收款核销。</p>}
+      <label className="field"><span>收款申请备注</span><textarea aria-label="收款申请备注" maxLength={2000} disabled={formLocked} value={note} onChange={event=>setNote(event.target.value)} placeholder="填写本次收款说明，不修改原订单备注"/></label>
+      <div className={'receipt-reconciliation '+(received===''?'':reconciled?'is-matched':'is-mismatched')} role="status" aria-live="polite">{received===''?'请填写本次金额，与上方本次付款合计核对。':!receivedValid?'请输入大于零且最多两位小数的金额。':reconciled?'金额核对一致：本次金额与付款合计均为 '+money(totals.payment/100):'金额不一致：本次金额 '+money(Number(received))+'，付款合计 '+money(totals.payment/100)+'，'+(difference>0?'多收 ':'少收 ')+money(Math.abs(difference)/100)}</div>
+      {formError&&<p className="system-error" role="alert">{formError}</p>}
+    </div><div className="modal-footer"><button className="secondary" type="button" disabled={saving} onClick={closeEntry}>{checkingSubmission?'关闭并保留申请':'取消'}</button><button className="primary" type="submit" disabled={saving||!canRegister||(!checkingSubmission&&(Boolean(problem)||!selected.length||!reconciled))}>{saving?'正在提交…':checkingSubmission?'核对原收款申请':approvalRequired?'提交并发起审批':'确认收款'}</button></div>
+  </form></DialogLayer>;
   if(entryOnly)return receiptForm;
   return <>
-    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>登记订单收款，查看每一笔收款记录。</p></div><div className="page-heading-symbol"><Icon name="cash" size={30}/></div></div>
+    <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>审批通过后登记订单收款，查看每一笔收款记录。</p></div><div className="page-heading-symbol"><Icon name="cash" size={30}/></div></div>
     <div className="summary-grid">{[['收款笔数',stats.total,'orders'],['收款总额',money(stats.amount),'cash'],['收款客户',stats.customers,'customers']].map(([label,value,icon])=><div className="summary-card" key={label}><span className="summary-icon"><Icon name={icon} size={21}/></span><div><span className="summary-label">{label}</span><strong>{value}</strong></div></div>)}</div>
-    {receiptForm}
-    <section className="panel"><div className="table-toolbar"><button className="primary" onClick={()=>{setCustomer('');setPayments({});setReceived('');setPayMethod(paymentMethods[0]||'');setReceivedOn('');setFormError('');setSelecting(true)}}><Icon name="plus" size={17}/>新建收款</button><div className="toolbar-actions"><div className="search"><Icon name="search" size={17}/><input aria-label="搜索收款" placeholder="搜索订单、客户或操作人" value={query} onChange={e=>{setQuery(e.target.value);setPage(1)}}/></div><select aria-label="收款方式筛选" value={method} onChange={e=>{setMethod(e.target.value);setPage(1)}}><option value="">全部收款方式</option>{stats.methods.map(m=><option key={m}>{m}</option>)}</select><button title="导出CSV" className="icon-btn" onClick={exportRows} disabled={loading||!!error}><Icon name="export"/></button></div></div><div className="table-scroll"><table className="data-table"><thead><tr>{['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人'].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{!loading&&!error&&rows.map(r=><tr key={r.id}><td>{r.order}</td><td><span className="badge badge-blue">{r.customer}</span></td><td>{r.type==='预收款订单'?'预收款':r.type}</td><td>{money(r.amount)}</td><td>{r.method}</td><td>{r.receivedOn||'—'}</td><td>{time(r.time)}</td><td>{r.operator}</td></tr>)}</tbody></table>{(loading||error||!rows.length)&&<div className="empty" role="status">{loading?'正在加载收款…':error||'暂无收款记录'}</div>}</div><Pagination total={stats.total} page={stats.page} pageSize={pageSize} onPage={setPage} onPageSize={size=>{setPageSize(size);setPage(1)}} label="收款分页"/></section>
+    {feedback&&<p className="receipt-approval-feedback" role="status">{feedback}</p>}
+    <ReceiptApprovalPanel approvals={approvals} api={api} DialogLayer={DialogLayer} Icon={Icon}/>
+    {receiptForm}<ReceiptDetailDrawer receipt={detail} DialogLayer={DialogLayer} Icon={Icon} onClose={()=>setDetail(null)}/>
+    <section className="panel"><div className="table-toolbar"><button className="primary" disabled={!canRegister||(!submission.current&&Boolean(problem))} onClick={openEntry}><Icon name="plus" size={17}/>{submission.current?'继续核对收款申请':'新建收款'}</button><div className="toolbar-actions"><div className="search"><Icon name="search" size={17}/><input aria-label="搜索收款" placeholder="搜索订单、客户或操作人" value={query} onChange={event=>{setQuery(event.target.value);setPage(1)}}/></div><select aria-label="收款方式筛选" value={method} onChange={event=>{setMethod(event.target.value);setPage(1)}}><option value="">全部收款方式</option>{stats.methods.map(value=><option key={value}>{value}</option>)}</select><button title="导出CSV" className="icon-btn" onClick={exportRows} disabled={loading||!!error}><Icon name="export"/></button></div></div>
+      <div className="table-scroll"><table className="data-table"><thead><tr>{['订单编号','客户名称','订单类型','收款金额','收款方式','实际到账日期','登记时间','操作人','产品明细','操作'].map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{!loading&&!error&&rows.map(receiptView).map(row=><tr key={row.id}><td>{row.order}</td><td><span className="badge badge-blue">{row.customer}</span></td><td>{row.type==='预收款订单'?'预收款':row.type}</td><td>{money(row.amount)}</td><td>{row.method}</td><td>{row.receivedOn||'—'}</td><td>{time(row.time)}</td><td>{row.operator}</td><td><span className="receipt-products-summary">{productSummary(row.items)}</span></td><td><button type="button" className="link-btn" aria-label={'查看收款详情 '+row.id} onClick={()=>setDetail(row)}>查看详情</button></td></tr>)}</tbody></table>{(loading||error||!rows.length)&&<div className="empty" role="status">{loading?'正在加载收款…':error||'暂无收款记录'}</div>}</div>
+      <Pagination total={stats.total} page={stats.page} pageSize={pageSize} onPage={setPage} onPageSize={size=>{setPageSize(size);setPage(1)}} label="收款分页"/>
+    </section>
   </>;
 }

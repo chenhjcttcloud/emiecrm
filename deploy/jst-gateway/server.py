@@ -8,20 +8,28 @@ import signal
 import sqlite3
 import sys
 import time
+import threading
+import token_store
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-READ_PATHS = {'/open/shops/query', '/open/inventory/query', '/open/orders/single/query',
-              '/open/orders/out/simple/query', '/open/logistic/query', '/open/sku/query', '/open/skumap/query'}
+READ_PATHS = {'/open/wms/partner/query', '/open/shops/query', '/open/inventory/query', '/open/orders/single/query',
+              '/open/orders/out/simple/query', '/open/logistic/query', '/open/sku/query', '/open/skumap/query',
+              '/open/aftersale/received/query', '/open/purchase/query', '/open/webapi/wmsapi/purchasein/purchaseinquery'}
 WRITE_PATHS = {'/open/jushuitan/orderaddress/update', '/open/jushuitan/order/remark/upload',
                '/open/jushuitan/orderbyoid/cancel'}
 DATABASE = os.getenv('GATEWAY_DATABASE', '/data/audit.sqlite3')
 
 
 def configured():
-    return all(os.getenv(k) for k in ('JST_APP_KEY', 'JST_APP_SECRET', 'JST_ACCESS_TOKEN'))
+    try:
+        with token_store.locked():
+            access = token_store.load().get('access_token')
+        return bool(access) and all(os.getenv(k) for k in ('JST_APP_KEY', 'JST_APP_SECRET'))
+    except Exception:
+        return False
 
 
 def environment():
@@ -33,15 +41,12 @@ def sign(params, secret):
                                        if k != 'sign' and params[k] != '')).encode()).hexdigest()
 
 
-def upstream(path, biz):
-    params = {'app_key': os.environ['JST_APP_KEY'], 'access_token': os.environ['JST_ACCESS_TOKEN'],
-              'timestamp': str(int(time.time())), 'charset': 'utf-8', 'version': '2',
-              'biz': json.dumps(biz, ensure_ascii=False, separators=(',', ':'))}
+def send_form(path, params):
+    params = dict(params)
     params['sign'] = sign(params, os.environ['JST_APP_SECRET'])
     origin = 'https://dev-api.jushuitan.com' if environment() == 'sandbox' else 'https://openapi.jushuitan.com'
     request = urllib.request.Request(origin + path, data=urllib.parse.urlencode(params).encode(),
                                      headers={'Content-Type': 'application/x-www-form-urlencoded'})
-    # Do not inherit host proxy environment variables: preserve fixed IP egress.
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=25) as response:
         raw = response.read(2097153)
         if len(raw) > 2097152:
@@ -50,6 +55,20 @@ def upstream(path, biz):
         if not isinstance(result, dict) or 'code' not in result:
             raise ValueError('Invalid response')
         return result
+
+
+def refresh_token(params):
+    prefix = '/openWebIsv/auth/' if environment() == 'sandbox' else '/openWeb/auth/'
+    return send_form(prefix + 'refreshToken', params)
+
+
+def upstream(path, biz):
+    with token_store.locked():
+        token = token_store.load()['access_token']
+        params = {'app_key': os.environ['JST_APP_KEY'], 'access_token': token,
+                  'timestamp': str(int(time.time())), 'charset': 'utf-8', 'version': '2',
+                  'biz': json.dumps(biz, ensure_ascii=False, separators=(',', ':'))}
+        return send_form(path, params)
 
 
 def initialize():
@@ -163,7 +182,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/ready':
             return self.reply(200 if configured() else 503, {'configured': configured(), 'environment': environment(),
                               'order_upload_enabled': os.getenv('JST_ALLOW_ORDER_UPLOAD') == '1',
-                              'order_change_enabled': os.getenv('JST_ALLOW_ORDER_CHANGE') == '1', 'callbacks_enabled': False})
+                              'order_change_enabled': os.getenv('JST_ALLOW_ORDER_CHANGE') == '1', 'callbacks_enabled': False,
+                              'authorization': token_store.status()})
         self.reply(404, {'error': 'not_found'})
 
     def do_POST(self):
@@ -229,5 +249,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     initialize()
+    stop = threading.Event()
+    threading.Thread(target=token_store.worker, args=(refresh_token, stop), daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()

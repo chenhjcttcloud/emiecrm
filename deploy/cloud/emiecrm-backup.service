@@ -1,0 +1,8 @@
+[Unit]
+Description=EMIE CRM production MySQL backup
+Requires=docker.service
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/opt/emiecrm/backup-prod.sh
+UMask=0077

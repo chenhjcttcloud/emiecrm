@@ -229,11 +229,12 @@ class LegacyCustomerMigrationServiceTest {
     assertThrows(ApiException.class, () -> business.restore(altered, ops));
   }
 
-  @Test void completeBackupCanRestoreOpeningAndWriteoffToAnEmptyCustomerSet() {
+  @Test void ordinaryBackupCannotImportApprovedOrdersIntoAnEmptyCustomerSet() {
     migrateExisting("270"); var next = stored.deepCopy();
     ((ObjectNode) next.path("orders").get(0)).put("paid", 100).put("method", "预收款核销"); save(next);
     var backup = backup(); stored.putArray("customers"); stored.putArray("orders"); receipts.clear();
-    business.restore(backup, ops); assertEquals(170, customer().path("balance").asInt());
-    assertEquals(1, receipts.size()); assertEquals(270, customer().path("openingBalance").asInt());
+    assertTrue(assertThrows(ApiException.class, () -> business.restore(backup, ops)).getMessage().contains("飞书"));
+    assertTrue(stored.path("customers").isEmpty()); assertTrue(stored.path("orders").isEmpty());
+    assertTrue(receipts.isEmpty());
   }
 }

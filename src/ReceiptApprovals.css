@@ -1,0 +1,45 @@
+.receipt-approval-panel { margin: 0 0 24px; }
+.receipt-approval-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px; }
+.receipt-approval-panel-heading h2 { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0; color: #34466a; font-size: 16px; }
+.receipt-approval-panel-heading h2 span { padding: 4px 8px; border-radius: 20px; background: #eff3ff; color: #4a64d8; font-size: 11px; font-weight: 500; }
+.receipt-approval-panel-heading p { margin: 9px 0 0; color: #8190a8; font-size: 12px; line-height: 1.6; }
+.receipt-approval-panel > .system-error { margin: 0 22px 18px; }
+.receipt-approval-orders { display: block; min-width: 140px; max-width: 300px; white-space: normal; overflow-wrap: anywhere; line-height: 1.7; }
+.receipt-approval-notice { padding: 12px 15px; border: 1px solid #e0e8fb; border-radius: 9px; background: #f4f7ff; color: #5e729d; font-size: 12px; line-height: 1.8; }
+.receipt-approval-allocation { margin: 22px 0; }
+.receipt-approval-allocation-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.receipt-approval-allocation-heading h3 { margin: 0; color: #34466a; font-size: 13px; overflow-wrap: anywhere; }
+.receipt-approval-allocation-heading > span { flex-shrink: 0; color: #8190a8; font-size: 12px; }
+.receipt-approval-allocation-heading strong { margin-left: 5px; color: #34466a; font-size: 14px; }
+.receipt-approval-drawer .modal-footer { flex-wrap: wrap; }
+.receipt-approval-feedback { margin: 0 0 20px; padding: 12px 15px; border: 1px solid #d5e9dd; border-radius: 9px; background: #f1f9f4; color: #498466; font-size: 13px; line-height: 1.7; }
+.receipt-approval-permission-hint { margin: 0 22px 18px; }
+.receipt-approval-form .receipt-approval-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.receipt-approval-form .receipt-approval-fields > .form-hint { grid-column: 1 / -1; }
+.receipt-selection .receipt-reserved-order td { background: #fafbfe; }
+.receipt-selection .receipt-reserved-order small.receipt-reserved-label { color: #a17b47; }
+@media (max-width: 650px) {
+  .receipt-approval-panel-heading { padding: 18px 15px; align-items: flex-start; }
+  .receipt-approval-panel-heading > button { flex-shrink: 0; }
+  .receipt-approval-form .receipt-approval-fields { grid-template-columns: 1fr; gap: 0; }
+  .receipt-approval-allocation-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
+}
+
+.receipt-approval-panel{max-width:100%;min-width:0}.receipt-approval-panel .table-scroll{overflow-x:auto}
+.receipt-approval-panel .data-table{min-width:760px}
+.receipt-approval-drawer{width:min(780px,100vw)}
+.receipt-approval-drawer .modal-body{min-width:0}
+.receipt-approval-drawer .receipt-detail-fields dd{overflow-wrap:anywhere}
+.receipt-approval-feishu-link{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+.receipt-approval-history{margin-top:20px;border-top:1px solid #e5eaf3;padding-top:16px}
+.receipt-approval-history h4{margin:0 0 12px!important}
+.receipt-approval-history ol{list-style:none;padding:0;margin:0;display:grid;gap:14px}
+.receipt-approval-history li>div{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.receipt-approval-history li>div>span:last-child{font-size:10px;color:#96a4b8}
+.receipt-approval-history p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.receipt-approval-drawer .feishu-flow-nodes ul>li{flex-wrap:wrap;font-size:12px}
+.receipt-approval-drawer .feishu-flow-nodes ul>li>span:nth-child(2){color:#8191a9;font-size:11px}
+.receipt-approval-date-note{color:#8191a9;font-size:12px;line-height:1.7}
+.receipt-reserved-label{display:block;font-size:11px;color:#a17b47;margin-top:5px}
+.receipt-approval-resume{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px}
+@media(max-width:650px){.receipt-approval-panel-heading{flex-wrap:wrap}.receipt-approval-drawer .modal-footer{gap:8px}.receipt-approval-drawer .modal-footer>*{max-width:100%}}

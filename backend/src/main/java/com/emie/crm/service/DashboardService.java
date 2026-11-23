@@ -26,9 +26,10 @@ public class DashboardService {
   private static final String PERSONNEL_TARGET_SELECT =
       "SELECT month_key,owner,amount FROM sales_targets WHERE month_key=?";
   private final CrmRepository db;
+  private final SalesTargetScopeService scopes;
   @Value("${CRM_JST_ENV:sandbox}") private String environment = "sandbox";
 
-  public DashboardService(CrmRepository db) { this.db = db; }
+  public DashboardService(CrmRepository db, SalesTargetScopeService scopes) { this.db = db; this.scopes = scopes; }
 
   private static YearMonth month(String value) {
     try {
@@ -88,6 +89,11 @@ public class DashboardService {
 
   // Shared aggregation used by separately authorized modules in the same read transaction.
   Map<String, Object> salesReport(String selectedMonth, String selectedOwner, String selectedCustomer) {
+    return salesReport(selectedMonth, selectedOwner, selectedCustomer, scopes.snapshot());
+  }
+
+  Map<String, Object> salesReport(String selectedMonth, String selectedOwner, String selectedCustomer,
+                                  SalesTargetScopeService.Snapshot scope) {
     var period = month(selectedMonth);
     String owner = selectedOwner == null ? "" : selectedOwner;
     String requestedCustomer = selectedCustomer == null ? "" : selectedCustomer;
@@ -107,7 +113,8 @@ public class DashboardService {
     var ownerOptions = new TreeSet<String>();
     for (var order : state.path("orders")) {
       ordersById.put(order.path("id").asText(), order);
-      if (!order.path("owner").asText().isBlank()) ownerOptions.add(order.path("owner").asText());
+      if (!order.hasNonNull("deletedAt") && !"已取消".equals(order.path("status").asText())
+          && !order.path("owner").asText().isBlank()) ownerOptions.add(order.path("owner").asText());
     }
 
     var shipments = new HashMap<String, JsonNode>();
@@ -133,7 +140,8 @@ public class DashboardService {
 
     // Ordinary orders win defensive duplicate checks before settlement totals are considered.
     var candidates = ordersById.values().stream()
-        .filter(o -> "销售订单".equals(o.path("type").asText()) && "已批准".equals(o.path("status").asText()))
+        .filter(o -> !o.hasNonNull("deletedAt") && "销售订单".equals(o.path("type").asText())
+            && "已批准".equals(o.path("status").asText()))
         .sorted(Comparator.<JsonNode, Boolean>comparing(o -> "jushuitan-settlement".equals(o.path("source").asText()))
             .thenComparing(o -> o.path("id").asText())).toList();
     var usedIdentities = new HashSet<String>();
@@ -211,6 +219,7 @@ public class DashboardService {
       if (!"预收款订单".equals(receipt.path("type").asText()) || "预收款核销".equals(receipt.path("method").asText())) continue;
       var origin = ordersById.get(receipt.path("order").asText());
       String signer = origin == null ? "" : origin.path("owner").asText();
+      if (!signer.isBlank()) ownerOptions.add(signer);
       String cid = receipt.path("customerId").asText();
       if (cid.isBlank() && origin != null) cid = customerId(origin, customers, uniqueNames);
       if (cid.isBlank()) cid = uniqueNames.getOrDefault(receipt.path("customer").asText(), "");
@@ -242,7 +251,7 @@ public class DashboardService {
     summary.put("advanceReceived", decimalText(advanceReceived)); summary.put("advanceBalance", owner.isEmpty() ? decimalText(advanceBalance) : null);
     var result = new LinkedHashMap<String, Object>();
     result.put("month", period.toString()); result.put("generatedAt", CrmRepository.now()); result.put("summary", summary);
-    result.put("target", target(period.toString())); result.put("targetApplicable", owner.isEmpty() && requestedCustomer.isEmpty());
+    result.put("target", target(period.toString(), scope)); result.put("targetApplicable", owner.isEmpty() && requestedCustomer.isEmpty());
     result.put("options", Map.of("owners", ownerOptions, "customers", customers.values().stream()
         .map(c -> Map.of("id", c.path("id").asText(), "name", c.path("name").asText())).toList()));
     result.put("daily", dailyAmounts.entrySet().stream().map(e -> Map.of("date", e.getKey(), "amount", decimalText(e.getValue()), "count", dailyCounts.getOrDefault(e.getKey(), 0))).toList());
@@ -259,10 +268,11 @@ public class DashboardService {
     PersonnelTotal add(BigDecimal value) { return new PersonnelTotal(amount.add(value), count + 1); }
   }
 
-  private static Map<String, PersonnelTotal> personnelTotals(List<Map<String, Object>> rows) {
+  private static Map<String, PersonnelTotal> personnelTotals(List<Map<String, Object>> rows, SalesTargetScopeService.Snapshot scope) {
     var totals = new HashMap<String, PersonnelTotal>();
     for (var row : rows) {
-      if (row.get("amount") == null || Objects.toString(row.get("owner"), "").isBlank()) continue;
+      String owner = Objects.toString(row.get("owner"), "");
+      if (row.get("amount") == null || owner.isBlank() || !scope.includes(owner)) continue;
       String month = row.get("month_key").toString();
       var value = new BigDecimal(row.get("amount").toString());
       totals.put(month, totals.getOrDefault(month, new PersonnelTotal(ZERO, 0)).add(value));
@@ -271,14 +281,15 @@ public class DashboardService {
   }
 
   private static Map<String, Object> effectiveTarget(String selectedMonth, Map<String, Object> manual,
-                                                    PersonnelTotal personnel) {
+                                                    PersonnelTotal personnel, SalesTargetScopeService.Snapshot scope) {
     var result = new LinkedHashMap<String, Object>();
     result.put("month", selectedMonth);
     String manualAmount = manual == null ? null : decimalText(manual.get("amount"));
-    result.put("amount", personnel.count() > 0 ? decimalText(personnel.amount()) : manualAmount);
-    result.put("source", personnel.count() > 0 ? "personnel" : manualAmount == null ? "unset" : "manual");
+    result.put("amount", scope.selected() || personnel.count() > 0 ? decimalText(personnel.amount()) : manualAmount);
+    result.put("source", scope.selected() || personnel.count() > 0 ? "personnel" : manualAmount == null ? "unset" : "manual");
     result.put("personCount", personnel.count());
     result.put("manualAmount", manualAmount);
+    result.put("scope", scope.metadata());
     // Preserve the manual row's metadata for the existing compare-and-set endpoint.
     result.put("revision", manual == null ? 0L : ((Number) manual.get("revision")).longValue());
     result.put("updatedAt", manual == null ? null : manual.get("updated_at"));
@@ -286,27 +297,28 @@ public class DashboardService {
     return result;
   }
 
-  private Map<String, Object> target(String selectedMonth) {
+  private Map<String, Object> target(String selectedMonth, SalesTargetScopeService.Snapshot scope) {
     var manual = manualTarget(selectedMonth, false);
-    var personnel = personnelTotals(db.rows(PERSONNEL_TARGET_SELECT, selectedMonth))
+    var personnel = personnelTotals(db.rows(PERSONNEL_TARGET_SELECT, selectedMonth), scope)
         .getOrDefault(selectedMonth, new PersonnelTotal(ZERO, 0));
-    return effectiveTarget(selectedMonth, manual, personnel);
+    return effectiveTarget(selectedMonth, manual, personnel, scope);
   }
 
   @Transactional(readOnly = true)
   public Map<String, Object> targets(int year, Actor actor) {
     actor.require("dashboard.targets.manage");
     require(year >= 2000 && year <= 9999, "请选择2000年至9999年的年份");
+    var scope = scopes.snapshot();
     String start = YearMonth.of(year, 1).toString(), end = YearMonth.of(year, 12).toString();
     var manualRows = db.rows("SELECT month_key,amount,revision,updated_at,updated_by FROM dashboard_targets WHERE month_key>=? AND month_key<=?", start, end);
     var manualByMonth = new HashMap<String, Map<String, Object>>();
     manualRows.forEach(row -> manualByMonth.put(row.get("month_key").toString(), row));
     var personnelByMonth = personnelTotals(db.rows(
-        "SELECT month_key,owner,amount FROM sales_targets WHERE month_key>=? AND month_key<=?", start, end));
+        "SELECT month_key,owner,amount FROM sales_targets WHERE month_key>=? AND month_key<=?", start, end), scope);
     var targets = new ArrayList<Map<String, Object>>();
     for (int index = 1; index <= 12; index++) {
       String key = YearMonth.of(year, index).toString();
-      targets.add(effectiveTarget(key, manualByMonth.get(key), personnelByMonth.getOrDefault(key, new PersonnelTotal(ZERO, 0))));
+      targets.add(effectiveTarget(key, manualByMonth.get(key), personnelByMonth.getOrDefault(key, new PersonnelTotal(ZERO, 0)), scope));
     }
     return Map.of("year", year, "targets", targets);
   }
@@ -321,20 +333,23 @@ public class DashboardService {
     var version = body.path("revision");
     require(version.isIntegralNumber() && version.canConvertToLong() && version.asLong() >= 0 && version.asLong() < Long.MAX_VALUE, "请提供有效目标版本，刷新后重试");
     long revision = version.asLong();
+    var scope = scopes.snapshotForWrite();
+    if (scope.selected())
+      throw new ApiException(409, "公司目标已按部门范围汇总，请到销售业绩目标或部门范围设置调整");
     // A current, locking prefix read also protects an empty month's insertion gap under REPEATABLE READ.
     // Personnel saves either commit before this read (and are rejected here), or wait until this save commits.
-    var personnel = personnelTotals(db.rows(PERSONNEL_TARGET_SELECT + " FOR UPDATE", selectedMonth))
+    var personnel = personnelTotals(db.rows(PERSONNEL_TARGET_SELECT + " FOR UPDATE", selectedMonth), scope)
         .getOrDefault(selectedMonth, new PersonnelTotal(ZERO, 0));
     if (personnel.count() > 0)
       throw new ApiException(409, "本月公司目标由人员目标自动汇总，请到销售业绩目标调整");
     // A placeholder row closes the first-write race. Any stale writer rolls this transaction back.
     db.jdbc().update("INSERT IGNORE INTO dashboard_targets(month_key,amount,revision,updated_at,updated_by) VALUES(?,NULL,0,NULL,NULL)", selectedMonth);
-    var before = effectiveTarget(selectedMonth, manualTarget(selectedMonth, true), personnel);
+    var before = effectiveTarget(selectedMonth, manualTarget(selectedMonth, true), personnel, scope);
     if (((Number) before.get("revision")).longValue() != revision) throw new ApiException(409, "业绩目标已被其他人更新，请刷新后重试");
     int changed = db.jdbc().update("UPDATE dashboard_targets SET amount=?,revision=revision+1,updated_at=?,updated_by=? WHERE month_key=? AND revision=?",
         targetAmount, CrmRepository.now(), actor.name(), selectedMonth, revision);
     if (changed != 1) throw new ApiException(409, "业绩目标已被其他人更新，请刷新后重试");
-    var after = effectiveTarget(selectedMonth, manualTarget(selectedMonth, false), personnel);
+    var after = effectiveTarget(selectedMonth, manualTarget(selectedMonth, false), personnel, scope);
     var detail = db.object().put("type", "DASHBOARD_TARGET_CHANGED").put("month", selectedMonth);
     detail.set("before", db.tree(before)); detail.set("after", db.tree(after));
     db.audit(actor.name(), "设置月度业绩目标 " + selectedMonth, detail);

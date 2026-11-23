@@ -1,0 +1,53 @@
+name: emiecrm-production
+services:
+  crm:
+    image: emiecrm:java-release-20261023-audit
+    container_name: emiecrm-prod
+    ports:
+      - "127.0.0.1:8088:5174"
+    env_file: .env.crm
+    environment:
+      CRM_DB_HOST: mysql
+      CRM_DB_NAME: emiecrm_prod
+      CRM_DB_USER: emiecrm_app
+      CRM_DB_PASSWORD: ${CRM_DB_PASSWORD:?Set CRM_DB_PASSWORD}
+      CRM_FEISHU_LONG_CONNECTION: ${CRM_FEISHU_LONG_CONNECTION:-0}
+      CRM_REQUIRE_LOGIN: '1'
+      CRM_PASSWORD_LOGIN_ENABLED: '0'
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [crm]
+    restart: unless-stopped
+    init: true
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  mysql:
+    image: mysql:8.4.11
+    container_name: emiecrm-mysql-prod
+    environment:
+      MYSQL_ROOT_PASSWORD: ${CRM_MYSQL_ROOT_PASSWORD:?Set CRM_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: emiecrm_prod
+      MYSQL_USER: emiecrm_app
+      MYSQL_PASSWORD: ${CRM_DB_PASSWORD:?Set CRM_DB_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--max-allowed-packet=64M"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks: [crm]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $$MYSQL_USER -D $$MYSQL_DATABASE -e "SELECT 1" >/dev/null 2>&1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+networks:
+  crm:
+    name: emiecrm-prod-network
+volumes:
+  mysql-data:
+    name: emiecrm-mysql-prod-data

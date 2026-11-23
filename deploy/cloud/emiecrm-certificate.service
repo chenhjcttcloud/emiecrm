@@ -1,0 +1,6 @@
+[Unit]
+Description=EMIE CRM certificate issuance and renewal
+After=network-online.target nginx.service
+[Service]
+Type=oneshot
+ExecStart=/opt/emiecrm/renew-cert.sh

@@ -31,6 +31,8 @@ class SalesServiceTest {
   private List<Map<String, Object>> users;
   private List<Map<String, Object>> userDepartments;
   private List<Map<String, Object>> departments;
+  private List<Map<String, Object>> scopeRows;
+  private SalesTargetScopeService scopes;
 
   @BeforeEach void setup() {
     state = mapper.createObjectNode(); state.putArray("orders");
@@ -40,6 +42,7 @@ class SalesServiceTest {
     receipts = new ArrayList<>(); shipments = new ArrayList<>(); links = new ArrayList<>();
     targetRows = new ArrayList<>(); users = new ArrayList<>();
     userDepartments = new ArrayList<>(); departments = new ArrayList<>();
+    scopeRows = new ArrayList<>();
     db = mock(CrmRepository.class); jdbc = mock(JdbcTemplate.class);
     when(db.jdbc()).thenReturn(jdbc);
     when(db.state(false)).thenAnswer(call -> state.deepCopy());
@@ -53,6 +56,7 @@ class SalesServiceTest {
       String sql = call.getArgument(0);
       if (sql.contains("FROM jst_shipments")) return List.copyOf(shipments);
       if (sql.contains("FROM jst_document_sales")) return List.copyOf(links);
+      if (sql.contains("FROM sales_target_scope")) return List.copyOf(scopeRows);
       if (sql.contains("FROM sales_targets")) return List.copyOf(targetRows);
       if (sql.contains("LEFT JOIN departments")) return List.copyOf(userDepartments);
       if (sql.contains("FROM departments")) return List.copyOf(departments);
@@ -60,7 +64,8 @@ class SalesServiceTest {
       return List.of();
     });
     when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
-    service = new SalesService(db, new DashboardService(db));
+    scopes = new SalesTargetScopeService(db);
+    service = new SalesService(db, new DashboardService(db, scopes), scopes);
   }
 
   private ObjectNode order(String id, String total, String paid) {
@@ -94,6 +99,52 @@ class SalesServiceTest {
     var row = new LinkedHashMap<String,Object>(); row.put("month_key", "2026-11"); row.put("owner", owner);
     row.put("amount", amount == null ? null : new BigDecimal(amount)); row.put("revision", revision);
     row.put("updated_at", "2026-11-20T01:00:00Z"); row.put("updated_by", "manager"); return row;
+  }
+
+  @Test void inactiveOrdersLeaveSalesItemsAndPerformanceButTheirRealReceiptsRemainVisible() {
+    line(order("active", "10", "0"), "1", "10");
+    var canceled = order("canceled", "20", "0").put("status", "已取消").put("owner", "已取消签单人");
+    line(canceled, "2", "10");
+    var deleted = order("deleted", "30", "0").put("deletedAt", "2026-11-23T00:00:00Z").put("owner", "已删除签单人");
+    line(deleted, "3", "10");
+    var details = items();
+    assertEquals(1, details.path("total").asInt()); money("10", details.path("summary").path("amount"));
+    assertEquals("active", details.path("rows").get(0).path("orderId").asText());
+    assertEquals(List.of("小王"), mapper.convertValue(details.path("options").path("owners"), List.class));
+    var goals = targets();
+    assertEquals(1, goals.path("rows").size()); money("10", goals.path("rows").get(0).path("orderAmount"));
+
+    receipt("old-cash", "canceled", "5", "银行转账", "2026-11-03T01:00:00Z");
+    receipt("old-refund", "deleted", "-2", "银行转账", "2026-11-04T01:00:00Z").put("type", "订单变更");
+    var financial = receiptList(1, 20, "", "2026-11", "", "", "");
+    assertEquals(2, financial.path("total").asInt()); money("3", financial.path("summary").path("amount"));
+    var financialOwners = mapper.convertValue(financial.path("options").path("owners"), List.class);
+    assertTrue(financialOwners.contains("已取消签单人")); assertTrue(financialOwners.contains("已删除签单人"));
+  }
+
+  @Test void receiptProductsPreferRecordedSnapshotsAndLabelReadOnlyHistoricalFallbacks() {
+    line(order("source", "20", "10"), "2", "10");
+    var frozen = receipt("snapshot", "source", "2", "银行转账", "2026-11-01T01:00:00Z");
+    frozen.putArray("items").addObject().put("product", "p1").put("name", "登记时名称").put("sku", "OLD-SKU")
+        .put("model", "登记时型号").put("qty", "1").put("price", "2.00");
+    receipt("legacy", "source", "3", "银行转账", "2026-11-02T01:00:00Z");
+    receipt("empty-snapshot", "source", "4", "银行转账", "2026-11-03T01:00:00Z").putArray("items");
+    receipt("orphan", "missing", "-1", "银行转账", "2026-11-04T01:00:00Z").put("type", "订单变更");
+    var before = receipts.stream().map(JsonNode::deepCopy).toList();
+    var report = receiptList(1, 20, "", "2026-11", "", "", "");
+    var rows = new HashMap<String, JsonNode>();
+    report.path("rows").forEach(row -> rows.put(row.path("id").asText(), row));
+    assertEquals("snapshot", rows.get("snapshot").path("itemsSource").asText());
+    assertEquals("登记时名称", rows.get("snapshot").path("items").get(0).path("name").asText());
+    assertEquals("OLD-SKU", rows.get("snapshot").path("items").get(0).path("sku").asText());
+    assertEquals("order", rows.get("legacy").path("itemsSource").asText());
+    assertEquals("商品甲", rows.get("legacy").path("items").get(0).path("name").asText());
+    assertEquals("2", rows.get("legacy").path("items").get(0).path("qty").asText());
+    assertEquals("snapshot", rows.get("empty-snapshot").path("itemsSource").asText());
+    assertTrue(rows.get("empty-snapshot").path("items").isEmpty());
+    assertEquals("unknown", rows.get("orphan").path("itemsSource").asText());
+    assertTrue(rows.get("orphan").path("items").isEmpty());
+    assertEquals(before, receipts); verify(db, never()).receipt(any());
   }
 
   @Test void productRowsExpandEverySalesStatusAndNeverInventHistoricalCostsFromTodaysCatalog() {
@@ -383,7 +434,7 @@ class SalesServiceTest {
     money("20", report.path("rows").get(0).path("orderAmount"));
     for (var owner : report.path("options").path("owners")) assertFalse(owner.asText().isBlank());
     assertFalse(report.path("warnings").isEmpty());
-    var company = mapper.valueToTree(new DashboardService(db).sales("2026-11", "", "",
+    var company = mapper.valueToTree(new DashboardService(db, scopes).sales("2026-11", "", "",
         new Actor("dashboard", "经营看板", Set.of("dashboard.read"))));
     money("60", company.path("summary").path("orderAmount"));
   }
@@ -498,5 +549,57 @@ class SalesServiceTest {
     var dashboardOnly = new Actor("dashboard", "看板观察员", Set.of("dashboard.read"));
     assertEquals(403, assertThrows(ApiException.class, () -> service.targets("2026-11", dashboardOnly)).status());
     verifyNoInteractions(db, jdbc);
+  }
+
+  private void selectedScope(List<String> ids) {
+    scopeRows.clear();
+    scopeRows.add(Map.of("mode", "selected", "department_ids", mapper.valueToTree(ids).toString(), "revision", 2L));
+  }
+
+  @Test void selectedDepartmentScopeFiltersPersonnelAndOwnerOptionsWithoutDeletingTargets() {
+    order("selected", "21", "6"); order("hidden", "30", "10").put("owner", "小李");
+    targetRows.add(target("小王", "100", 3)); targetRows.add(target("小李", "200", 4));
+    userDepartments.add(accountDepartment("小王", "d1", "一部"));
+    userDepartments.add(accountDepartment("小李", "d2", "二部"));
+    departments.add(Map.of("id", "d1", "name", "一部")); departments.add(Map.of("id", "d2", "name", "二部"));
+    selectedScope(List.of("d1"));
+    var report = targets();
+    assertEquals(1, report.path("rows").size()); assertEquals("小王", report.path("rows").get(0).path("owner").asText());
+    assertEquals(1, report.path("options").path("owners").size());
+    assertEquals("d1", report.path("options").path("departments").get(0).path("id").asText());
+    assertEquals(1, report.path("options").path("departments").size());
+    assertEquals("selected", report.path("scope").path("mode").asText());
+    money("100", report.path("rows").get(0).path("amount"));
+    assertEquals(2, targetRows.size()); assertEquals("200", targetRows.get(1).get("amount").toString());
+    scopeRows.clear();
+    assertEquals(2, targets().path("rows").size());
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void emptyAndUncertainScopesExcludePersonnelUntilTheirCurrentAffiliationIsResolved() {
+    order("known", "20", "10"); targetRows.add(target("小王", "100", 1));
+    departments.add(Map.of("id", "d1", "name", "一部"));
+    userDepartments.add(accountDepartment("小王", "d1", "一部"));
+    selectedScope(List.of());
+    assertTrue(targets().path("rows").isEmpty()); assertTrue(targets().path("options").path("owners").isEmpty());
+    selectedScope(List.of("d1")); assertEquals(1, targets().path("rows").size());
+    userDepartments.add(accountDepartment("小王", "d1", "一部")); assertTrue(targets().path("rows").isEmpty());
+    userDepartments.clear(); assertTrue(targets().path("rows").isEmpty());
+    userDepartments.add(accountDepartment("小王", null, null)); assertTrue(targets().path("rows").isEmpty());
+    assertEquals(1, targetRows.size());
+  }
+
+  @Test void hiddenOwnerCannotBypassScopeByPostingAnExistingTargetDirectly() {
+    order("hidden", "20", "0"); targetRows.add(target("小王", "100", 1));
+    userDepartments.add(accountDepartment("小王", "d2", "二部"));
+    departments.add(Map.of("id", "d1", "name", "一部")); departments.add(Map.of("id", "d2", "name", "二部"));
+    selectedScope(List.of("d1"));
+    var body = mapper.createObjectNode().put("month", "2026-11").put("owner", "小王").put("amount", "200").put("revision", 1);
+    var failure = assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    assertEquals(409, failure.status()); assertTrue(failure.getMessage().contains("统计范围"));
+    verify(db).rows(contains("FROM sales_target_scope WHERE id=1 FOR SHARE"));
+    verify(jdbc, never()).update(contains("INTO sales_targets("), any(Object[].class));
+    verify(jdbc, never()).update(startsWith("UPDATE sales_targets"), any(Object[].class));
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
   }
 }

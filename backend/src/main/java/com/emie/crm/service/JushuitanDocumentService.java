@@ -89,7 +89,7 @@ public class JushuitanDocumentService {
 
   public void linkSale(String orderId, JsonNode body, Actor actor) {
     actor.require("business.write");
-    require(!isSettlement(requireSalesOrder(orderId, false)), "补录总单请使用销售子单列表调整关联");
+    require(!isSettlement(requireMutableSalesOrder(orderId, false)), "补录总单请使用销售子单列表调整关联");
     boolean remove = removing(body);
     Sale verified = null;
     if (!remove) {
@@ -100,7 +100,7 @@ public class JushuitanDocumentService {
     }
     Sale next = verified;
     tx.executeWithoutResult(transaction -> {
-      require(!isSettlement(requireSalesOrder(orderId, true)), "补录总单请使用销售子单列表调整关联");
+      require(!isSettlement(requireMutableSalesOrder(orderId, true)), "补录总单请使用销售子单列表调整关联");
       var priorSales = manualSales(orderId);
       require(priorSales.size() <= 1, "此订单有多个销售单关联，请核对后调整");
       var previous = priorSales.isEmpty() ? null : priorSales.getFirst();
@@ -209,14 +209,14 @@ public class JushuitanDocumentService {
 
   public void replaceSettlementSales(String orderId, JsonNode body, Actor actor) {
     actor.require("business.write");
-    var order = requireSalesOrder(orderId, false);
+    var order = requireMutableSalesOrder(orderId, false);
     require(isSettlement(order), "只有聚水潭补录总单支持批量更新销售单");
     require(body.path("customerConfirmed").isBoolean() && body.path("customerConfirmed").asBoolean(),
         "请确认所选销售单属于该结算客户");
     var expected = new HashSet<>(saleKeys(body.path("previousSales"), true));
     var next = verifySales(body.path("sales"));
     tx.executeWithoutResult(transaction -> {
-      var current = requireSalesOrder(orderId, true);
+      var current = requireMutableSalesOrder(orderId, true);
       require(isSettlement(current), "只有聚水潭补录总单支持批量更新销售单");
       if (!current.path("customerId").equals(order.path("customerId")))
         throw new ApiException(409, "订单客户已更新，请刷新后重试");
@@ -302,7 +302,7 @@ public class JushuitanDocumentService {
 
   public void linkPurchase(String orderId, JsonNode body, Actor actor) {
     actor.require("business.write");
-    requireSalesOrder(orderId, false);
+    requireMutableSalesOrder(orderId, false);
     boolean remove = removing(body);
     String id = requiredId(body.path("poId"), "采购单号");
     if (!remove) {
@@ -310,7 +310,7 @@ public class JushuitanDocumentService {
       require(found.stream().anyMatch(row -> id.equals(identifier(row.path("po_id")))), "未查询到对应采购单");
     }
     tx.executeWithoutResult(transaction -> {
-      requireSalesOrder(orderId, true);
+      requireMutableSalesOrder(orderId, true);
       boolean linked = db.rows(PURCHASES_BY_ORDER, environment, orderId).stream()
           .anyMatch(row -> id.equals(row.get("po_id").toString()));
       if (linked == !remove) return;
@@ -342,6 +342,13 @@ public class JushuitanDocumentService {
       }
     }
     throw new ApiException(404, "订单不存在");
+  }
+
+  private JsonNode requireMutableSalesOrder(String orderId, boolean lock) {
+    var order = requireSalesOrder(orderId, lock);
+    require(!"已取消".equals(order.path("status").asText()) && !order.hasNonNull("deletedAt"),
+        "已取消或删除的订单不能修改聚水潭单据关联");
+    return order;
   }
 
   private JsonNode shipment(String orderId) {

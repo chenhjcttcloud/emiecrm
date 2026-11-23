@@ -1,0 +1,93 @@
+{
+  "status": "ACTIVE",
+  "form": [
+    {
+      "id": "fixture-field-1",
+      "name": "项目",
+      "type": "textarea",
+      "required": true
+    },
+    {
+      "id": "fixture-field-2",
+      "name": "客户",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-3",
+      "name": "收款发生日期",
+      "type": "date",
+      "required": true,
+      "option": {
+        "dateCheckEnd": 0,
+        "dateCheckStart": 0,
+        "dateCheckType": 0
+      }
+    },
+    {
+      "id": "fixture-field-4",
+      "name": "收款类别",
+      "type": "radioV2",
+      "required": true,
+      "option": [
+        {
+          "text": "服务收入",
+          "value": "fixture-option-0"
+        },
+        {
+          "text": "其他收入",
+          "value": "fixture-option-1"
+        },
+        {
+          "text": "销售收入",
+          "value": "fixture-option-2"
+        }
+      ]
+    },
+    {
+      "id": "fixture-field-5",
+      "name": "收款金额（元）",
+      "type": "amount",
+      "required": true,
+      "option": {
+        "currencyRange": [
+          "CNY"
+        ],
+        "isCapital": false
+      }
+    },
+    {
+      "id": "fixture-field-6",
+      "name": "归属人",
+      "type": "contact",
+      "required": true,
+      "option": {
+        "ignore": false,
+        "multi": false,
+        "range": [
+          1
+        ]
+      }
+    },
+    {
+      "id": "fixture-field-7",
+      "name": "附件",
+      "type": "attachmentV2",
+      "required": false,
+      "option": null
+    },
+    {
+      "id": "fixture-field-8",
+      "name": "备注",
+      "type": "textarea",
+      "required": false
+    }
+  ],
+  "node_list": [
+    {
+      "type": "AND",
+      "need_approver": false,
+      "empty_auto_pass": true
+    }
+  ]
+}

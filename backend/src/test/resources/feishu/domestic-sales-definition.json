@@ -1,0 +1,153 @@
+{
+  "status": "ACTIVE",
+  "form": [
+    {
+      "id": "fixture-field-1",
+      "name": "订单类型",
+      "type": "radioV2",
+      "required": true,
+      "option": [
+        {
+          "text": "销售订单",
+          "value": "fixture-option-0"
+        },
+        {
+          "text": "海外提货单",
+          "value": "fixture-option-1"
+        }
+      ]
+    },
+    {
+      "id": "fixture-field-2",
+      "name": "签单人",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-3",
+      "name": "客户名称",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-4",
+      "name": "收货人",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-5",
+      "name": "收货电话",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-6",
+      "name": "收货地址",
+      "type": "input",
+      "required": true
+    },
+    {
+      "id": "fixture-field-7",
+      "name": "订单总金额",
+      "type": "amount",
+      "required": true,
+      "option": {
+        "currencyRange": [
+          "CNY"
+        ],
+        "isCapital": false
+      }
+    },
+    {
+      "id": "fixture-field-8",
+      "name": "应付金额",
+      "type": "amount",
+      "required": true,
+      "option": {
+        "currencyRange": [
+          "CNY"
+        ],
+        "isCapital": false
+      }
+    },
+    {
+      "id": "fixture-field-9",
+      "name": "备注",
+      "type": "textarea",
+      "required": true
+    },
+    {
+      "id": "fixture-field-10",
+      "name": "商品清单",
+      "type": "fieldList",
+      "required": true,
+      "option": {
+        "input_type": "FORM",
+        "mobile_detail_type": "CARD",
+        "print_type": "FORM"
+      },
+      "children": [
+        {
+          "id": "fixture-field-11",
+          "name": "商品名称",
+          "type": "input",
+          "required": true
+        },
+        {
+          "id": "fixture-field-12",
+          "name": "SKU",
+          "type": "input",
+          "required": true
+        },
+        {
+          "id": "fixture-field-13",
+          "name": "数量",
+          "type": "number",
+          "required": true,
+          "option": {
+            "maxValue": "",
+            "minValue": ""
+          }
+        },
+        {
+          "id": "fixture-field-14",
+          "name": "单价",
+          "type": "number",
+          "required": true,
+          "option": {
+            "maxValue": "",
+            "minValue": ""
+          }
+        },
+        {
+          "id": "fixture-field-15",
+          "name": "折扣",
+          "type": "number",
+          "required": true,
+          "option": {
+            "maxValue": "",
+            "minValue": ""
+          }
+        },
+        {
+          "id": "fixture-field-16",
+          "name": "小计",
+          "type": "number",
+          "required": true,
+          "option": {
+            "maxValue": "",
+            "minValue": ""
+          }
+        }
+      ]
+    }
+  ],
+  "node_list": [
+    {
+      "type": "AND",
+      "need_approver": false,
+      "empty_auto_pass": true
+    }
+  ]
+}

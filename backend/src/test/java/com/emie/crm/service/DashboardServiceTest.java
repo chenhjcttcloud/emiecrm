@@ -29,6 +29,9 @@ class DashboardServiceTest {
   private List<Map<String, Object>> links;
   private List<Map<String, Object>> targetRows;
   private List<Map<String, Object>> personnelTargetRows;
+  private List<Map<String, Object>> scopeRows;
+  private List<Map<String, Object>> scopeAccounts;
+  private List<Map<String, Object>> scopeDepartments;
 
   @BeforeEach void setup() {
     state = mapper.createObjectNode();
@@ -39,6 +42,7 @@ class DashboardServiceTest {
     links = new ArrayList<>();
     targetRows = new ArrayList<>();
     personnelTargetRows = new ArrayList<>();
+    scopeRows = new ArrayList<>(); scopeAccounts = new ArrayList<>(); scopeDepartments = new ArrayList<>();
     db = mock(CrmRepository.class);
     jdbc = mock(JdbcTemplate.class);
     when(db.jdbc()).thenReturn(jdbc);
@@ -53,6 +57,9 @@ class DashboardServiceTest {
       String sql = call.getArgument(0);
       if (sql.contains("FROM jst_shipments")) return List.copyOf(shipments);
       if (sql.contains("FROM jst_document_sales")) return List.copyOf(links);
+      if (sql.contains("FROM sales_target_scope")) return List.copyOf(scopeRows);
+      if (sql.contains("LEFT JOIN departments")) return List.copyOf(scopeAccounts);
+      if (sql.contains("FROM departments")) return List.copyOf(scopeDepartments);
       if (sql.contains("FROM dashboard_targets") || sql.contains("FROM sales_targets")) {
         var rows = sql.contains("FROM dashboard_targets") ? targetRows : personnelTargetRows;
         String start = call.getArgument(1);
@@ -63,7 +70,7 @@ class DashboardServiceTest {
       return List.of();
     });
     when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
-    service = new DashboardService(db);
+    service = new DashboardService(db, new SalesTargetScopeService(db));
   }
 
   private ObjectNode order(String id, String created, String total, String paid) {
@@ -105,6 +112,24 @@ class DashboardServiceTest {
     assertEquals(2, report.path("orders").size());
     assertEquals(30, report.path("daily").size());
     money("0", report.path("daily").get(0).path("amount"));
+  }
+
+  @Test void inactiveOrdersDoNotContributeSalesButHistoricalAdvanceCashIsPreserved() {
+    order("active", "2026-11-02", "30", "0");
+    order("canceled", "2026-11-02", "90", "0").put("status", "已取消").put("owner", "已取消无流水");
+    order("deleted", "2026-11-02", "80", "0").put("deletedAt", "2026-11-23T00:00:00Z").put("owner", "已删除无流水");
+    order("old-advance", "2026-11-02", "20", "0").put("type", "预收款订单").put("status", "已取消")
+        .put("deletedAt", "2026-11-23T00:00:00Z").put("owner", "历史预收款签单人");
+    receipt("real-cash", "old-advance", "预收款订单", "12", "银行转账", "2026-11-03T01:00:00Z");
+    var report = sales();
+    assertEquals(1, report.path("summary").path("orderCount").asInt());
+    money("30", report.path("summary").path("orderAmount"));
+    money("12", report.path("summary").path("advanceReceived"));
+    assertEquals(1, report.path("advanceReceipts").size());
+    var owners = mapper.convertValue(report.path("options").path("owners"), List.class);
+    assertFalse(owners.contains("已取消无流水")); assertFalse(owners.contains("已删除无流水"));
+    assertTrue(owners.contains("历史预收款签单人"));
+    money("12", sales("2026-11", "历史预收款签单人", "").path("summary").path("advanceReceived"));
   }
 
   @Test void utcTimestampsAreGroupedByShanghaiDateAtBothMonthBoundaries() {
@@ -352,7 +377,8 @@ class DashboardServiceTest {
     assertEquals("0.00", report.path("targets").get(9).path("amount").asText());
     assertEquals("unset", report.path("targets").get(0).path("source").asText());
     assertTrue(report.path("targets").get(0).path("manualAmount").isNull());
-    verify(db, times(2)).rows(anyString(), any(Object[].class));
+    verify(db, times(1)).rows(contains("FROM dashboard_targets"), any(Object[].class));
+    verify(db, times(1)).rows(contains("FROM sales_targets"), any(Object[].class));
     verify(db).rows(contains("FROM sales_targets WHERE month_key>=? AND month_key<=?"), eq("2026-01"), eq("2026-12"));
     verifyNoInteractions(jdbc);
   }
@@ -380,14 +406,14 @@ class DashboardServiceTest {
     verifyNoInteractions(db, jdbc);
   }
 
-  @Test void savingManualTargetIsRejectedBeforeAnyWriteWhenPersonnelEvenZeroIsConfigured() {
+  @Test void savingManualTargetIsRejectedBeforeAnyCompanyWriteWhenPersonnelEvenZeroIsConfigured() {
     personnelTargetRows.add(personnelTarget("2026-11", "甲", "0"));
     var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "100").put("revision", 0);
     var failure = assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
     assertEquals(409, failure.status());
     assertTrue(failure.getMessage().contains("销售业绩目标"));
     verify(db).rows(contains("FROM sales_targets WHERE month_key=? FOR UPDATE"), eq("2026-11"));
-    verifyNoInteractions(jdbc);
+    verify(jdbc, never()).update(contains("dashboard_targets"), any(Object[].class));
     verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
   }
 
@@ -459,6 +485,55 @@ class DashboardServiceTest {
     when(jdbc.update(startsWith("UPDATE dashboard_targets"), any(Object[].class))).thenReturn(0);
     var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "200").put("revision", 3);
     assertEquals(409, assertThrows(ApiException.class, () -> service.saveTarget(body, manager)).status());
+    verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
+  }
+
+  private void selectedScope(List<String> ids) {
+    scopeRows.clear();
+    scopeRows.add(Map.of("mode", "selected", "department_ids", mapper.valueToTree(ids).toString(), "revision", 2L));
+  }
+
+  @Test void sharedDepartmentScopeChangesOnlyTargetDenominatorNotActualSales() {
+    order("selected", "2026-11-02", "21", "6");
+    order("hidden", "2026-11-02", "30", "10").put("owner", "小李");
+    personnelTargetRows.add(personnelTarget("2026-11", "小王", "100"));
+    personnelTargetRows.add(personnelTarget("2026-11", "小李", "200"));
+    scopeAccounts.add(Map.of("owner", "小王", "departmentId", "d1", "department", "一部"));
+    scopeAccounts.add(Map.of("owner", "小李", "departmentId", "d2", "department", "二部"));
+    scopeDepartments.add(Map.of("id", "d1", "name", "一部")); scopeDepartments.add(Map.of("id", "d2", "name", "二部"));
+    selectedScope(List.of("d1"));
+    var report = sales(); var goal = report.path("target");
+    assertEquals("100.00", goal.path("amount").asText()); assertEquals(1, goal.path("personCount").asInt());
+    assertEquals("selected", goal.path("scope").path("mode").asText());
+    assertEquals("51.00", report.path("summary").path("orderAmount").asText());
+    assertEquals(2, report.path("orders").size());
+    assertEquals(goal, mapper.valueToTree(service.targets(2026, manager)).path("targets").get(10));
+    scopeRows.clear(); assertEquals("300.00", sales().path("target").path("amount").asText());
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void selectedEmptyOrUnsetScopeTargetsStayZeroWithoutReactivatingManualFallback() {
+    targetRows.add(target("2026-11", "777", 3));
+    personnelTargetRows.add(personnelTarget("2026-11", "未匹配历史人员", "100"));
+    selectedScope(List.of());
+    var empty = sales().path("target");
+    assertEquals("0.00", empty.path("amount").asText()); assertEquals("personnel", empty.path("source").asText());
+    assertEquals(0, empty.path("personCount").asInt()); assertEquals("777.00", empty.path("manualAmount").asText());
+    selectedScope(List.of("d1")); scopeDepartments.add(Map.of("id", "d1", "name", "一部"));
+    scopeAccounts.add(Map.of("owner", "还未设置目标", "departmentId", "d1", "department", "一部"));
+    var unset = sales().path("target");
+    assertEquals("0.00", unset.path("amount").asText()); assertEquals("personnel", unset.path("source").asText());
+    assertEquals(0, unset.path("personCount").asInt()); assertEquals(3, unset.path("revision").asInt());
+    assertEquals(unset, mapper.valueToTree(service.targets(2026, manager)).path("targets").get(10));
+  }
+
+  @Test void customScopeRejectsAllIndependentCompanyTargetWritesBeforeCompanyMutation() {
+    selectedScope(List.of());
+    var body = mapper.createObjectNode().put("month", "2026-11").put("amount", "500").put("revision", 0);
+    var failure = assertThrows(ApiException.class, () -> service.saveTarget(body, manager));
+    assertEquals(409, failure.status()); assertTrue(failure.getMessage().contains("部门范围"));
+    verify(db).rows(contains("FROM sales_target_scope WHERE id=1 FOR SHARE"));
+    verify(jdbc, never()).update(contains("dashboard_targets"), any(Object[].class));
     verify(db, never()).audit(anyString(), anyString(), any(JsonNode.class));
   }
 }

@@ -1,0 +1,12 @@
+[Unit]
+Description=EMIE CRM one-time Jushuitan authorization and read-only cutover
+After=network-online.target docker.service nginx.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/emiecrm
+ExecStart=/usr/bin/python3 -u /opt/emiecrm/jst-cutover/jst_cutover.py
+UMask=0077
+TimeoutStartSec=15min

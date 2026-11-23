@@ -3,7 +3,7 @@
   "environment": "sandbox",
   "companyId": 10048859,
   "shopId": 10402930,
-  "overall": "NOT_ACCEPTED",
+  "overall": "SANDBOX_ACCEPTED_WITH_VENDOR_CONFIRMED_BOUNDARIES",
   "split": {
     "original": 5993108,
     "children": [
@@ -74,10 +74,7 @@
     "count": 1,
     "net": 0.02
   },
-  "pending": [
-    "已出库撤销的ERP操作入口/权限待确认；批量终止发货仅待出库可用，转到待审核拒绝Sent",
-    "取消重建订单的聚水潭资金报表排除/冲销口径待确认"
-  ],
+  "pending": [],
   "finding": {
     "order": 5993081,
     "description": "外部订单发货接口返回成功，原WMS出库记录status=delete；CRM同步PARTIAL且shipments为空",
@@ -135,6 +132,200 @@
     "rawPaySum": 0.04,
     "crmNet": 0.01,
     "settlementPageRecords": 0,
-    "result": "UNVERIFIED_REPORTING_POLICY"
+    "result": "CLOSED_BY_VENDOR_CONFIRMATION_NOT_REPORT_E2E_TEST"
+  },
+  "vendorConfirmation": {
+    "date": "2026-10-22",
+    "source": "用户转述聚水潭反馈，非本系统独立实测",
+    "salesOutboundReversal": {
+      "result": "NOT_SUPPORTED_BY_API",
+      "statement": "接口不支持对已出库的出库单进行撤销",
+      "acceptance": "接口撤销不列为可交付能力；不标记撤销回传已实测通过"
+    },
+    "cancelledOrderFinance": {
+      "result": "VENDOR_CONFIRMED_NO_BUSINESS_CALCULATION_IMPACT",
+      "statement": "订单取消的话，单据里的内容对业务计算没有什么影响",
+      "acceptance": "取消单保留支付节点不作为重复收款缺陷；不能直接加总历史取消单与新单的支付节点代替有效业务收款"
+    }
+  },
+  "productionScope": "正式网关与生产CRM商品/手工选仓新版已发布，产品管理已同步TEST001并读取本仓库存1；正式订单上传/变更关闭，未进行正式订单端到端验收。",
+  "catalogAndWarehouseChange": {
+    "date": "2026-10-22",
+    "deployment": "PRODUCTION",
+    "backendTests": 85,
+    "frontendLogicTests": 23,
+    "gatewayTests": 8,
+    "isolatedBusinessContract": "PASSED",
+    "uiVerification": "PRODUCTION_PRODUCT_SYNC_AND_MAIN_WAREHOUSE_INVENTORY_PASSED",
+    "productionWarehouseQuery": "PASSED_READ_ONLY",
+    "productionOrderE2E": "NOT_RUN",
+    "cloudGatewayReadAllowlistDeployment": "DEPLOYED",
+    "productionProductSync": {
+      "sku": "TEST001",
+      "warehouseId": 15136229,
+      "qty": 1,
+      "orderLock": 0,
+      "pickLock": 0
+    },
+    "ordersCustomersReceiptsUnchanged": true
+  },
+  "fullCatalogSync": {
+    "date": "2026-10-22",
+    "deployment": "PRODUCTION",
+    "backendTests": 100,
+    "frontendTests": 23,
+    "gatewayTests": 8,
+    "isolatedBusinessContract": "PASSED",
+    "isolatedRealCatalogWindow": {
+      "result": "COMPLETE",
+      "processedRows": 2,
+      "ordersCustomersReceiptsUnchanged": true,
+      "incrementalComplete": true
+    },
+    "mainTask": {
+      "status": "COMPLETE",
+      "from": "2000-01-01",
+      "pauseResumeRestartCheckpointVerified": true,
+      "processedRowsAtCheckpoint": 831,
+      "cursorAtCheckpoint": "2026-01-15 14:18:04",
+      "fullHistoryComplete": true,
+      "syncedProductsAtCheck": 2748,
+      "productsWithImagesAtCheck": 2198,
+      "cursorAtCheck": "2000-01-01 00:00:00",
+      "processedRows": 2749,
+      "completedAt": "2026-10-22T06:56:23.830426210Z"
+    },
+    "automaticIncremental": "PRODUCTION_AUTOMATIC_EMPTY_WINDOW_COMPLETE_2026-10-22_16:01:33",
+    "productionOrderWrites": "NOT_ENABLED",
+    "productionTask": {
+      "status": "COMPLETE",
+      "from": "2000-01-01",
+      "startedAt": "2026-10-22T07:06:05.147963516Z",
+      "processedRowsAtCheck": 49,
+      "syncedProductsAtCheck": 2748,
+      "productsWithImagesAtCheck": 2198,
+      "cursorAtCheck": "2026-08-20 15:06:05",
+      "fullHistoryComplete": true,
+      "ordersCustomersReceiptsUnchanged": true,
+      "fullCompletedAt": "2026-10-22T07:41:32.294802060Z"
+    },
+    "productionImage": "emiecrm:java-release-20261022-fullcatalog",
+    "productionBackup": "/home/emie/emiecrm/backups/fullcatalog-release-20261022-145739",
+    "productionProductMutationIncrementalAcceptance": "NOT_RUN"
+  },
+  "automaticTokenRenewal": {
+    "implementation": "IMPLEMENTED_LOCAL",
+    "cloudDeployment": "DEPLOYED_PRODUCTION",
+    "realRefreshAcceptance": "NOT_RUN",
+    "gatewayTests": 22,
+    "backendTests": 100,
+    "productionCredentialsChanged": false,
+    "productionOrderWrites": "NOT_ENABLED",
+    "policy": "SELF_OWNED_APP_ONLY_PERSIST_ROTATED_TOKENS_STOP_ON_UNCERTAIN_OR_REJECTION",
+    "officialDocumentation": "https://openweb.jushuitan.com/doc?docId=23",
+    "productionEnabled": true,
+    "productionExpiresAt": "2026-11-27T23:59:04+08:00",
+    "firstEligibleRefreshAt": "2026-11-20T23:59:04+08:00",
+    "productionGatewayImage": "emie-jst-gateway:0.3.0",
+    "productionBackup": "/opt/emie-jst/backups/autorenew-20261022-155620",
+    "productionRestartPersistence": "PASSED",
+    "productionHttpsReady": "PASSED",
+    "productionReadOnlyQuery": "PASSED_TEST001",
+    "crmStatusUiDeployment": "PRODUCTION",
+    "crmStatusUiVerification": "PASSED_REAL_FEISHU_LOGIN_PRODUCT_PAGE",
+    "productionCrmImage": "emiecrm:java-release-20261022-autorenew-ui",
+    "productionCrmBackup": "/home/emie/emiecrm/backups/autorenew-ui-release-20261022-160135",
+    "ordersCustomersReceiptsUnchanged": true
+  },
+  "externalOrderChanges": {
+    "date": "2026-10-23",
+    "deployment": "LOCAL_ONLY",
+    "backendUnitTests": 126,
+    "isolatedMysqlTransactionAndConcurrencyTests": 2,
+    "frontendLogicTests": 23,
+    "gatewayTests": 22,
+    "isolatedBusinessContract": "PASSED",
+    "uiVerification": "ISOLATED_UI_SIMULATION_ONLY",
+    "realJstOrderEditE2E": "NOT_RUN",
+    "productionOrderWrites": "NOT_ENABLED",
+    "confirmation": "MANUAL_APPROVAL_WITH_SIGNED_CASH_DIFFERENCE",
+    "originalOrdersAndReceipts": "PRESERVED",
+    "feishuApprovalIntegration": "NOT_IMPLEMENTED",
+    "unsupportedRequiresManualReview": [
+      "split_or_merged",
+      "outbound_core_change",
+      "unmapped_sku",
+      "invalid_amounts",
+      "composite_items",
+      "order_freight_or_discount"
+    ],
+    "durableJournal": {
+      "deployment": "LOCAL_ONLY",
+      "events": [
+        "DETECTED",
+        "APPROVED",
+        "SETTLEMENT_RECORDED",
+        "CONFIRMED",
+        "SUPERSEDED",
+        "RESOLVED",
+        "ATTEMPT_FAILED"
+      ],
+      "automaticTruncation": false,
+      "appendOnlyApplicationGuard": "TESTED",
+      "retainMoreThan50Events": "69_EVENTS_VERIFIED",
+      "rawBusinessSnapshotsForInvalidChanges": "TESTED",
+      "jsonExportAndReadPermission": "TESTED",
+      "restoreProtection": "TESTED",
+      "erpOperationLogIntegration": "NOT_IMPLEMENTED",
+      "erpModifierIdentity": "UNKNOWN_NOT_INFERRED",
+      "coverage": "OBSERVED_REVISIONS_AND_CRM_PROCESSING_ONLY",
+      "failedAttemptWhenDatabaseUnavailable": "BEST_EFFORT"
+    }
+  },
+  "crmDetailedChangeJournal": {
+    "date": "2026-10-23",
+    "deployment": "LOCAL_ONLY",
+    "coverage": [
+      "ORDER_CREATE_EDIT_APPROVAL_PAYMENT_ATTACHMENTS",
+      "CUSTOMER_CHANGES",
+      "RECEIPT_CREATE_AND_ASSOCIATION",
+      "RESTORE_ORDER_CUSTOMER_RECEIPT_DIFFERENCES"
+    ],
+    "beforeAfterSnapshots": true,
+    "actorAndServerTime": true,
+    "transactionalAuditFailureRollback": "MYSQL_VERIFIED",
+    "noOpDoesNotCreateChange": "API_VERIFIED",
+    "orderHistoryAndJsonExport": true,
+    "backendUnitTests": 132,
+    "isolatedMysqlTests": 3,
+    "frontendLogicTests": 23,
+    "businessApiContract": "PASSED",
+    "productionDeployment": "NOT_DEPLOYED",
+    "historicalSnapshots": "NOT_BACKFILLED",
+    "erpIntermediateChanges": "NOT_GUARANTEED"
+  },
+  "quarterlyAuditArchive": {
+    "date": "2026-10-23",
+    "deployment": "LOCAL_ONLY",
+    "timezone": "Asia/Shanghai",
+    "policy": "COMPLETED_CALENDAR_QUARTERS_ONLY",
+    "format": "GZIP_JSON_BATCHES_IN_DATABASE",
+    "automaticDeletion": false,
+    "startupDelaySeconds": 60,
+    "checkIntervalSeconds": 600,
+    "maxRowsPerBatch": 64,
+    "maxBatchesPerTick": 20,
+    "integrity": "SHA256_AND_ROUND_TRIP",
+    "transactionalPointerUpdate": "MYSQL_VERIFIED",
+    "transparentHistoryAndExport": "MYSQL_VERIFIED",
+    "multiBatch130Records": "VERIFIED",
+    "concurrentInstances": "MYSQL_VERIFIED",
+    "backendUnitTests": 135,
+    "isolatedMysqlTests": 7,
+    "totalBackendTests": 142,
+    "businessApiContract": "PASSED",
+    "jstExternalTimelineInBusinessRecord": "PRESERVED_UNCOMPRESSED",
+    "jstNewExternalAuditEvents": "FULL_SNAPSHOTS_INCLUDED",
+    "productionDeployment": "NOT_DEPLOYED"
   }
 }

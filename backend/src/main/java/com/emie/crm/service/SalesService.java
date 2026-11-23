@@ -14,6 +14,7 @@ import java.time.format.DateTimeParseException;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -22,14 +23,15 @@ public class SalesService {
   private static final BigDecimal ZERO = new BigDecimal("0.00");
   private static final String TARGETS = "SELECT month_key,owner,amount,revision,updated_at,updated_by FROM sales_targets WHERE month_key=?";
   private static final String OWNERS = "SELECT COALESCE(p.display_name,u.name) AS owner FROM users u LEFT JOIN user_profiles p ON p.name=u.name ORDER BY owner";
-  private static final String OWNER_DEPARTMENTS = "SELECT COALESCE(p.display_name,u.name) AS owner,d.id AS departmentId,d.name AS department FROM users u LEFT JOIN user_profiles p ON p.name=u.name LEFT JOIN departments d ON d.id=p.department_id";
   private final CrmRepository db;
   private final DashboardService dashboard;
+  private final SalesTargetScopeService scopes;
   @Value("${CRM_JST_ENV:sandbox}") private String environment = "sandbox";
 
-  public SalesService(CrmRepository db, DashboardService dashboard) {
+  public SalesService(CrmRepository db, DashboardService dashboard, SalesTargetScopeService scopes) {
     this.db = db;
     this.dashboard = dashboard;
+    this.scopes = scopes;
   }
 
   private static YearMonth month(String value) {
@@ -107,9 +109,14 @@ public class SalesService {
 
   private static Map<String, Object> options(Snapshot snapshot) {
     var owners = new TreeSet<String>();
-    for (var order : snapshot.orders().values()) if (!order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
+    for (var order : snapshot.orders().values())
+      if (activeOrder(order) && !order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
     return new LinkedHashMap<>(Map.of("owners", owners, "customers", snapshot.customers().values().stream()
         .map(c -> Map.of("id", c.path("id").asText(), "name", c.path("name").asText())).toList()));
+  }
+
+  private static boolean activeOrder(JsonNode order) {
+    return !order.hasNonNull("deletedAt") && !"已取消".equals(order.path("status").asText());
   }
 
   private static void validate(int page, int pageSize, String q, String owner, String customerId) {
@@ -163,7 +170,7 @@ public class SalesService {
     var warnings = new LinkedHashSet<String>();
     var matched = new ArrayList<Map<String, Object>>();
     for (var order : snapshot.orders().values()) {
-      if (!"销售订单".equals(order.path("type").asText())) continue;
+      if (!activeOrder(order) || !"销售订单".equals(order.path("type").asText())) continue;
       String id = order.path("id").asText(), signer = order.path("owner").asText(), cid = customerId(order, snapshot);
       if (!owner.isEmpty() && !owner.equals(signer) || !selectedCustomer.isEmpty() && !selectedCustomer.equals(cid)) continue;
       var day = orderDate(order, warnings);
@@ -260,7 +267,6 @@ public class SalesService {
     var legacyKeys = new HashMap<String, String>();
     var methods = new TreeSet<String>();
     var owners = new TreeSet<String>();
-    for (var order : snapshot.orders().values()) if (!order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
     BigDecimal totalAmount = ZERO, totalTax = ZERO;
     boolean allTaxKnown = true;
     var paidCustomers = new HashSet<String>();
@@ -269,6 +275,8 @@ public class SalesService {
       if (!paymentMethod.isBlank()) methods.add(paymentMethod);
       var origin = snapshot.orders().get(orderId);
       String signer = origin == null ? "" : origin.path("owner").asText();
+      // Historical cash and write-offs remain visible even when their source order is inactive.
+      if (!signer.isBlank()) owners.add(signer);
       String cid = receipt.path("customerId").asText();
       if (cid.isBlank() && origin != null) cid = customerId(origin, snapshot);
       if (cid.isBlank()) cid = snapshot.names().getOrDefault(receipt.path("customer").asText(), "");
@@ -323,6 +331,9 @@ public class SalesService {
       row.put("customer", customer); row.put("owner", signer); row.put("type", receipt.path("type").asText());
       row.put("amount", money(amount)); row.put("method", paymentMethod); row.put("receivedOn", receivedOn); row.put("time", time);
       row.put("operator", receipt.path("operator").asText());
+      row.put("note", receipt.path("note").asText());
+      var products = BusinessService.receiptItems(receipt, origin, snapshot.products());
+      row.put("items", products.path("items")); row.put("itemsSource", products.path("itemsSource").asText());
       var orderDay = origin == null ? null : orderDate(origin, warnings);
       row.put("orderDate", orderDay == null ? null : orderDay.toString()); row.put("status", status);
       row.put("taxRate", taxRate); row.put("tax", money(tax));
@@ -348,7 +359,8 @@ public class SalesService {
   private TreeSet<String> owners(JsonNode state, List<Map<String, Object>> targets) {
     var owners = new TreeSet<String>();
     for (var row : db.rows(OWNERS)) if (row.get("owner") != null && !row.get("owner").toString().isBlank()) owners.add(row.get("owner").toString());
-    for (var order : state.path("orders")) if (!order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
+    for (var order : state.path("orders"))
+      if (activeOrder(order) && !order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
     for (var row : db.rows("SELECT DISTINCT owner FROM sales_targets ORDER BY owner"))
       if (row.get("owner") != null && !row.get("owner").toString().isBlank()) owners.add(row.get("owner").toString());
     for (var target : targets)
@@ -365,47 +377,18 @@ public class SalesService {
     return row;
   }
 
-  private static void department(Map<String, Object> target, List<Map<String, Object>> accounts) {
-    target.put("departmentId", null);
-    target.put("department", null);
-    if (accounts == null || accounts.isEmpty()) {
-      target.put("departmentStatus", "unmatched");
-    } else if (accounts.size() > 1) {
-      // Display names are not account IDs: even identical departments cannot disambiguate namesakes.
-      target.put("departmentStatus", "ambiguous");
-    } else {
-      var account = accounts.getFirst();
-      String id = Objects.toString(account.get("departmentId"), "");
-      String name = Objects.toString(account.get("department"), "");
-      if (id.isBlank() || name.isBlank()) {
-        target.put("departmentStatus", "unassigned");
-      } else {
-        target.put("departmentId", id); target.put("department", name);
-        target.put("departmentStatus", "assigned");
-      }
-    }
-  }
-
   @Transactional(readOnly = true)
   @SuppressWarnings("unchecked")
   public Map<String, Object> targets(String selectedMonth, Actor actor) {
     actor.require("business.read");
     String key = month(selectedMonth).toString();
+    var scope = scopes.snapshot();
     var stored = db.rows(TARGETS, key);
     var owners = owners(db.state(false), stored);
     var configured = new HashMap<String, Map<String, Object>>();
     stored.forEach(row -> configured.put(row.get("owner").toString(), row));
-    var report = dashboard.salesReport(key, "", "");
+    var report = dashboard.salesReport(key, "", "", scope);
     var warnings = new LinkedHashSet<String>((Collection<String>) report.get("warnings"));
-    var departmentsByOwner = new HashMap<String, List<Map<String, Object>>>();
-    for (var account : db.rows(OWNER_DEPARTMENTS)) {
-      String owner = Objects.toString(account.get("owner"), "");
-      if (!owner.isBlank()) departmentsByOwner.computeIfAbsent(owner, ignored -> new ArrayList<>()).add(account);
-    }
-    // Include disabled departments as current affiliations; their historical targets remain visible.
-    var departments = db.rows("SELECT id,name FROM departments ORDER BY name,id").stream()
-        .map(row -> Map.of("id", Objects.toString(row.get("id"), ""), "name", Objects.toString(row.get("name"), "")))
-        .filter(row -> !row.get("id").isBlank()).toList();
     var achieved = new HashMap<String, BigDecimal>(); var settled = new HashMap<String, BigDecimal>();
     for (var order : (List<Map<String, Object>>) report.get("orders")) {
       String owner = Objects.toString(order.get("owner"), "");
@@ -418,9 +401,10 @@ public class SalesService {
       settled.merge(owner, new BigDecimal(order.get("paid").toString()), BigDecimal::add);
     }
     var rows = new ArrayList<Map<String, Object>>();
+    owners.removeIf(owner -> !scope.includes(owner));
     for (String owner : owners) {
       var row = target(key, owner, configured.get(owner));
-      department(row, departmentsByOwner.get(owner));
+      row.putAll(scope.department(owner));
       var orderAmount = achieved.getOrDefault(owner, ZERO); var settledAmount = settled.getOrDefault(owner, ZERO);
       var goal = row.get("amount") == null ? null : new BigDecimal(row.get("amount").toString());
       row.put("orderAmount", money(orderAmount)); row.put("settledAmount", money(settledAmount));
@@ -428,10 +412,10 @@ public class SalesService {
       row.put("progress", goal == null || goal.signum() == 0 ? null : orderAmount.multiply(new BigDecimal("100")).divide(goal, 2, RoundingMode.HALF_UP));
       rows.add(row);
     }
-    return Map.of("month", key, "rows", rows, "options", Map.of("owners", owners, "departments", departments), "warnings", new ArrayList<>(warnings));
+    return Map.of("month", key, "rows", rows, "options", Map.of("owners", owners, "departments", scope.selectableDepartments()), "scope", scope.metadata(), "warnings", new ArrayList<>(warnings));
   }
 
-  @Transactional
+  @Transactional(isolation = Isolation.REPEATABLE_READ)
   public Map<String, Object> saveTarget(JsonNode body, Actor actor) {
     actor.require("dashboard.targets.manage");
     String key = month(body.path("month").asText()).toString(), owner = body.path("owner").asText();
@@ -444,6 +428,8 @@ public class SalesService {
     require(version.isIntegralNumber() && version.canConvertToLong() && version.asLong() >= 0 && version.asLong() < Long.MAX_VALUE,
         "请提供有效目标版本，刷新后重试");
     long revision = version.asLong();
+    var scope = scopes.snapshotForWrite();
+    if (!scope.includes(owner)) throw new ApiException(409, "该人员不在当前目标统计范围，请联系管理员调整部门范围");
     db.jdbc().update("INSERT IGNORE INTO sales_targets(month_key,owner,amount,revision,updated_at,updated_by) VALUES(?,?,NULL,0,NULL,NULL)", key, owner);
     var locked = db.rows(TARGETS + " AND owner=? FOR UPDATE", key, owner);
     var before = target(key, owner, locked.isEmpty() ? null : locked.getFirst());

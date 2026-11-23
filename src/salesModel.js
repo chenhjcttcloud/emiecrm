@@ -52,3 +52,11 @@ export function matchesSalesTargetFilters(row,{query='',department=''}={}){
  if(department.startsWith('department:'))return status==='assigned'&&row.departmentId===department.slice('department:'.length);
  return department.startsWith('status:')&&status===department.slice('status:'.length);
 }
+
+export function normalizeSalesTargetScopeSettings(value){
+ const validIds=ids=>Array.isArray(ids)&&ids.every(id=>typeof id==='string'&&id.length>0)&&new Set(ids).size===ids.length;
+ if(!value||!['all','selected'].includes(value.mode)||!validIds(value.departmentIds)||!Number.isSafeInteger(value.revision)||value.revision<0||!Array.isArray(value.departments)||!value.departments.every(item=>typeof item?.id==='string'&&item.id&&typeof item?.name==='string'))throw Error('部门设置数据格式无效，请重新加载');
+ const ids=new Set(value.departments.map(item=>item.id));
+ if(ids.size!==value.departments.length)throw Error('部门设置数据格式无效，请重新加载');
+ return{...value,departmentIds:[...value.departmentIds],departments:[...value.departments],missingDepartmentIds:value.departmentIds.filter(id=>!ids.has(id))};
+}

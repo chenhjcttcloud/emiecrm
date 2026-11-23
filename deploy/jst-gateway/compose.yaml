@@ -2,7 +2,7 @@ name: emie-jst
 services:
   gateway:
     build: .
-    image: emie-jst-gateway:0.2.0
+    image: emie-jst-gateway:0.3.0
     env_file: .env
     ports: ['127.0.0.1:18766:8080']
     volumes: ['./data:/data']

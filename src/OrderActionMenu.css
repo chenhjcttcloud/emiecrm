@@ -1,0 +1,7 @@
+.order-menu-trigger{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:5px 9px;border:1px solid #e2e8f6;border-radius:6px;background:#fff;color:#526aaf;font-size:12px}
+.order-menu-trigger:hover,.order-menu-trigger[aria-expanded=true]{background:#f1f4ff;border-color:#c6d2f3}
+.order-action-menu{position:fixed;inset:auto;box-sizing:border-box;margin:0;padding:5px;border:1px solid #e2e8f6;border-radius:8px;background:#fff;box-shadow:0 8px 24px #28386525;overflow-y:auto;z-index:70}
+.order-action-menu:popover-open,.order-action-menu.is-open{display:grid;gap:2px}
+.order-action-menu button,.order-action-menu a{display:block;min-height:34px;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:#34466b;text-align:left;font-size:13px;white-space:normal;text-decoration:none;line-height:20px}
+.order-action-menu button:hover:not(:disabled),.order-action-menu button:focus-visible,.order-action-menu a:hover,.order-action-menu a:focus-visible{background:#eef3ff}
+.order-action-menu .order-action-danger{color:#a14444}.order-action-menu button:disabled{color:#909db3;cursor:default}

@@ -1,0 +1,7 @@
+[Unit]
+Description=EMIE CRM daily certificate check
+[Timer]
+OnCalendar=*-*-* 04:15:00 Asia/Shanghai
+Persistent=true
+[Install]
+WantedBy=timers.target

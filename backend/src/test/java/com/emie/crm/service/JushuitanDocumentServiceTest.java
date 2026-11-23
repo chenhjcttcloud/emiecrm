@@ -301,4 +301,32 @@ class JushuitanDocumentServiceTest {
     verify(db).audit(eq("sales"), eq("解除聚水潭采购单关联"), any(JsonNode.class));
     verifyNoInteractions(client);
   }
+
+  @Test void canceledOrDeletedOrdersRemainReadableButCannotChangeDocumentLinks() throws Exception {
+    for (boolean deleted : List.of(false, true)) {
+      var state = (ObjectNode) json("""
+          {"orders":[{"id":"crm-1","type":"销售订单","status":"已取消"}]}
+          """);
+      if (deleted) ((ObjectNode) state.path("orders").get(0)).put("deletedAt", "2026-11-23T00:00:00Z");
+      when(db.state(false)).thenReturn(state);
+      when(db.state(true)).thenReturn(state);
+      assertThrows(ApiException.class, () -> service.linkSale("crm-1", json("{\"remove\":true}"), actor));
+      assertThrows(ApiException.class, () -> service.linkPurchase("crm-1", json("{\"poId\":\"31\",\"remove\":true}"), actor));
+      assertNotNull(service.get("crm-1", actor));
+    }
+    verifyNoInteractions(client);
+    verify(db, never()).jdbc();
+  }
+
+  @Test void documentLinkMutationsRecheckCancellationAfterTakingTheStateLock() throws Exception {
+    orderExists();
+    when(db.state(true)).thenReturn(json("""
+        {"orders":[{"id":"crm-1","type":"销售订单","status":"已取消"}]}
+        """));
+    when(transactions.getTransaction(any())).thenAnswer(call -> new SimpleTransactionStatus());
+    assertThrows(ApiException.class, () -> service.linkSale("crm-1", json("{\"remove\":true}"), actor));
+    assertThrows(ApiException.class, () -> service.linkPurchase("crm-1", json("{\"poId\":\"31\",\"remove\":true}"), actor));
+    verifyNoInteractions(client);
+    verify(db, never()).jdbc();
+  }
 }

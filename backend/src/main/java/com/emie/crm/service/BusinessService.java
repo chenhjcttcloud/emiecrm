@@ -8,14 +8,31 @@ import com.emie.crm.security.Actor;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.*;
 import java.math.*;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class BusinessService {
+  static final String CANCELED_ORDER = "已取消";
+  private static final Set<String> DELETABLE_ORDER_STATUSES = Set.of("草稿", "审批中", CANCELED_ORDER);
+  private static final Set<String> STOPPED_APPROVAL_STATUSES = Set.of("REJECTED", "CANCELED", "DELETED");
+  private static final Set<String> APPROVAL_TYPES = Set.of("销售订单", "海外提货单", "预收款订单");
   private final CrmRepository db;
   private final AssetService assets;
+  @Value("${CRM_FEISHU_RECEIPT_APPROVAL_CODE:}") private String feishuReceiptApprovalCode = "";
+  private static final List<String> RECEIPT_APPROVAL_FIELDS =
+      List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt");
+  private static final String ACTIVE_RECEIPT_APPROVALS = """
+      SELECT payload FROM feishu_receipt_approvals
+      WHERE status IN ('QUEUED','SUBMITTING','UNKNOWN','PENDING')
+         OR (status='APPROVED' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.booked')),'false')<>'true')
+      """;
+  private static final List<String> APPROVAL_FIELDS = List.of("status", "type", "owner", "customerId", "customer", "items", "total", "approvalRequestId", "approvalDraft");
 
   public BusinessService(CrmRepository db, AssetService assets) {
     this.db = db;
@@ -112,6 +129,7 @@ public class BusinessService {
     var customers = index(state.path("customers"));
     var currentNames = customersByName(state);
     for (var order : state.path("orders")) {
+      if (canceledOrder(order) || deletedOrder(order)) continue;
       String id = order.path("customerId").asText();
       if (id.isBlank()) {
         var customer = names.get(order.path("customer").asText());
@@ -125,10 +143,10 @@ public class BusinessService {
     }
   }
 
-  private record References(Map<String, JsonNode> orders, Map<String, JsonNode> customers, Map<String, JsonNode> names) {}
+  private record References(Map<String, JsonNode> orders, Map<String, JsonNode> customers, Map<String, JsonNode> names, Map<String, JsonNode> products) {}
 
   private References references(JsonNode state) {
-    return new References(index(state.path("orders")), index(state.path("customers")), customersByName(state));
+    return new References(index(state.path("orders")), index(state.path("customers")), customersByName(state), index(state.path("products")));
   }
 
   private JsonNode normalizeReceipt(JsonNode receipt, References refs) {
@@ -178,8 +196,9 @@ public class BusinessService {
   }
 
   private void validateTotal(JsonNode order, JsonNode products) {
-    if (order.path("type").asText().equals("预收款订单")) return;
-    require(order.path("items").isArray() && !order.path("items").isEmpty(), "销售订单须填写产品明细");
+    boolean prepayment = "预收款订单".equals(order.path("type").asText());
+    if (prepayment && (order.path("items").isMissingNode() || order.path("items").isNull())) return;
+    require(order.path("items").isArray() && (prepayment || !order.path("items").isEmpty()), "销售订单须填写产品明细");
     var byId = index(products);
     BigDecimal total = BigDecimal.ZERO;
     for (var item : order.path("items")) {
@@ -189,21 +208,62 @@ public class BusinessService {
           && quantity.stripTrailingZeros().scale() <= 6, "产品数量须大于零，最多六位小数且不超过十亿");
       total = total.add(quantity.multiply(money(item.path("price"), false)));
     }
-    require(total.setScale(2, RoundingMode.HALF_UP).compareTo(money(order.path("total"), false)) == 0,
+    if (!prepayment) require(total.setScale(2, RoundingMode.HALF_UP).compareTo(money(order.path("total"), false)) == 0,
         "订单总额与产品明细合计不一致");
+  }
+
+  private static ArrayNode productItems(JsonNode order, Map<String, JsonNode> products) {
+    var items = JsonNodeFactory.instance.arrayNode();
+    if (order == null) return items;
+    for (var line : order.path("items")) {
+      var product = products.getOrDefault(line.path("product").asText(), MissingNode.getInstance());
+      String name = product.path("name").asText();
+      if (name.isBlank()) name = line.path("name").asText(line.path("product").asText());
+      String sku = product.path("jstSku").asText();
+      if (sku.isBlank()) sku = product.path("code").asText();
+      if (sku.isBlank()) sku = line.path("sku").asText(line.path("code").asText());
+      String model = product.path("model").asText();
+      if (model.isBlank()) model = line.path("model").asText();
+      var item = items.addObject().put("product", line.path("product").asText()).put("name", name).put("sku", sku).put("model", model);
+      item.set("qty", line.path("qty").deepCopy());
+      item.set("price", line.path("price").deepCopy());
+    }
+    return items;
+  }
+
+  /** Read-only display enrichment: never persist a legacy current-order fallback as a receipt snapshot. */
+  static ObjectNode receiptItems(JsonNode receipt, JsonNode order, Map<String, JsonNode> products) {
+    ObjectNode result = receipt.deepCopy();
+    String sourceKind = receipt.path("itemsSource").asText();
+    boolean derived = Set.of("order", "unknown").contains(sourceKind);
+    if (receipt.path("items").isArray() && (!derived || order == null)) {
+      var items = result.putArray("items");
+      for (var source : receipt.path("items")) {
+        var item = items.addObject();
+        for (String field : List.of("product", "name", "sku", "model", "qty", "price"))
+          if (source.has(field)) item.set(field, source.path(field).deepCopy());
+      }
+      result.put("itemsSource", derived ? "unknown" : "snapshot");
+    } else {
+      result.set("items", productItems(order, products));
+      result.put("itemsSource", order == null ? "unknown" : "order");
+    }
+    return result;
   }
 
   @Transactional(readOnly = true)
   public List<JsonNode> receipts() {
     var state = state();
     var refs = references(state);
-    return db.documents("receipts", true, 0).stream().map(r -> normalizeReceipt(r, refs)).toList();
+    return db.documents("receipts", true, 0).stream()
+        .<JsonNode>map(r -> receiptItems(normalizeReceipt(r, refs), refs.orders().get(r.path("order").asText()), refs.products())).toList();
   }
 
   @Transactional(readOnly = true)
   public Map<String, Object> receiptsPage(int page, int pageSize, String query, String method) {
     require(page >= 1 && pageSize >= 1 && pageSize <= 100 && query.length() <= 200 && method.length() <= 50,
         "分页或筛选参数无效");
+    var refs = references(state());
     String customer = "COALESCE(c.name,JSON_UNQUOTE(JSON_EXTRACT(r.payload,'$.customer')))";
     String from = " FROM receipts r LEFT JOIN (SELECT j.id,j.name,COUNT(*) OVER (PARTITION BY j.name) AS name_count"
         + " FROM state s JOIN JSON_TABLE(COALESCE(s.payload,'{\"customers\":[]}'),"
@@ -226,12 +286,95 @@ public class BusinessService {
           ObjectNode receipt = (ObjectNode) db.parse(row.get("payload").toString());
           receipt.put("customer", Objects.toString(row.get("customer"), ""));
           if (row.get("customerId") != null) receipt.put("customerId", row.get("customerId").toString());
-          return receipt;
+          return receiptItems(receipt, refs.orders().get(receipt.path("order").asText()), refs.products());
         }).toList();
     var methods = db.rows("SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(payload,'$.method')) AS method FROM receipts ORDER BY method")
         .stream().map(row -> row.get("method")).filter(Objects::nonNull).toList();
     return Map.of("rows", rows, "total", total, "page", currentPage, "amount", summary.get("amount"),
         "customers", summary.get("customers"), "methods", methods);
+  }
+
+  /** Only the receipt approval service may call this after a verified, persisted APPROVED instance. */
+  @Transactional
+  public JsonNode applyApprovedReceipt(JsonNode batch) {
+    require(batch.isObject() && batch.path("id").isTextual() && !batch.path("id").asText().isBlank()
+        && batch.path("id").asText().length() <= 64 && !batch.path("instanceCode").asText().isBlank(), "收款审批记录无效");
+    require(!batch.path("operator").asText().isBlank() && !batch.path("operatorRole").asText().isBlank(), "收款审批操作人缺失");
+    try {
+      require(batch.path("receiptDate").asText().matches("\\d{4}-\\d{2}-\\d{2}"), "收款日期无效");
+      LocalDate.parse(batch.path("receiptDate").asText());
+    } catch (java.time.format.DateTimeParseException invalidDate) {
+      throw new ApiException("收款日期无效");
+    }
+    require(!batch.path("receiptCategory").asText().isBlank(), "收款类别缺失");
+    var current = db.state(true);
+    var persisted = db.rows("SELECT payload FROM feishu_receipt_approvals WHERE id=? FOR UPDATE", batch.path("id").asText());
+    require(!persisted.isEmpty(), "收款审批记录不存在");
+    var verified = db.parse(persisted.getFirst().get("payload").toString());
+    require("APPROVED".equals(verified.path("status").asText()) && verified.equals(batch), "收款审批尚未通过或与入账记录不一致");
+    normalizeOrders(current, current);
+    ObjectNode next = current.deepCopy();
+    var orders = index(next.path("orders"));
+    var allocations = batch.path("allocations");
+    require(allocations.isArray() && !allocations.isEmpty(), "收款分配明细无效");
+    var ids = new HashSet<String>();
+    BigDecimal allocated = BigDecimal.ZERO;
+    String timestamp = LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+    for (var allocation : allocations) {
+      String orderId = allocation.path("orderId").asText();
+      var order = orders.get(orderId);
+      var snapshot = allocation.path("orderSnapshot");
+      require(ids.add(orderId) && order != null && snapshot.isObject(), "收款订单缺失或重复");
+      require("已批准".equals(order.path("status").asText()) && !deletedOrder(order), "收款订单须已批准且未删除");
+      for (String field : RECEIPT_APPROVAL_FIELDS)
+        require(same(order.path(field), snapshot.path(field)), "收款审批提交后订单内容或已收金额已变化，请核对后处理");
+      require(order.path("customerId").equals(batch.path("customerId"))
+          && order.path("customer").equals(batch.path("customer")), "收款客户与审批记录不一致");
+      var execution = receiptExecutionView(db, order);
+      require(allocation.path("executionSnapshot").isObject()
+          && sameReceiptExecution(execution, allocation.path("executionSnapshot")), "订单执行信息已变化，请核对审批后再入账");
+      require(same(execution.path("paid"), order.path("paid"))
+          && same(execution.path("total"), order.path("total")), "订单执行金额已变化，请先核对最新收款数据");
+      var amount = money(allocation.path("amount"), false);
+      var paid = money(order.path("paid"), true);
+      require(amount.signum() > 0 && paid.add(amount).compareTo(money(order.path("total"), false)) <= 0,
+          "收款分配须大于零且不能超过订单未收金额");
+      require(allocation.path("items").isArray(), "收款产品快照缺失");
+      ((ObjectNode) order).put("paid", paid.add(amount)).put("method", batch.path("method").asText()).put("updated", timestamp);
+      allocated = allocated.add(amount);
+    }
+    require(allocated.compareTo(money(batch.path("amount"), false)) == 0, "收款审批金额与分配合计不一致");
+    require(db.documents("receipts", false, 0).stream()
+        .noneMatch(receipt -> batch.path("id").equals(receipt.path("approvalId"))), "该收款审批已入账，请刷新后核对");
+    var actor = new Actor(batch.path("operator").asText(), batch.path("operatorRole").asText(),
+        Set.of("business.read", "business.write", "payment.write"));
+    var body = db.object().put("revision", current.path("revision").asLong());
+    body.set("data", next);
+    body.set("receiptVerification", db.object().put("amount", allocated).put("customerId", batch.path("customerId").asText())
+        .put("customer", batch.path("customer").asText()).put("method", batch.path("method").asText()));
+    ((ObjectNode) body.path("receiptVerification")).put("receivedOn", batch.path("receiptDate").asText());
+    return save(body, actor, false, "", batch);
+  }
+
+  private boolean sameReceiptExecution(JsonNode current, JsonNode snapshot) {
+    for (String field : RECEIPT_APPROVAL_FIELDS)
+      if (!same(current.path(field), snapshot.path(field))) return false;
+    return true;
+  }
+
+  /** Read-only execution money/products used to freeze the exact receipt proposal. */
+  static ObjectNode receiptExecutionView(CrmRepository db, JsonNode order) {
+    ObjectNode view = order.deepCopy();
+    for (var row : db.rows("SELECT payload FROM jst_shipments WHERE order_id=?", order.path("id").asText())) {
+      if (row.get("payload") == null) continue;
+      var record = db.parse(row.get("payload").toString());
+      if (record == null || !record.path("effectiveOrder").isObject()) continue;
+      var effective = record.path("effectiveOrder");
+      for (String key : List.of("total", "paid", "items"))
+        if (effective.hasNonNull(key)) view.set(key, effective.path(key).deepCopy());
+    }
+    if (!view.hasNonNull("paid")) view.put("paid", 0);
+    return view;
   }
 
   @Transactional
@@ -246,7 +389,20 @@ public class BusinessService {
     return save(body, actor, true);
   }
 
+  /** Package-local entry used only while the approval service owns the encompassing transaction. */
+  JsonNode saveForFeishuApproval(JsonNode body, Actor actor, String orderId) {
+    return save(body, actor, false, orderId);
+  }
+
   private JsonNode save(JsonNode body, Actor actor, boolean migration) {
+    return save(body, actor, migration, "");
+  }
+
+  private JsonNode save(JsonNode body, Actor actor, boolean migration, String submittingOrderId) {
+    return save(body, actor, migration, submittingOrderId, null);
+  }
+
+  private JsonNode save(JsonNode body, Actor actor, boolean migration, String submittingOrderId, JsonNode approvedReceipt) {
     actor.require("business.read");
     actor.require("business.write");
     var old = db.state(true);
@@ -284,6 +440,10 @@ public class BusinessService {
     normalizeOrders(next, old.isNull() ? next : old);
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
+    protectCanceledOrders(oldOrders, nextOrders, false);
+    protectDeletedOrders(oldOrders, nextOrders, false);
+    protectFeishuOrders(oldOrders, nextOrders, submittingOrderId, true);
+    protectReceiptApprovalOrders(oldOrders, nextOrders, approvedReceipt == null ? "" : approvedReceipt.path("id").asText());
     protectSubmittedOrders(nextOrders);
     for (var entry : nextOrders.entrySet()) {
       String id = entry.getKey();
@@ -351,7 +511,7 @@ public class BusinessService {
       if (settlement)
         require(!coreChanged(entry, prior) && sameRecord(entry.path("settlement"), prior.path("settlement")),
             "结算单的客户、结算期间和确认金额已锁定，请通过关联单据核对明细");
-      require(List.of("草稿", "审批中", "已批准").contains(entry.path("status").asText()), "订单状态无效");
+      require(List.of("草稿", "审批中", "已批准", CANCELED_ORDER).contains(entry.path("status").asText()), "订单状态无效");
       require(List.of("销售订单", "预收款订单", "海外提货单").contains(entry.path("type").asText()), "订单类型无效");
       boolean changed = coreChanged(entry, prior);
       boolean resolved = nextCustomers.containsKey(entry.path("customerId").asText());
@@ -396,6 +556,7 @@ public class BusinessService {
         }
       if (delta.signum() > 0) {
         actor.require("payment.write");
+        require(feishuReceiptApprovalCode.isBlank() || approvedReceipt != null, "收款须通过飞书审批后入账");
         require(resolved, "请先为订单选择客户");
         for (var historical : historicalReceipts)
           require(!historical.path("customerId").asText().isBlank()
@@ -409,7 +570,9 @@ public class BusinessService {
             !(entry.path("type").asText().equals("预收款订单") && method.equals("预收款核销")),
             "预收款订单不能使用核销方式");
         var r = db.object();
-        r.put("id", UUID.randomUUID().toString());
+        r.put("id", approvedReceipt == null ? UUID.randomUUID().toString()
+            : UUID.nameUUIDFromBytes((approvedReceipt.path("id").asText()+":"+entry.path("id").asText())
+                .getBytes(StandardCharsets.UTF_8)).toString());
         r.put("order", entry.path("id").asText());
         r.put("customer", entry.path("customer").asText());
         r.put("customerId", entry.path("customerId").asText());
@@ -420,6 +583,21 @@ public class BusinessService {
         if (settlement) r.put("receivedOn", JushuitanSettlementService.receivedOn(
             body.path("receiptVerification").path("receivedOn").asText(), entry));
         r.put("operator", actor.name());
+        r.set("items", productItems(entry, nextRefs.products()));
+        r.put("itemsSource", "snapshot");
+        if (approvedReceipt != null) {
+          r.put("approvalId", approvedReceipt.path("id").asText()).put("instanceCode", approvedReceipt.path("instanceCode").asText())
+              .put("receiptDate", approvedReceipt.path("receiptDate").asText()).put("receiptCategory", approvedReceipt.path("receiptCategory").asText());
+          for (var allocation : approvedReceipt.path("allocations")) {
+            if (!entry.path("id").equals(allocation.path("orderId"))) continue;
+            var snapshots = r.putArray("items");
+            for (var source : allocation.path("items")) {
+              var item = snapshots.addObject();
+              for (String field : List.of("product", "name", "sku", "model", "qty", "price"))
+                if (source.has(field)) item.set(field, source.path(field).deepCopy());
+            }
+          }
+        }
         receipts.add(r);
       }
     }
@@ -515,19 +693,25 @@ public class BusinessService {
 
   @Transactional(readOnly = true)
   public Map<String, Object> backup() {
+    var snapshot = state();
+    var refs = references(snapshot);
     return Map.of(
         "version",
         1,
         "state",
-        state(),
+        snapshot,
         "receipts",
-        receipts().reversed(),
+        db.documents("receipts", false, 0).stream().map(r -> normalizeReceipt(r, refs)).toList(),
         "assets",
-        assets.backup(state()),
+        assets.backup(snapshot),
         "jstShipments",
         db.rows("SELECT payload FROM jst_shipments").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "jstDocumentLinks",
         JushuitanDocumentBackup.exportLinks(db),
+        "feishuApprovals",
+        db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
+        "feishuReceiptApprovals",
+        db.rows("SELECT payload FROM feishu_receipt_approvals ORDER BY id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "exported",
         CrmRepository.now());
   }
@@ -616,6 +800,17 @@ public class BusinessService {
     ObjectNode next = body.path("state").deepCopy();
     protectLegacyRestore(old, next, body.path("receipts"));
     var restoredOrders = index(next.path("orders"));
+    protectCanceledOrders(index(old.path("orders")), restoredOrders, true);
+    protectDeletedOrders(index(old.path("orders")), restoredOrders, true);
+    // Compare approval locks against the same historical customer view exported by backup().
+    // The original document remains untouched for financial checks and restoration audits.
+    JsonNode approvalBaseline = old.deepCopy();
+    if (!approvalBaseline.isNull()) normalizeOrders(approvalBaseline, approvalBaseline);
+    var priorApprovalOrders = index(approvalBaseline.path("orders"));
+    protectFeishuOrders(priorApprovalOrders, restoredOrders, "", false);
+    protectApprovalRestore(body, restoredOrders);
+    protectReceiptApprovalOrders(priorApprovalOrders, restoredOrders, "");
+    protectReceiptRestore(body, old);
     protectSubmittedOrders(restoredOrders);
     for (var current : old.path("orders")) {
       if (!JushuitanDocumentService.isSettlement(current)) continue;
@@ -734,6 +929,203 @@ public class BusinessService {
     auditRecords("customers", "客户（恢复备份）", old, next, actor);
     auditRecords("receipts", "收款流水（恢复备份）", receiptsBefore, receiptsAfter, actor);
     db.audit(actor.name(), "恢复数据备份");
+  }
+
+  @Transactional
+  public JsonNode deleteOrder(String id, Actor actor) {
+    actor.require("business.read"); actor.require("business.write");
+    require(!id.isBlank() && id.length() <= 191, "订单编号无效");
+    var state = db.state(true);
+    normalizeOrders(state, state);
+    var order = index(state.path("orders")).get(id);
+    if (order == null) throw new ApiException(404, "订单不存在");
+    if (deletedOrder(order)) return state;
+    require(Set.of("销售订单", "海外提货单").contains(order.path("type").asText())
+        && !JushuitanDocumentService.isSettlement(order)
+        && DELETABLE_ORDER_STATUSES.contains(order.path("status").asText()), "仅未批准的销售订单或海外提货单可删除");
+    require(canStopFinancially(db, order), "已有收款、财务流水或聚水潭关联的订单不能删除");
+    var approvals = db.rows("SELECT status,instance_code FROM feishu_order_approvals WHERE order_id=? FOR UPDATE", id);
+    if (!approvals.isEmpty()) {
+      var approval = approvals.getFirst();
+      String status = Objects.toString(approval.get("status"), "");
+      boolean linked = !Objects.toString(approval.get("instance_code"), "").isBlank();
+      require(STOPPED_APPROVAL_STATUSES.contains(status) || (!linked && "FAILED".equals(status)),
+          "请先取消订单并确认飞书审批已结束");
+      require(!linked || canceledOrder(order), "已有飞书审批记录，请先取消订单");
+    }
+    String deletedAt = CrmRepository.now();
+    ((ObjectNode) order).put("status", CANCELED_ORDER).put("deletedAt", deletedAt);
+    ((ObjectNode) state).put("revision", state.path("revision").asLong() + 1);
+    db.state(state);
+    db.audit(actor.name(), "删除" + order.path("type").asText(), db.object().put("type", "ORDER_DELETED").put("source", "CRM")
+        .put("orderId", id).put("deletedAt", deletedAt));
+    return state;
+  }
+
+  static boolean hasJushuitanOrderLink(CrmRepository db, String id) {
+    return !db.rows("""
+        SELECT order_id FROM jst_shipments WHERE order_id=?
+        UNION ALL SELECT order_id FROM jst_document_sales WHERE order_id=?
+        UNION ALL SELECT order_id FROM jst_document_purchases WHERE order_id=? LIMIT 1
+        """, id, id, id).isEmpty();
+  }
+
+  static boolean canStopFinancially(CrmRepository db, JsonNode order) {
+    try {
+      if (new BigDecimal(order.path("paid").asText("0")).signum() != 0) return false;
+    } catch (NumberFormatException failure) { return false; }
+    String id = order.path("id").asText();
+    return !hasActiveReceiptApproval(db, id) && !hasJushuitanOrderLink(db, id) && db.rows(
+        "SELECT id FROM receipts WHERE JSON_UNQUOTE(JSON_EXTRACT(payload,'$.order'))=? LIMIT 1", id).isEmpty();
+  }
+
+  static boolean hasActiveReceiptApproval(CrmRepository db, String orderId) {
+    for (var row : db.rows(ACTIVE_RECEIPT_APPROVALS)) {
+      var batch = db.parse(row.get("payload").toString());
+      for (var allocation : batch.path("allocations"))
+        if (orderId.equals(allocation.path("orderId").asText())) return true;
+    }
+    return false;
+  }
+
+  private void protectReceiptApprovalOrders(Map<String, JsonNode> before, Map<String, JsonNode> after, String ownBatchId) {
+    for (var row : db.rows(ACTIVE_RECEIPT_APPROVALS)) {
+      var batch = db.parse(row.get("payload").toString());
+      if (!ownBatchId.isBlank() && ownBatchId.equals(batch.path("id").asText())) continue;
+      for (var allocation : batch.path("allocations")) {
+        String id = allocation.path("orderId").asText();
+        var previous = before.get(id); var next = after.get(id);
+        require(previous != null && next != null, "有收款审批记录的订单不能移除");
+        for (String field : RECEIPT_APPROVAL_FIELDS)
+          require(same(previous.path(field), next.path(field)), "有待处理收款审批的订单不能修改提交内容或已收金额");
+      }
+    }
+  }
+
+  private void protectReceiptRestore(JsonNode backup, JsonNode current) {
+    var saved = new HashMap<String, JsonNode>();
+    for (var record : backup.path("feishuReceiptApprovals")) {
+      String id = record.path("id").asText();
+      require(!id.isBlank() && saved.putIfAbsent(id, record) == null, "备份中的收款审批无效或重复");
+    }
+    var currentIds = new HashSet<String>();
+    for (var row : db.rows("SELECT payload FROM feishu_receipt_approvals ORDER BY id")) {
+      var batch = db.parse(row.get("payload").toString());
+      String id = batch.path("id").asText(); currentIds.add(id);
+      require(batch.equals(saved.get(id)), "备份缺少收款审批或早于最新状态，请使用最新备份");
+    }
+    require(currentIds.equals(saved.keySet()), "不能从备份导入未经核对的外部收款审批");
+    var incoming = index(backup.path("receipts"));
+    var before = index(current.path("orders")); var after = index(backup.path("state").path("orders"));
+    if (!feishuReceiptApprovalCode.isBlank()) {
+      var refs = references(current);
+      var history = db.documents("receipts", false, 0);
+      require(history.size() == incoming.size(), "收款审批启用后，备份不能新增或移除收款流水");
+      for (var receipt : history)
+        require(normalizeReceipt(receipt, refs).equals(incoming.get(receipt.path("id").asText())),
+            "收款审批启用后，备份不能修改收款流水");
+      for (var entry : after.entrySet()) {
+        var previous = before.get(entry.getKey());
+        require(previous == null ? money(entry.getValue().path("paid"), true).signum() == 0
+            : same(previous.path("paid"), entry.getValue().path("paid")),
+            "收款审批启用后，备份不能改变订单已收金额");
+      }
+    }
+    for (var receipt : db.documents("receipts", false, 0)) {
+      if (receipt.path("approvalId").asText().isBlank()) continue;
+      require(normalizeReceipt(receipt, references(current)).equals(incoming.get(receipt.path("id").asText())), "备份缺少或修改了审批通过的收款流水");
+      String id = receipt.path("order").asText();
+      require(before.containsKey(id) && after.containsKey(id) && same(before.get(id).path("paid"), after.get(id).path("paid")),
+          "备份不能回退已审批收款的订单已收金额");
+    }
+  }
+
+  private void protectCanceledOrders(Map<String, JsonNode> before, Map<String, JsonNode> after, boolean restoring) {
+    for (var entry : before.entrySet()) {
+      if (!canceledOrder(entry.getValue())) continue;
+      var next = after.get(entry.getKey());
+      require(canceledOrder(next) && sameRecord(entry.getValue(), next), "已取消订单不能恢复、删除记录或修改");
+    }
+    for (var entry : after.entrySet()) {
+      var order = entry.getValue();
+      if (!canceledOrder(order)) continue;
+      var prior = before.get(entry.getKey());
+      require(canceledOrder(prior) || (restoring && prior == null), "请通过订单的取消操作取消订单");
+      require(APPROVAL_TYPES.contains(order.path("type").asText()) && !JushuitanDocumentService.isSettlement(order)
+          && money(order.path("paid"), true).signum() == 0, "已取消订单须为未收款的普通业务订单");
+    }
+  }
+
+  private void protectDeletedOrders(Map<String, JsonNode> before, Map<String, JsonNode> after, boolean restoring) {
+    for (var entry : before.entrySet()) {
+      if (!deletedOrder(entry.getValue())) continue;
+      var next = after.get(entry.getKey());
+      require(next != null && entry.getValue().path("deletedAt").equals(next.path("deletedAt")), "已删除订单不能恢复或移除记录");
+    }
+    for (var entry : after.entrySet()) {
+      var order = entry.getValue();
+      if (!order.has("deletedAt")) continue;
+      var prior = before.get(entry.getKey());
+      require(deletedOrder(prior) || (restoring && prior == null), "请通过订单的删除操作删除订单");
+      require(order.path("deletedAt").isTextual() && !order.path("deletedAt").asText().isBlank()
+          && canceledOrder(order) && Set.of("销售订单", "海外提货单").contains(order.path("type").asText()), "已删除订单记录无效");
+    }
+  }
+
+  private static boolean canceledOrder(JsonNode order) { return order != null && CANCELED_ORDER.equals(order.path("status").asText()); }
+  private static boolean deletedOrder(JsonNode order) { return order != null && order.hasNonNull("deletedAt"); }
+
+  private boolean requiresFeishu(JsonNode order) {
+    return order != null && !JushuitanDocumentService.isSettlement(order)
+        && APPROVAL_TYPES.contains(order.path("type").asText());
+  }
+
+  private boolean onlyLegacyCustomerAssociationChanged(JsonNode next, JsonNode prior) {
+    if (prior == null || !prior.path("customerId").asText().isBlank() || next.path("customerId").asText().isBlank()) return false;
+    for (String field : List.of("status", "total", "type", "items", "paid", "owner"))
+      if (!same(next.path(field), prior.path(field))) return false;
+    return true;
+  }
+
+  private void protectFeishuOrders(Map<String, JsonNode> before, Map<String, JsonNode> after,
+      String submittingOrderId, boolean allowLegacyCustomerAssociation) {
+    for (var entry : after.entrySet()) {
+      var next = entry.getValue();
+      if (!requiresFeishu(next)) continue;
+      var prior = before.get(entry.getKey());
+      if ("已批准".equals(next.path("status").asText()))
+        require(prior != null && "已批准".equals(prior.path("status").asText())
+            && ((!coreChanged(next, prior) && same(next.path("owner"), prior.path("owner")))
+                || (allowLegacyCustomerAssociation && onlyLegacyCustomerAssociationChanged(next, prior))),
+            "订单须通过飞书审批，不能在 CRM 手工批准或修改已批准内容");
+      if ("审批中".equals(next.path("status").asText()) && !entry.getKey().equals(submittingOrderId))
+        require(prior != null && "审批中".equals(prior.path("status").asText()) && !coreChanged(next, prior)
+            && same(next.path("owner"), prior.path("owner")), "请使用提交飞书审批，不能仅修改 CRM 审批状态");
+    }
+    for (var row : db.rows("SELECT order_id,status FROM feishu_order_approvals")) {
+      String id = row.get("order_id").toString();
+      var previous = before.get(id);
+      var next = after.get(id);
+      require(previous != null && next != null, "有飞书审批历史的订单不能移除");
+      if (!Set.of("QUEUED", "SUBMITTING", "UNKNOWN", "PENDING", "APPROVED").contains(row.get("status").toString())) continue;
+      for (String field : APPROVAL_FIELDS)
+        require(same(previous.path(field), next.path(field)), "有飞书审批记录的订单不能修改审批状态及提交内容");
+    }
+  }
+
+  private void protectApprovalRestore(JsonNode backup, Map<String, JsonNode> orders) {
+    var saved = new HashMap<String, JsonNode>();
+    for (var record : backup.path("feishuApprovals")) {
+      String id = record.path("orderId").asText();
+      require(!id.isBlank() && saved.putIfAbsent(id, record) == null, "备份中的飞书审批记录无效或重复");
+    }
+    var currentIds = new HashSet<String>();
+    for (var row : db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id")) {
+      var current = db.parse(row.get("payload").toString());
+      String id = current.path("orderId").asText(); currentIds.add(id);
+      require(orders.containsKey(id) && current.equals(saved.get(id)), "备份缺少现有飞书审批或早于最新审批状态，请使用最新备份");
+    }
+    require(currentIds.equals(saved.keySet()), "不能从备份导入未经核对的外部飞书审批记录");
   }
 
   private void protectSubmittedOrders(Map<String, JsonNode> orders) {

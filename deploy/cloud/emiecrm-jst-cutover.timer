@@ -1,0 +1,10 @@
+[Unit]
+Description=EMIE CRM Jushuitan cutover on 2026-11-27 at noon Beijing time
+
+[Timer]
+OnCalendar=2026-11-27 04:00:00 UTC
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

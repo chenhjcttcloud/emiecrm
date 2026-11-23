@@ -23,7 +23,7 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     return data;
   }
   const snapshots=new Map();
-  const tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets'];
+  const tables=['receipts','jst_shipments','jst_document_sales','dashboard_targets','sales_targets','sales_target_scope'];
   const suffix=Date.now().toString(36);
   const users=['dash-view-'+suffix,'dash-target-'+suffix];
   const roles=['看板查看测试'+suffix,'目标管理测试'+suffix];
