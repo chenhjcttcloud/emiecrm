@@ -3,7 +3,7 @@ export const workspacePages = {
   'dashboard-targets':'dashboard.targets.manage',
   'sales-orders':'business.read', 'sales-items':'business.read',
   'sales-receipts':'business.read', 'sales-targets':'business.read',
-  advance:'business.read',
+  advance:'business.read', 'receipt-orders':'business.read',
   customers:'business.read', products:'business.read',
   'sys-users':'system.manage', 'sys-roles':'system.manage',
   'sys-departments':'system.manage', 'sys-audit':'system.manage',

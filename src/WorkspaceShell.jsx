@@ -8,14 +8,17 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
   const dashboard=page.startsWith('dashboard-');
   const system=page.startsWith('sys-');
   const sales=page.startsWith('sales-')||['orders','receipts'].includes(page);
+  const payments=['advance','receipt-orders'].includes(page);
   const[dashboardExpanded,setDashboardExpanded]=useState(dashboard);
   const[salesExpanded,setSalesExpanded]=useState(sales);
   const[systemExpanded,setSystemExpanded]=useState(system);
+  const[paymentsExpanded,setPaymentsExpanded]=useState(payments);
   const localArea=useRef(null),area=mainArea||localArea;
   useEffect(()=>{
     if(dashboard)setDashboardExpanded(true);
     if(system)setSystemExpanded(true);
     if(sales)setSalesExpanded(true);
+    if(payments)setPaymentsExpanded(true);
     area.current?.scrollTo({top:0,left:0,behavior:'instant'});
   },[page]);
   const caret=expanded=><span className="nav-caret"><Icon name="chevron" style={{transform:expanded?'rotate(180deg)':undefined}}/></span>;
@@ -38,7 +41,8 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
         {salesExpanded&&<div className="nav-sub">{[['sales-orders','销售订单信息'],['sales-items','订单产品明细'],['sales-receipts','订单收款明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
       </div>
       <div className="nav-section-label">业务管理</div>
-      <button type="button" title="预收款管理" className={'nav-item '+(page==='advance'?'active':'')} onClick={()=>go('advance')}><Icon name="cash"/><span>预收款管理</span></button>
+      <button type="button" title="收款管理" aria-expanded={paymentsExpanded} className={'nav-item '+(payments?'active-parent':'')} onClick={()=>setPaymentsExpanded(!paymentsExpanded)}><Icon name="cash"/><span>收款管理</span>{caret(paymentsExpanded)}</button>
+      {paymentsExpanded&&<div className="nav-sub">{[['advance','预收款'],['receipt-orders','收款']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
       <button type="button" title="客户管理" className={'nav-item '+(page==='customers'?'active':'')} onClick={()=>go('customers')}><Icon name="customers"/><span>客户管理</span></button>
       <button type="button" title="产品管理" className={'nav-item '+(page==='products'?'active':'')} onClick={()=>go('products')}><Icon name="products"/><span>产品管理</span></button>
     </>}
