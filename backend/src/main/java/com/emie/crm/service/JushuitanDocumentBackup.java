@@ -58,7 +58,7 @@ final class JushuitanDocumentBackup {
       String environment = shipment.path("environment").asText();
       String orderId = shipment.path("orderId").asText();
       shipmentOrders.add(orderId);
-      String shopId = JushuitanDocumentService.identifier(shipment.path("request").path("shop_id"));
+      String shopId = JushuitanDocumentService.shopIdentifier(shipment.path("request").path("shop_id"));
       addShipmentSale(shipmentOwners, saleNumbers, saleShopNumbers, environment, orderId, shopId,
           shipment.path("oId"), shipment.path("soId"));
       var amendment = shipment.path("amendment");
@@ -75,7 +75,7 @@ final class JushuitanDocumentBackup {
     for (var sale : links.path("sales")) {
       String environment = sale.path("environment").asText();
       String orderId = sale.path("orderId").asText();
-      String shopId = JushuitanDocumentService.identifier(sale.path("shopId"));
+      String shopId = JushuitanDocumentService.shopIdentifier(sale.path("shopId"));
       String number = JushuitanDocumentService.identifier(sale.path("oId"));
       String soId = sale.path("soId").asText();
       validateOwner(environment, orderId, orders);

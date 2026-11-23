@@ -8,6 +8,23 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 class FeishuSalesApprovalFormTest {
+  @Test void aVerifiedPlannedWarehouseIsVisibleInTheExistingApprovalNote() throws Exception {
+    var order = FeishuApprovalFixtures.order();
+    order.putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "华南发货仓");
+    var form = build(FeishuApprovalFixtures.definition(), order);
+    assertTrue(field(form, "note").path("value").asText().contains("计划发货仓库：华南发货仓（5）"));
+    assertTrue(field(form, "note").path("value").asText().contains("订单备注"));
+  }
+
+  @Test void aSelectedWarehouseCannotBeSilentlyOmittedFromATemplateWithoutNotes() throws Exception {
+    var definition = FeishuApprovalFixtures.definition();
+    definition.withArray("form").remove(4);
+    definition.withArray("form").addObject().put("id", "order-id").put("name", "订单编号").put("type", "input");
+    var order = FeishuApprovalFixtures.order();
+    order.putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "华南发货仓");
+    assertTrue(assertThrows(ApiException.class, () -> build(definition, order)).getMessage().contains("仓库"));
+  }
+
   @Test void domesticTemplateMapsOrderAndLineAmountsWithoutAdditionalInput() throws Exception {
     var form = build(FeishuApprovalFixtures.definition(), FeishuApprovalFixtures.order());
     assertEquals("sale", field(form, "type").path("value").asText());

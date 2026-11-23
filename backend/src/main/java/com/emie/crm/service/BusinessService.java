@@ -192,7 +192,7 @@ public class BusinessService {
   private boolean coreChanged(JsonNode order, JsonNode prior) {
     for (String key : List.of("total", "customerId", "type", "items"))
       if (!same(order.path(key), prior.path(key))) return true;
-    return false;
+    return !OrderWarehouse.same(order, prior);
   }
 
   private void validateTotal(JsonNode order, JsonNode products) {
@@ -440,6 +440,7 @@ public class BusinessService {
     normalizeOrders(next, old.isNull() ? next : old);
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
+    nextOrders.values().forEach(OrderWarehouse::validateDraft);
     protectCanceledOrders(oldOrders, nextOrders, false);
     protectDeletedOrders(oldOrders, nextOrders, false);
     protectFeishuOrders(oldOrders, nextOrders, submittingOrderId, true);
@@ -775,6 +776,7 @@ public class BusinessService {
           "备份缺少或修改了旧客户收款及核销流水，请使用最新备份");
     }
     var restoredOrders = index(next.path("orders"));
+    restoredOrders.values().forEach(OrderWarehouse::validateDraft);
     for (var current : old.path("orders")) {
       String id = current.path("customerId").asText();
       if (id.isBlank()) {
@@ -1084,7 +1086,7 @@ public class BusinessService {
     if (prior == null || !prior.path("customerId").asText().isBlank() || next.path("customerId").asText().isBlank()) return false;
     for (String field : List.of("status", "total", "type", "items", "paid", "owner"))
       if (!same(next.path(field), prior.path(field))) return false;
-    return true;
+    return OrderWarehouse.same(next, prior);
   }
 
   private void protectFeishuOrders(Map<String, JsonNode> before, Map<String, JsonNode> after,

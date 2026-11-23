@@ -189,7 +189,7 @@ function DocumentDrawer({ order, api, canWrite, canSettle, Icon, onClose }) {
           </div> : <p className="form-hint">尚未关联聚水潭销售订单。</p>}
           {canWrite && !sale && <form className="jst-document-link" onSubmit={linkSale}>
             <fieldset disabled={busy}>
-              <DocumentNumber label="店铺编号" value={shopId} onChange={setShopId} />
+              <DocumentNumber label="店铺编号（线下为0）" value={shopId} onChange={setShopId} />
               <DocumentNumber label="聚水潭内部订单号" value={oId} onChange={setOId} />
               <button className="secondary" type="submit">关联销售订单</button>
             </fieldset>

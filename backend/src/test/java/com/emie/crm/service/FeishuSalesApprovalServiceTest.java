@@ -97,6 +97,53 @@ class FeishuSalesApprovalServiceTest {
     assertEquals(409, assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer)).status());
     verifyNoInteractions(business, executor, jdbc);
   }
+
+  @Test void planningWarehouseUsesTheRealNameAndOriginalPayloadRetryDoesNotReadOrDispatchAgain() throws Exception {
+    record = null;
+    var directory = mock(JushuitanService.class);
+    when(directory.warehouses()).thenReturn(mapper.readTree("[{\"id\":5,\"name\":\"可信发货仓\"}]"));
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    when(client.definition("template")).thenReturn(FeishuApprovalFixtures.definition());
+    when(business.saveForFeishuApproval(any(), eq(writer), eq("o1"))).thenAnswer(call -> {
+      state = ((JsonNode) call.getArgument(0)).path("data").deepCopy(); return state;
+    });
+    var input = mapper.createObjectNode(); input.set("data", state.deepCopy());
+    ((ObjectNode) input.path("data").path("orders").get(0)).putObject("approvalDraft")
+        .put("warehouseId", "5").put("warehouseName", "伪造仓库名称");
+    input.putObject("approval").put("warehouseId", "5").put("warehouseName", "已过时的名称");
+    var original = input.deepCopy();
+    assertEquals("QUEUED", service.createAndSubmit("o1", input, writer).path("approval").path("status").asText());
+    String uuid = record.path("uuid").asText();
+    assertEquals("可信发货仓", state.path("orders").get(0).path("approvalDraft").path("warehouseName").asText());
+    assertTrue(record.path("form").toString().contains("计划发货仓库：可信发货仓（5）"));
+    assertEquals(original, input, "Server normalization must not mutate the caller's frozen retry payload");
+    assertEquals("QUEUED", service.createAndSubmit("o1", original, writer).path("approval").path("status").asText());
+    record.put("status", "UNKNOWN");
+    assertEquals("UNKNOWN", service.createAndSubmit("o1", original, writer).path("approval").path("status").asText());
+    assertEquals(uuid, record.path("uuid").asText());
+    verify(directory, times(1)).warehouses();
+    verify(business, times(1)).saveForFeishuApproval(any(), eq(writer), eq("o1"));
+    verify(executor, times(1)).execute(any(Runnable.class));
+    verify(client, never()).create(any(), any(), any(), any());
+  }
+
+  @Test void warehouseDirectoryFailureOrMismatchedIdsCannotSaveTheOrderOrQueue() throws Exception {
+    record = null;
+    var directory = mock(JushuitanService.class);
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    var input = mapper.createObjectNode(); input.set("data", state.deepCopy());
+    ((ObjectNode) input.path("data").path("orders").get(0)).putObject("approvalDraft").put("warehouseId", "5");
+    input.putObject("approval").put("warehouseId", "6");
+    assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer));
+    verifyNoInteractions(directory, business, executor, jdbc);
+    input.withObject("approval").put("warehouseId", "5");
+    when(directory.warehouses()).thenThrow(new ApiException(503, "仓库目录暂不可用"));
+    assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer));
+    verifyNoInteractions(business, executor, jdbc);
+    assertNull(record);
+    assertFalse(state.path("orders").get(0).has("approvalDraft"));
+    verify(client, never()).definition(any());
+  }
   @Test void anotherInitiatorCannotClaimAnExistingSubmission() {
     record.put("openId", "ou_another_actor");
     var input = mapper.createObjectNode(); input.set("data", state.deepCopy());

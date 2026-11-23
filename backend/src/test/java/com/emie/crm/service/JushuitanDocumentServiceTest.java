@@ -329,4 +329,140 @@ class JushuitanDocumentServiceTest {
     verifyNoInteractions(client);
     verify(db, never()).jdbc();
   }
+  @Test void offlineShopIdentifierDoesNotWeakenDocumentOrWarehouseIdentifiers() throws Exception {
+    for (String valid : List.of("0", "\"0\"", "7", "\"9223372036854775807\""))
+      assertFalse(shopIdentifier(json(valid)).isEmpty(), valid);
+    for (String invalid : List.of("null", "false", "{}", "[]", "-1", "0.0", "\"00\"", "\"abc\"", "9223372036854775808"))
+      assertEquals("", shopIdentifier(json(invalid)), invalid);
+    assertEquals("", identifier(json("0")));
+    assertEquals("", identifier(json("\"0\"")));
+    assertEquals("7", identifier(json("7")));
+    var identity = new Sale("12", "0", "offline-12", "manual");
+    assertThrows(ApiException.class, () -> withMetadata(identity, json("{\"warehouseId\":0}")));
+  }
+
+  @Test void offlineCandidatesSendTheExplicitFilterAndNeverAdmitOtherOrMissingShops() throws Exception {
+    when(client.query(eq(SALES), anyMap())).thenReturn(json("""
+        {"code":0,"data":{"orders":[
+          {"shop_id":0,"o_id":11,"so_id":"offline-11","status":"Sent","send_date":"2026-11-01","pay_amount":"10.00"},
+          {"shop_id":7,"o_id":12,"so_id":"other-shop","status":"Sent","send_date":"2026-11-01"},
+          {"o_id":13,"so_id":"missing-shop","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":false,"o_id":14,"so_id":"invalid-shop","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":0.0,"o_id":15,"so_id":"fractional-shop","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":0,"o_id":0,"so_id":"invalid-order","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":0,"o_id":16,"so_id":"wrong-date","status":"Sent","send_date":"2026-10-31"},
+          {"shop_id":0,"o_id":17,"so_id":"canceled","status":"Cancelled","send_date":"2026-11-01"}
+        ]}}
+        """));
+    var result = service.settlementCandidates(json("\"0\""), LocalDate.parse("2026-11-01"), LocalDate.parse("2026-11-01"));
+    assertEquals(List.of("11"), result.stream().map(Sale::id).toList());
+    assertEquals("0", result.getFirst().shopId());
+    verify(client, times(2)).query(eq(SALES), argThat(request -> {
+      var values = (Map<?, ?>) request;
+      return Long.valueOf(0).equals(values.get("shop_id")) && Boolean.TRUE.equals(values.get("is_offline_shop"));
+    }));
+    verify(db, never()).jdbc();
+  }
+
+  @Test void offlineVerificationUsesExactShopAndOrderAndKeepsOnlineRequestsUnchanged() throws Exception {
+    when(client.query(eq(SALES), anyMap())).thenReturn(json("""
+        {"code":0,"data":{"orders":[
+          {"shop_id":0,"o_id":12,"so_id":"offline-12","status":"Sent","send_date":"2026-11-01","pay_amount":"10.00"},
+          {"shop_id":7,"o_id":12,"so_id":"wrong-shop-same-order","status":"Sent","send_date":"2026-11-01"},
+          {"o_id":12,"so_id":"missing-shop-same-order","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":0,"o_id":99,"so_id":"unrequested-order","status":"Sent","send_date":"2026-11-01"},
+          {"shop_id":7,"o_id":13,"so_id":"online-13","status":"Sent","send_date":"2026-11-01","pay_amount":"20.00"}
+        ]}}
+        """));
+    var result = service.verifySales(json("""
+        [{"shopId":0,"oId":"12"},{"shopId":"7","oId":"13"}]
+        """));
+    assertEquals(List.of("0", "7"), result.stream().map(Sale::shopId).toList());
+    assertEquals(List.of("12", "13"), result.stream().map(Sale::id).toList());
+    assertEquals(new BigDecimal("30.00"), totalAmount(result));
+    verify(client).query(SALES, Map.of("shop_id", 0L, "is_offline_shop", true, "o_ids", List.of(12L), "page_index", 1, "page_size", 50));
+    verify(client).query(SALES, Map.of("shop_id", 7L, "o_ids", List.of(13L), "page_index", 1, "page_size", 50));
+    verify(db, never()).jdbc();
+  }
+
+  @Test void offlineShopDoesNotAllowZeroDocumentIdsOrInvalidShopCoercion() throws Exception {
+    for (String invalid : List.of("-1", "null", "false", "0.0", "\"missing\""))
+      assertThrows(ApiException.class, () -> service.settlementCandidates(json(invalid), LocalDate.parse("2026-11-01"), LocalDate.parse("2026-11-01")));
+    assertThrows(ApiException.class, () -> service.verifySales(json("[{\"shopId\":0,\"oId\":0}]")));
+    verifyNoInteractions(client);
+    verify(db, never()).jdbc();
+  }
+
+  @Test void exactOfflineLinkUsesTheSameSafeSalesFilter() throws Exception {
+    orderExists();
+    when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+    var jdbc = mock(JdbcTemplate.class);
+    when(db.jdbc()).thenReturn(jdbc);
+    when(db.object()).thenAnswer(call -> mapper.createObjectNode());
+    when(db.tree(any())).thenAnswer(call -> mapper.valueToTree(call.getArgument(0)));
+    when(client.query(eq(SALES), anyMap())).thenReturn(json("""
+        {"code":0,"data":{"orders":[{"shop_id":0,"o_id":12,"so_id":"offline-12"},
+                                     {"shop_id":7,"o_id":12,"so_id":"other-shop"}]}}
+        """));
+    service.linkSale("crm-1", json("{\"shopId\":0,\"oId\":12}"), actor);
+    verify(client).query(SALES, Map.of("shop_id", 0L, "is_offline_shop", true, "o_ids", List.of(12L), "page_index", 1, "page_size", 50));
+    verify(jdbc).update("INSERT INTO jst_document_sales(environment,order_id,shop_id,o_id,so_id) VALUES(?,?,?,?,?)",
+        "production", "crm-1", "0", "12", "offline-12");
+  }
+
+  @Test void offlineDocumentQueriesRetainExactShopAndInternalOrderScope() throws Exception {
+    orderExists();
+    when(db.rows(SALES_BY_ORDER, "production", "crm-1")).thenReturn(List.of(Map.of("shop_id", "0", "o_id", "12", "so_id", "offline-12")));
+    var reply = json("""
+        {"code":0,"data":{"datas":[{"shop_id":0,"o_id":12,"io_id":101},
+          {"shop_id":7,"o_id":12,"io_id":102},{"o_id":12,"io_id":103},{"shop_id":0,"o_id":13,"io_id":104}]}}
+        """ );
+    when(client.query(eq(OUTBOUND), anyMap())).thenReturn(reply);
+    when(client.query(eq(RETURNS), anyMap())).thenReturn(reply);
+    var result = service.get("crm-1", new Actor("viewer", "查看", Set.of("business.read")));
+    assertEquals(List.of("101"), result.outbound().rows().stream().map(Document::id).toList());
+    assertEquals(List.of("101"), result.returns().rows().stream().map(Document::id).toList());
+    verify(client).query(OUTBOUND, Map.of("shop_id", 0L, "is_offline_shop", true, "o_ids", List.of(12L), "archive", false, "page_index", 1, "page_size", 50));
+    verify(client).query(RETURNS, Map.of("shop_id", "0", "o_ids", List.of("12"), "page_index", 1, "page_size", 50));
+  }
+
+  @Test void offlineBackupRoundTripPreservesSettlementSnapshotAndRejectsChanges() throws Exception {
+    var state = json("""
+        {"orders":[{"id":"crm-1","type":"销售订单","source":"jushuitan-settlement",
+          "settlement":{"periodStart":"2026-11-01","periodEnd":"2026-11-30"}}]}
+        """);
+    String metadata = "{\"shippedOn\":\"2026-11-01\",\"status\":\"Sent\",\"amount\":\"10.00\",\"items\":[]}";
+    when(db.parse(metadata)).thenReturn(json(metadata));
+    when(db.encode(any())).thenAnswer(call -> mapper.writeValueAsString(call.getArgument(0)));
+    when(db.rows(contains("sale_metadata AS metadata"))).thenReturn(List.of(Map.of(
+        "environment", "production", "orderId", "crm-1", "shopId", "0", "oId", "12", "soId", "offline-12", "metadata", metadata)));
+    var links = mapper.valueToTree(JushuitanDocumentBackup.exportLinks(db));
+    var jdbc = mock(JdbcTemplate.class);
+    when(db.jdbc()).thenReturn(jdbc);
+    JushuitanDocumentBackup.restoreLinks(db, links, Map.of("crm-1", state.path("orders").get(0)), List.of(), state);
+    verify(jdbc).batchUpdate(eq("INSERT INTO jst_document_sales(environment,order_id,shop_id,o_id,so_id,sale_metadata) VALUES(?,?,?,?,?,?)"),
+        org.mockito.ArgumentMatchers.<List<Object[]>>argThat(rows -> rows.size() == 1 && "0".equals(rows.getFirst()[2]) && "12".equals(rows.getFirst()[3])));
+    reset(jdbc);
+    ((ObjectNode) links.path("sales").get(0)).put("shopId", "7");
+    assertThrows(ApiException.class, () -> JushuitanDocumentBackup.restoreLinks(db, links,
+        Map.of("crm-1", state.path("orders").get(0)), List.of(), state));
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test void offlineBackupCannotReuseAShipmentOnlineNumberOrZeroOrderNumber() throws Exception {
+    orderExists();
+    var orders = Map.of("crm-1", db.state(false).path("orders").get(0));
+    var state = db.state(false);
+    var links = json("""
+        {"sales":[{"environment":"production","orderId":"crm-1","shopId":0,"oId":12,"soId":"offline-A"}],"purchases":[]}
+        """);
+    var shipment = json("""
+        {"environment":"production","orderId":"other-order","request":{"shop_id":0},"oId":99,"soId":"offline-A"}
+        """);
+    assertThrows(ApiException.class, () -> JushuitanDocumentBackup.restoreLinks(db, links, orders, List.of(shipment), state));
+    ((ObjectNode) links.path("sales").get(0)).put("oId", 0);
+    assertThrows(ApiException.class, () -> JushuitanDocumentBackup.restoreLinks(db, links, orders, List.of(), state));
+    verify(db, never()).jdbc();
+  }
+
 }

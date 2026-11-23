@@ -479,4 +479,20 @@ class JushuitanServiceTest {
   assertEquals("DETECTED",m.readTree(persisted).path("externalTimeline").get(0).path("type").asText());
  }
 
+ @Test void settlementShopListKeepsGenuineOfflineZeroButNeverCoercesInvalidIdsIntoIt() throws Exception {
+  when(client.query(eq("/open/shops/query"),any())).thenReturn(json("""
+   {"code":0,"data":{"datas":[
+    {"shop_id":0,"shop_name":"{线下}","shop_site":"线下店铺"},
+    {"shop_id":9,"shop_name":"商城","shop_site":"商家自有商城"},
+    {"shop_id":"17","shop_name":"门店","shop_site":"线下店铺"},
+    {"shop_name":"missing"},{"shop_id":"bad"},{"shop_id":false},{"shop_id":-1},
+    {"shop_id":0.0},{"shop_id":null},{"shop_id":9223372036854775808}
+   ]}}
+   """));
+  var all=service.shops(false);assertEquals(3,all.size());assertEquals(0,all.get(0).path("id").asInt());
+  assertEquals("{线下}",all.get(0).path("name").asText());
+  var upload=service.shops(true);assertEquals(2,upload.size());
+  assertTrue(upload.findValues("id").stream().allMatch(id->id.asLong()>0));
+ }
+
 }

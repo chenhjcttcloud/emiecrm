@@ -1,0 +1,5 @@
+.order-warehouse-picker{min-width:0;margin-bottom:22px}
+.order-warehouse-picker .field{margin-bottom:8px}
+.order-warehouse-picker .read-field{margin-bottom:8px}
+.order-warehouse-picker .form-hint{margin:6px 0 0}
+.order-warehouse-error{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:#b57570;font-size:12px;line-height:1.7;margin:8px 0}

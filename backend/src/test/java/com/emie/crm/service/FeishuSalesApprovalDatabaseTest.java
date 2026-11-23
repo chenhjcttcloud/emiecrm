@@ -105,6 +105,91 @@ class FeishuSalesApprovalDatabaseTest {
     assertTrue(workers.isEmpty());
   }
 
+  @Test void plannedWarehouseUsesTrustedNameAndFrozenRetriesRetainTheOriginalUuid() throws Exception {
+    var directory = mock(JushuitanService.class);
+    when(directory.warehouses()).thenReturn(mapper.readTree("[{\"id\":5,\"name\":\"可信发货仓\"}]"));
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    var input = warehouseRequest();
+    var frozenInput = input.deepCopy();
+    service.createAndSubmit("o1", input, writer);
+    var queued = record();
+    assertEquals("可信发货仓", currentOrder().path("approvalDraft").path("warehouseName").asText());
+    assertEquals("可信发货仓", queued.path("orderSnapshot").path("approvalDraft").path("warehouseName").asText());
+    assertTrue(queued.path("form").toString().contains("计划发货仓库：可信发货仓（5）"));
+    assertEquals(frozenInput, input);
+    assertEquals("QUEUED", service.createAndSubmit("o1", frozenInput, writer).path("approval").path("status").asText());
+    Constructor<FeishuApprovalClient.Uncertain> constructor = FeishuApprovalClient.Uncertain.class.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    when(client.create(any(), any(), any(), any())).thenThrow(constructor.newInstance());
+    runWorkers();
+    assertEquals("UNKNOWN", service.createAndSubmit("o1", frozenInput, writer).path("approval").path("status").asText());
+    assertEquals(queued.path("uuid"), record().path("uuid"));
+    assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM receipts", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_document_sales", Integer.class));
+    verify(directory, times(1)).warehouses();
+    verify(client, times(1)).create(any(), any(), any(), any());
+    verify(executor, times(1)).execute(any(Runnable.class));
+    var changed = stateBody(); order(changed.path("data")).withObject("approvalDraft").put("warehouseId", "6");
+    assertThrows(ApiException.class, () -> new TransactionTemplate(manager).executeWithoutResult(tx -> business.save(changed, writer)));
+  }
+
+  @Test void failedWarehouseDirectoryLeavesBothCreationAndSavedDraftSubmissionUntouched() throws Exception {
+    var directory = mock(JushuitanService.class);
+    when(directory.warehouses()).thenThrow(new ApiException(503, "仓库目录暂不可用"));
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    var input = warehouseRequest();
+    var before = db.state(false).deepCopy();
+    assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer));
+    assertEquals(before, db.state(false));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM audit", Integer.class));
+    order(input.path("data")).put("status", "草稿");
+    new TransactionTemplate(manager).executeWithoutResult(tx -> business.save(input, writer));
+    before = db.state(false).deepCopy();
+    int audits = jdbc.queryForObject("SELECT COUNT(*) FROM audit", Integer.class);
+    assertThrows(ApiException.class, () -> service.submit("o1", input.path("approval"), writer));
+    assertEquals(before, db.state(false));
+    assertEquals(audits, jdbc.queryForObject("SELECT COUNT(*) FROM audit", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals", Integer.class));
+    assertTrue(workers.isEmpty());
+    verify(client, never()).definition(any());
+    verify(client, never()).create(any(), any(), any(), any());
+  }
+
+  @Test void savedDraftWarehouseNormalizationRollsBackOnFormFailureAndLocksAfterSubmission() throws Exception {
+    var directory = mock(JushuitanService.class);
+    when(directory.warehouses()).thenReturn(mapper.readTree("[{\"id\":5,\"name\":\"可信发货仓\"}]"));
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    var input = warehouseRequest(); order(input.path("data")).put("status", "草稿");
+    new TransactionTemplate(manager).executeWithoutResult(tx -> business.save(input, writer));
+    var before = db.state(false).deepCopy();
+    int audits = jdbc.queryForObject("SELECT COUNT(*) FROM audit", Integer.class);
+    var noNote = FeishuApprovalFixtures.definition(); ((ArrayNode) noNote.path("form")).remove(4);
+    when(client.definition("fixture-template")).thenReturn(noNote);
+    assertThrows(ApiException.class, () -> service.submit("o1", input.path("approval"), writer));
+    assertEquals(before, db.state(false));
+    assertEquals(audits, jdbc.queryForObject("SELECT COUNT(*) FROM audit", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals", Integer.class));
+    verify(client, never()).create(any(), any(), any(), any());
+    when(client.definition("fixture-template")).thenReturn(FeishuApprovalFixtures.definition());
+    assertEquals("PENDING", service.submit("o1", input.path("approval"), writer).path("status").asText());
+    assertEquals("可信发货仓", currentOrder().path("approvalDraft").path("warehouseName").asText());
+    var originalUuid = record().path("uuid");
+    when(directory.warehouses()).thenThrow(new ApiException(503, "此时不应再读取仓库目录"));
+    assertEquals("PENDING", service.submit("o1", input.path("approval"), writer).path("status").asText());
+    assertEquals(originalUuid, record().path("uuid"));
+    verify(directory, times(2)).warehouses();
+    verify(client, times(1)).create(any(), any(), any(), any());
+    var backup = mapper.valueToTree(business.backup());
+    new TransactionTemplate(manager).executeWithoutResult(tx -> business.restore(backup, writer));
+    order(backup.path("state")).withObject("approvalDraft").put("warehouseId", "6");
+    assertThrows(ApiException.class, () -> new TransactionTemplate(manager).executeWithoutResult(tx -> business.restore(backup, writer)));
+    assertEquals("5", currentOrder().path("approvalDraft").path("warehouseId").asText());
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM receipts", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments", Integer.class));
+  }
+
   @Test void concurrentIdenticalSubmissionsSaveAndDispatchExactlyOnce() throws Exception {
     var input = request();
     var other = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor);
@@ -379,6 +464,12 @@ class FeishuSalesApprovalDatabaseTest {
   private ObjectNode request() throws Exception {
     var result = stateBody(); result.withObject("data").withArray("orders").add(FeishuApprovalFixtures.order());
     result.putObject("approval"); return result;
+  }
+  private ObjectNode warehouseRequest() throws Exception {
+    var input = request();
+    order(input.path("data")).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "伪造仓库名称");
+    input.withObject("approval").put("warehouseId", "5").put("warehouseName", "已过时的名称");
+    return input;
   }
   private ObjectNode stateBody() {
     var state = db.state(false); var body = mapper.createObjectNode().put("revision", state.path("revision").asLong());

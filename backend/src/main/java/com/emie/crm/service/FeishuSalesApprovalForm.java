@@ -65,6 +65,11 @@ public final class FeishuSalesApprovalForm {
     }
     require(mapped.containsAll(Set.of("customer", "total")) && (mapped.contains("id") || mapped.contains("note"))
         && (prepayment || mapped.contains("items")), "飞书审批模板须包含客户、订单金额、订单编号或备注及产品明细，请管理员核对模板");
+    var warehouse = OrderWarehouse.planned(order);
+    if (warehouse.selected()) {
+      require(mapped.contains("note"), "所选计划发货仓库需在飞书审批备注中展示，请管理员核对模板");
+      require(!warehouse.name().isBlank(), "计划发货仓库名称尚未核验，请重新提交");
+    }
     var total = decimal(order.path("total"), "订单金额", MAX_MONEY, 2);
     var lines = order.path("items");
     require(lines.isArray() && (prepayment || !lines.isEmpty()), "订单产品明细无效");
@@ -148,6 +153,7 @@ public final class FeishuSalesApprovalForm {
           } else writeText(form, widget, order.path("owner").asText());
         }
         case "note" -> writeText(form, widget, "CRM 订单：" + order.path("id").asText()
+            + (warehouse.selected() ? "\n计划发货仓库：" + warehouse.name() + "（" + warehouse.id() + "）" : "")
             + (order.path("note").asText().isBlank() ? "" : "\n" + order.path("note").asText()));
         case "recipientName", "recipientPhone", "recipientAddress" -> {
           String entered = input.path(key).asText().strip();

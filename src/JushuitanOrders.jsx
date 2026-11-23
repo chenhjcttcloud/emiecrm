@@ -2,6 +2,7 @@ import JushuitanExternalDifference from './JushuitanExternalDifference';
 import JushuitanAuthorization from './JushuitanAuthorization';
 import React,{useState,useEffect} from 'react';
 import {orderTotal} from './orderMoney';
+import {shippingWarehouseId} from './feishuApprovalModel';
 
 const labels={SUBMITTING:'提交中',UNKNOWN:'待核对',FAILED:'提交失败',ACCEPTED:'待发货',PARTIAL:'部分发货',SHIPPED:'已发货',EXCEPTION:'聚水潭异常',CANCELLED:'已取消'};
 export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':record?labels[record.status]||'待核对':'未提交';
@@ -16,7 +17,7 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
  useEffect(()=>{if(!order){setForm(null);return}let active=true;setError('');setStocks({});setSettlement({amount:'',method:'',reference:''});setChangeKind('');setReason('');setRemark('');
  const shippingOrder=record?.effectiveOrder||order;
  const c=db.customers.find(c=>c.id===order.customerId)||{};const prior=record?.request;
- setForm({shopId:prior?.shop_id||'',warehouseId:prior?.wms_co_id||'',recipient:{name:prior?.receiver_name||c.contact||'',phone:prior?.receiver_mobile||c.phone||'',province:prior?.receiver_state||'',city:prior?.receiver_city||'',district:prior?.receiver_district||'',address:prior?.receiver_address||''},items:(shippingOrder.items||[]).map((line,i)=>({skuId:prior?.items?.[i]?.sku_id||db.products.find(p=>p.id===line.product)?.jstSku||''}))});
+ setForm({shopId:prior?.shop_id||'',warehouseId:shippingWarehouseId(order,record),recipient:{name:prior?.receiver_name||c.contact||'',phone:prior?.receiver_mobile||c.phone||'',province:prior?.receiver_state||'',city:prior?.receiver_city||'',district:prior?.receiver_district||'',address:prior?.receiver_address||''},items:(shippingOrder.items||[]).map((line,i)=>({skuId:prior?.items?.[i]?.sku_id||db.products.find(p=>p.id===line.product)?.jstSku||''}))});
  if(config?.configured&&canWrite)Promise.all([api('jst/shops'),api('jst/warehouses')]).then(([rows,ws])=>{if(active){setShops(rows);setWarehouses(ws)}}).catch(e=>{if(active)setError(e.message)});
  return()=>{active=false};},[order?.id,record?.soId,config?.configured,canWrite]);
  useEffect(()=>{if(record?.externalDifference)setChangeKind('')},[record?.externalDifference?.id]);

@@ -23,6 +23,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -50,17 +51,26 @@ public class FeishuSalesApprovalService {
   private final TransactionTemplate tx;
   private final BusinessService business;
   private final AsyncTaskExecutor executor;
+  private final JushuitanService warehouseDirectory;
   private final Map<String, Readiness> readiness = new java.util.concurrent.ConcurrentHashMap<>();
 
   public FeishuSalesApprovalService(CrmRepository db, FeishuApprovalClient client, ObjectMapper mapper,
       PlatformTransactionManager manager, BusinessService business,
       @Qualifier("applicationTaskExecutor") AsyncTaskExecutor executor) {
+    this(db, client, mapper, manager, business, executor, null);
+  }
+
+  @Autowired
+  public FeishuSalesApprovalService(CrmRepository db, FeishuApprovalClient client, ObjectMapper mapper,
+      PlatformTransactionManager manager, BusinessService business,
+      @Qualifier("applicationTaskExecutor") AsyncTaskExecutor executor, JushuitanService warehouseDirectory) {
     this.db = db;
     this.client = client;
     this.mapper = mapper;
     this.tx = new TransactionTemplate(manager);
     this.business = business;
     this.executor = executor;
+    this.warehouseDirectory = warehouseDirectory;
   }
 
   public Map<String, Object> config(Actor actor) {
@@ -148,6 +158,10 @@ public class FeishuSalesApprovalService {
     require(requestId.isTextual() && !requestId.asText().isBlank() && requestId.asText().length() <= 128,
         "审批提交请求编号缺失，请刷新订单后重新提交");
     String orderType = requestedOrder.path("type").asText();
+    var warehouse = OrderWarehouse.resolve(requestedOrder, input.path("approval"), warehouseDirectory);
+    ObjectNode submissionInput = input.deepCopy();
+    OrderWarehouse.apply(approvalOrder(submissionInput.path("data"), orderId), warehouse);
+    submissionInput.set("approval", OrderWarehouse.approval(input.path("approval"), warehouse));
     String approvalCode = configuredCode(orderType);
     JsonNode definition = client.definition(approvalCode);
     var result = tx.execute(transaction -> {
@@ -162,11 +176,11 @@ public class FeishuSalesApprovalService {
         if (orderId.equals(prior.path("id").asText()))
           require(APPROVAL_TYPES.contains(prior.path("type").asText()) && SUBMITTABLE.contains(prior.path("status").asText()),
               "仅草稿或待审批的订单可提交飞书审批");
-      JsonNode state = business.saveForFeishuApproval(input, actor, orderId);
+      JsonNode state = business.saveForFeishuApproval(submissionInput, actor, orderId);
       var order = approvalOrder(state, orderId);
       require(orderType.equals(order.path("type").asText()), "订单类型已更新，请刷新后重新发起审批");
       require("审批中".equals(order.path("status").asText()), "订单须提交后才能自动发起飞书审批");
-      var record = newSubmission(openId, approvalCode, definition, order, state.path("products"), input.path("approval"), actor)
+      var record = newSubmission(openId, approvalCode, definition, order, state.path("products"), submissionInput.path("approval"), actor)
           .put("status", "QUEUED").put("automatic", true);
       preserveHistory(previous, record);
       store(record);
@@ -220,17 +234,21 @@ public class FeishuSalesApprovalService {
     String openId = submissionOpenId(actor);
     boolean retryOriginal = input.path("retryOriginal").booleanValue();
     var existing = load(orderId, false);
-    String orderType = approvalOrder(db.state(false), orderId).path("type").asText();
+    var requestedOrder = approvalOrder(db.state(false), orderId);
+    String orderType = requestedOrder.path("type").asText();
     String approvalCode = null;
     JsonNode definition;
+    OrderWarehouse.Selection warehouse = null;
     if (reuseSubmission(existing, retryOriginal)) {
       definition = null;
     } else {
       requireSubmissionVersion(existing, input, retryOriginal);
+      if (!retryOriginal) warehouse = OrderWarehouse.resolve(requestedOrder, input, warehouseDirectory);
       approvalCode = retryOriginal ? null : configuredCode(orderType);
       definition = retryOriginal ? null : client.definition(approvalCode);
     }
     final String selectedCode = approvalCode;
+    final OrderWarehouse.Selection selectedWarehouse = warehouse;
     var claim = tx.execute(transaction -> {
       var state = db.state(true);
       var order = approvalOrder(state, orderId);
@@ -250,7 +268,16 @@ public class FeishuSalesApprovalService {
       require(!input.has("orderUpdated") || (input.path("orderUpdated").isTextual()
           && input.path("orderUpdated").asText().equals(order.path("updated").asText())),
           "订单内容已更新，请刷新后重新填写审批信息");
-      var next = newSubmission(openId, selectedCode, definition, order, state.path("products"), input, actor);
+      require(selectedWarehouse != null && OrderWarehouse.planned(order).id().equals(selectedWarehouse.id()),
+          "订单中的计划发货仓库已变化，请刷新后重新提交");
+      if (selectedWarehouse.selected() && !OrderWarehouse.planned(order).equals(selectedWarehouse)) {
+        OrderWarehouse.apply(order, selectedWarehouse);
+        order.put("updated", LocalDateTime.now(SHANGHAI).format(ORDER_TIME));
+        ((ObjectNode) state).put("revision", state.path("revision").asLong() + 1);
+        db.state(state);
+      }
+      var next = newSubmission(openId, selectedCode, definition, order, state.path("products"),
+          OrderWarehouse.approval(input, selectedWarehouse), actor);
       preserveHistory(record, next);
       return claim(next, false);
     });

@@ -84,11 +84,37 @@ export function approvalInstanceUrl(instanceCode) {
 
 export function approvalDraftValues(config, order, fields) {
   const result = {};
-  if (isSalesApprovalOrder(order) && config?.salesRecipientRequired)
-    for (const key of ['recipientName', 'recipientPhone', 'recipientAddress']) result[key] = String(fields?.get(key) ?? '');
+  if (isSalesApprovalOrder(order)) {
+    if (config?.salesRecipientRequired)
+      for (const key of ['recipientName', 'recipientPhone', 'recipientAddress']) result[key] = String(fields?.get(key) ?? '');
+    const draft = order.approvalDraft ?? {};
+    const hasWarehouseField = fields?.has?.('warehouseId') || fields?.get?.('warehouseId') != null;
+    if (hasWarehouseField || Object.hasOwn(draft, 'warehouseId')) {
+      result.warehouseId = String(hasWarehouseField ? fields.get('warehouseId') ?? '' : draft.warehouseId ?? '');
+      result.warehouseName = result.warehouseId.trim()
+        ? String(hasWarehouseField ? fields.get('warehouseName') ?? '' : draft.warehouseName ?? '') : '';
+    }
+  }
   if (order.type === '预收款订单' && config?.prepaymentReceiptForm)
     for (const key of ['receiptDate', 'receiptCategory']) result[key] = String(fields?.get(key) ?? '');
   return result;
+}
+
+export function warehouseIdentifier(value) {
+  if (typeof value !== 'string' && !(typeof value === 'number' && Number.isSafeInteger(value))) return '';
+  const id = String(value).trim();
+  return /^[1-9][0-9]{0,18}$/.test(id) && (id.length < 19 || id <= '9223372036854775807') ? id : '';
+}
+
+export function plannedOrderWarehouse(order) {
+  if (!isSalesApprovalOrder(order)) return null;
+  const id = warehouseIdentifier(order.approvalDraft?.warehouseId);
+  return id ? {id, name: String(order.approvalDraft?.warehouseName ?? '').trim()} : null;
+}
+
+export function shippingWarehouseId(order, record) {
+  if (record?.request) return record.request.wms_co_id ?? '';
+  return plannedOrderWarehouse(order)?.id ?? '';
 }
 
 export function approvalDiscount(value) {
@@ -114,6 +140,14 @@ export function approvalDetails(config, order, fields) {
   const input = approvalDraftValues(config, order, fields);
   if (isSalesApprovalOrder(order)) {
     const result = {};
+    if (input.warehouseId?.trim()) {
+      const id = warehouseIdentifier(input.warehouseId);
+      if (!id) throw Error('请选择有效的发货仓库');
+      const name = input.warehouseName.trim();
+      if (name.length > 191) throw Error('发货仓库名称最多191字');
+      result.warehouseId = id;
+      result.warehouseName = name;
+    }
     if (config?.salesRecipientRequired) {
       for (const [key, label, max] of [['recipientName', '收货人', 100], ['recipientPhone', '收货电话', 50], ['recipientAddress', '收货地址', 500]]) {
         const value = input[key].trim();

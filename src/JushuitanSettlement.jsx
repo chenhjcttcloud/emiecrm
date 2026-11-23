@@ -6,6 +6,7 @@ import { moneyCents } from './orderMoney';
 
 const statusLabels = { Sent: '已发货', Archive: '已归档', Cancelled: '已取消' };
 const positiveId = /^[1-9][0-9]{0,18}$/;
+const validShopId = /^(?:0|[1-9][0-9]{0,18})$/;
 const formatMoney = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const saleAmount = amount => amount == null ? '—' : `¥ ${formatMoney.format(amount)}`;
 export const saleRef = sale => ({ shopId: sale.shopId, oId: sale.oId ?? sale.id });
@@ -30,8 +31,8 @@ export function SaleBatchInput({ sales, disabled, onAdd }) {
     setError('');
     const shop = shopId.trim();
     const ids = numbers.trim().split(/[\s,，、;；]+/).filter(Boolean);
-    if (!positiveId.test(shop) || !ids.length || ids.some(id => !positiveId.test(id))) {
-      setError('请填写数字店铺编号和聚水潭内部订单号。');
+    if (!validShopId.test(shop) || !ids.length || ids.some(id => !positiveId.test(id))) {
+      setError('请填写非负整数店铺编号（线下为0）和正整数聚水潭内部订单号。');
       return;
     }
     const existingIds = new Set(sales.map(sale => saleRef(sale).oId));
@@ -50,7 +51,7 @@ export function SaleBatchInput({ sales, disabled, onAdd }) {
   return <div className="settlement-batch">
     <div className="settlement-batch-inputs">
       <label className="field"><span>聚水潭店铺编号</span><input inputMode="numeric" maxLength={19}
-        value={shopId} disabled={disabled} onChange={event => { setShopId(event.target.value); setError(''); }} /></label>
+        value={shopId} disabled={disabled} onChange={event => { setShopId(event.target.value); setError(''); }} /><small>线下店铺编号为 0；内部订单号须大于 0。</small></label>
       <label className="field"><span>聚水潭内部订单号</span><textarea rows={2} maxLength={11000} value={numbers}
         placeholder="多个单号可用换行或逗号分隔" disabled={disabled}
         onChange={event => { setNumbers(event.target.value); setError(''); }} /></label>
@@ -255,7 +256,7 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
         <h3>聚水潭销售单</h3>
         <div className="field"><span>聚水潭店铺</span>
           <PaymentMethodPicker label="聚水潭店铺" value={shopId}
-            options={shops.map(shop => ({ value: String(shop.id), label: shop.name || String(shop.id), keywords: String(shop.id) }))}
+            options={shops.map(shop => ({ value: String(shop.id), label: Number(shop.id) === 0 ? `${shop.name || '线下'}（编号 0）` : shop.name || String(shop.id), keywords: String(shop.id) }))}
             disabled={busy || shopsLoading} onChange={value => { setShopId(value); clearCandidates(); }} />
         </div>
         {shopsLoading && <p role="status">正在加载店铺…</p>}

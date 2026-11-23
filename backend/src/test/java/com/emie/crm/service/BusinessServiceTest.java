@@ -49,6 +49,35 @@ class BusinessServiceTest {
     return service.save(body, actor);
   }
 
+  @Test void aDraftCanKeepAnOptionalPlanningWarehouseWithoutChangingItsMoney() {
+    order(stored).put("status", "草稿");
+    var changed = draft(); order(changed).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "计划仓");
+    var saved = save(changed, sales);
+    assertEquals("5", order(saved).path("approvalDraft").path("warehouseId").asText());
+    assertEquals(100, order(saved).path("total").asInt()); assertEquals(0, order(saved).path("paid").asInt());
+    assertTrue(history.isEmpty());
+  }
+
+  @Test void warehouseSelectionIsLockedEvenForLegacyApprovedOrdersAndAssociationOnlyEdits() {
+    var changed = draft(); order(changed).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "计划仓");
+    assertThrows(ApiException.class, () -> save(changed, admin));
+    order(stored).remove("customerId");
+    var associated = draft(); order(associated).put("customerId", "c1");
+    order(associated).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "计划仓");
+    assertThrows(ApiException.class, () -> save(associated, admin));
+    verify(db, never()).state(any(JsonNode.class));
+  }
+
+  @Test void rawDraftSaveRejectsInvalidWarehouseIdsAndAcceptsExplicitEmptySelection() {
+    order(stored).put("status", "草稿");
+    for (String id : List.of("0", "-1", "warehouse", "1.1", "9223372036854775808")) {
+      var changed = draft(); order(changed).putObject("approvalDraft").put("warehouseId", id);
+      assertThrows(ApiException.class, () -> save(changed, sales));
+    }
+    var empty = draft(); order(empty).putObject("approvalDraft").put("warehouseId", "").put("warehouseName", "");
+    assertEquals("草稿", order(save(empty, sales)).path("status").asText());
+  }
+
   @ParameterizedTest
   @ValueSource(strings = {"PENDING", "APPROVED"})
   void feishuSubmissionDetailsStayLockedWhileNotesAndAttachmentsRemainEditable(String approvalStatus) {

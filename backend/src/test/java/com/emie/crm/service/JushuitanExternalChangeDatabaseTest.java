@@ -23,12 +23,15 @@ class JushuitanExternalChangeDatabaseTest {
  @BeforeEach void setup()throws Exception{
   var source=new DriverManagerDataSource("jdbc:mysql://emiecrm-external-fixture:3306/emiecrm_external_diff_test?allowPublicKeyRetrieval=true&useSSL=false&characterEncoding=UTF-8","root","fixture-only");
   jdbc=new JdbcTemplate(source);manager=new DataSourceTransactionManager(source);
-  for(String table:List.of("state","receipts","audit","audit_archives","jst_shipments","payment_methods"))jdbc.execute("DROP TABLE IF EXISTS "+table);
+  for(String table:List.of("state","receipts","audit","audit_archives","jst_shipments","payment_methods","feishu_order_approvals","feishu_receipt_approvals"))jdbc.execute("DROP TABLE IF EXISTS "+table);
   jdbc.execute("CREATE TABLE state(id INT PRIMARY KEY,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE receipts(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(191) UNIQUE,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE audit(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(191) UNIQUE,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE jst_shipments(order_id VARCHAR(191) PRIMARY KEY,payload LONGTEXT,updated_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
   jdbc.execute("CREATE TABLE payment_methods(id VARCHAR(191) PRIMARY KEY,name VARCHAR(191),status VARCHAR(20))");
+  // BusinessService.save checks both approval locks even when this fixture has no approval history.
+  jdbc.execute("CREATE TABLE feishu_order_approvals(order_id VARCHAR(191) PRIMARY KEY,status VARCHAR(16) NOT NULL,payload LONGTEXT NOT NULL)");
+  jdbc.execute("CREATE TABLE feishu_receipt_approvals(id VARCHAR(64) PRIMARY KEY,status VARCHAR(16) NOT NULL,payload LONGTEXT NOT NULL)");
   jdbc.execute("CREATE TABLE audit_archives(id VARCHAR(64) PRIMARY KEY,quarter VARCHAR(7),record_count INT,raw_bytes INT,compressed_bytes INT,sha256 CHAR(64),content LONGBLOB,created_at VARCHAR(32))");
   db=new CrmRepository(jdbc,m){@Override public void audit(String user,String action){if(failAudit&&action.startsWith("确认聚水潭外部变更"))throw new IllegalStateException("simulated audit persistence failure");super.audit(user,action);}};
   original=(ObjectNode)m.readTree("""
@@ -85,7 +88,8 @@ class JushuitanExternalChangeDatabaseTest {
   var next=original.deepCopy();((ObjectNode)next.path("orders").get(0)).put("note","新备注");
   var body=m.createObjectNode().put("revision",0);body.set("data",next);
   var tx=new org.springframework.transaction.support.TransactionTemplate(manager);
-  assertThrows(IllegalStateException.class,()->tx.execute(status->business.save(body,actor)));
+  var failure=assertThrows(IllegalStateException.class,()->tx.execute(status->business.save(body,actor)));
+  assertEquals("simulated detailed journal failure",failure.getMessage());
   assertEquals(original,db.state(false));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM audit",Integer.class));
   var valid=new BusinessService(db,mock(AssetService.class));
   tx.execute(status->valid.save(body,actor));

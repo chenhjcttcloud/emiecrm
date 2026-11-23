@@ -105,9 +105,12 @@ public class JushuitanService {
     ArrayNode shops = mapper.createArrayNode();
     for (int page = 1; page <= 100; page++) {
       JsonNode result = data(client.query("/open/shops/query", Map.of("page_index", page, "page_size", 100)));
-      for (var shop : result.path("datas"))
+      for (var shop : result.path("datas")) {
+        String id = JushuitanDocumentService.shopIdentifier(shop.path("shop_id"));
+        if (id.isEmpty() || (uploadOnly && "0".equals(id))) continue;
         if (!uploadOnly || Set.of("商家自有商城", "线下店铺", "B2B").contains(shop.path("shop_site").asText()))
-          shops.addObject().put("id", shop.path("shop_id").asLong()).put("name", shop.path("shop_name").asText());
+          shops.addObject().put("id", Long.parseLong(id)).put("name", shop.path("shop_name").asText());
+      }
       if (!result.path("has_next").asBoolean()) return shops;
     }
     throw new ApiException("店铺数量过多，请联系管理员配置");

@@ -4,7 +4,7 @@ import OrderChangeLog from './OrderChangeLog';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
 import {shipmentLabel} from './JushuitanOrders';
 import {orderTotal} from './orderMoney';
-import {orderExecutionView} from './feishuApprovalModel';
+import {orderExecutionView,plannedOrderWarehouse} from './feishuApprovalModel';
 import './OrderDetails.css';
 
 const money = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value))
@@ -17,6 +17,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
   const items = execution.items;
   const catalog = new Map(products.map(product => [product.id, product]));
   const recipient = order.approvalDraft;
+  const warehouse = plannedOrderWarehouse(order);
   const hasRecipient = recipient?.recipientName || recipient?.recipientPhone || recipient?.recipientAddress;
   const canceled = order.status === '已取消';
   const prepayment = order.type === '预收款订单';
@@ -24,6 +25,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
     ['客户名称', order.customer || customer?.name], ['客户主体', customer?.entity], ['签单人', order.owner],
     ['订单类型', prepayment ? '预收款' : order.type], ['创建时间', order.created], ['更新时间', order.updated],
   ];
+  if(warehouse)fields.push(['计划发货仓库',(warehouse.name||'仓库')+'（编号 '+warehouse.id+'）']);
   if (order.type === '销售订单' && order.source !== 'jushuitan-settlement') fields.push(['发货状态', shipmentLabel(shipment)]);
   if (order.source === 'jushuitan-settlement') fields.push(['订单来源', '聚水潭结算补录']);
   return <DialogLayer open kind="drawer" label="订单详情" onClose={onClose}>

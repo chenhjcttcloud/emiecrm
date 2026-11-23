@@ -94,7 +94,7 @@ public class JushuitanDocumentService {
     Sale verified = null;
     if (!remove) {
       require(shipmentSale(shipment(orderId)) == null, "该订单已通过发货记录关联聚水潭销售单");
-      String shopId = requiredId(body.path("shopId"), "店铺编号");
+      String shopId = requiredShopId(body.path("shopId"));
       String orderNumber = requiredId(body.path("oId"), "聚水潭销售单号");
       verified = verifySale(shopId, orderNumber);
     }
@@ -125,14 +125,15 @@ public class JushuitanDocumentService {
   }
 
   List<Sale> settlementCandidates(JsonNode shop, LocalDate start, LocalDate end) {
-    String shopId = requiredId(shop, "店铺编号");
+    String shopId = requiredShopId(shop);
     var candidates = new LinkedHashMap<String, Sale>();
     // The ERP accepts at most seven calendar days per date query.
     for (var from = start; !from.isAfter(end); from = from.plusDays(7)) {
       var through = from.plusDays(6).isBefore(end) ? from.plusDays(6) : end;
       for (boolean archive : List.of(false, true)) {
-        var filters = Map.of("shop_id", Long.parseLong(shopId), "date_type", 3, "status", "Sent",
-            "modified_begin", from + " 00:00:00", "modified_end", through + " 23:59:59", "archive", archive);
+        var filters = new HashMap<String, Object>(Map.of("shop_id", Long.parseLong(shopId), "date_type", 3, "status", "Sent",
+            "modified_begin", from + " 00:00:00", "modified_end", through + " 23:59:59", "archive", archive));
+        offlineShopFilter(filters, shopId);
         for (var row : queryRows(SALES, "orders", filters)) {
           var sale = settlementSale(row, shopId);
           if (sale == null || !"Sent".equals(sale.status()) || sale.shippedOn() == null
@@ -159,6 +160,7 @@ public class JushuitanDocumentService {
         var batch = ids.subList(offset, Math.min(ids.size(), offset + PAGE_SIZE));
         var request = new HashMap<String, Object>();
         request.put("shop_id", Long.parseLong(shop.getKey()));
+        offlineShopFilter(request, shop.getKey());
         request.put("o_ids", batch.stream().map(Long::parseLong).toList());
         var matches = new HashMap<String, Set<Sale>>();
         collectSettlementSales(matches, queryRows(SALES, "orders", request), shop.getKey(), batch);
@@ -283,7 +285,7 @@ public class JushuitanDocumentService {
     var keys = new ArrayList<SaleKey>();
     var ids = new HashSet<String>();
     for (var row : rows) {
-      String shopId = requiredId(row.path("shopId"), "店铺编号");
+      String shopId = requiredShopId(row.path("shopId"));
       String id = requiredId(row.path("oId"), "聚水潭销售单号");
       require(ids.add(id), "聚水潭销售单号 " + id + " 重复");
       keys.add(new SaleKey(shopId, id));
@@ -361,7 +363,7 @@ public class JushuitanDocumentService {
   private Sale shipmentSale(JsonNode record) {
     if (record == null) return null;
     String id = identifier(record.path("oId"));
-    String shopId = identifier(record.path("request").path("shop_id"));
+    String shopId = shopIdentifier(record.path("request").path("shop_id"));
     return id.isEmpty() || shopId.isEmpty() ? null : new Sale(id, shopId, text(record, "soId", 191), "shipment");
   }
 
@@ -479,11 +481,13 @@ public class JushuitanDocumentService {
   }
 
   private static boolean sameSale(JsonNode row, String shopId, String id) {
-    return id.equals(identifier(row.path("o_id"))) && shopId.equals(identifier(row.path("shop_id")));
+    return id.equals(identifier(row.path("o_id"))) && shopId.equals(shopIdentifier(row.path("shop_id")));
   }
 
   private static Map<String, Object> salesParameters(String shopId, String id) {
-    return Map.of("shop_id", Long.parseLong(shopId), "o_ids", List.of(Long.parseLong(id)));
+    var filters = new HashMap<String, Object>(Map.of("shop_id", Long.parseLong(shopId), "o_ids", List.of(Long.parseLong(id))));
+    offlineShopFilter(filters, shopId);
+    return filters;
   }
 
   private static List<String> relatedSaleIds(Sale sale, JsonNode shipment) {
@@ -492,7 +496,7 @@ public class JushuitanDocumentService {
     if ("shipment".equals(sale.source()) && !sale.soId().isBlank()) {
       for (var row : shipment.path("lastExternalObservation").path("orders")) {
         String id = identifier(row.path("o_id"));
-        if (!id.isEmpty() && sale.shopId().equals(identifier(row.path("shop_id")))
+        if (!id.isEmpty() && sale.shopId().equals(shopIdentifier(row.path("shop_id")))
             && sale.soId().equals(row.path("so_id").asText())) ids.add(id);
       }
     }
@@ -513,6 +517,7 @@ public class JushuitanDocumentService {
           request.put("o_ids", batch);
         } else {
           request.put("shop_id", Long.parseLong(shopId));
+          offlineShopFilter(request, shopId);
           request.put("o_ids", batch.stream().map(Long::parseLong).toList());
         }
         for (boolean archive : returned ? List.of(false) : List.of(false, true)) {
@@ -520,7 +525,7 @@ public class JushuitanDocumentService {
           try {
             for (var row : queryRows(returned ? RETURNS : OUTBOUND, "datas", request)) {
               String saleId = identifier(row.path("o_id"));
-              if (shopId.equals(identifier(row.path("shop_id"))) && batch.contains(saleId)) {
+              if (shopId.equals(shopIdentifier(row.path("shop_id"))) && batch.contains(saleId)) {
                 addDocument(rows, row, returned ? identifier(row.path("as_id")) : null, saleId);
               }
             }
@@ -627,6 +632,23 @@ public class JushuitanDocumentService {
     String id = value.asText().strip();
     if (!id.matches("[1-9][0-9]{0,18}")) return "";
     return id.length() < 19 || id.compareTo(Long.toString(Long.MAX_VALUE)) <= 0 ? id : "";
+  }
+
+  // Zero is the ERP's actual offline-shop identity; all document/warehouse IDs remain positive.
+  static String shopIdentifier(JsonNode value) {
+    if ((value.isTextual() || value.isIntegralNumber()) && "0".equals(value.asText().strip())) return "0";
+    return identifier(value);
+  }
+
+  private static String requiredShopId(JsonNode value) {
+    String id = shopIdentifier(value);
+    require(!id.isEmpty(), "店铺编号必须为有效的非负整数，线下店铺编号为0");
+    return id;
+  }
+
+  private static void offlineShopFilter(Map<String, Object> request, String shopId) {
+    // shop_id=0 alone means all shops in the sales/outbound APIs, not the offline shop.
+    if ("0".equals(shopId)) request.put("is_offline_shop", true);
   }
 
   private static String requiredId(JsonNode value, String label) {
