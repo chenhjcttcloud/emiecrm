@@ -7,7 +7,8 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
   const canTargets=permissions.includes('dashboard.targets.manage');
   const dashboard=page.startsWith('dashboard-');
   const system=page.startsWith('sys-');
-  const sales=page.startsWith('sales-')||['orders','receipts'].includes(page);
+  const orders=['sales-orders','orders'].includes(page);
+  const sales=['sales-items','sales-receipts','sales-targets','receipts'].includes(page);
   const payments=['advance','receipt-orders'].includes(page);
   const[dashboardExpanded,setDashboardExpanded]=useState(dashboard);
   const[salesExpanded,setSalesExpanded]=useState(sales);
@@ -37,10 +38,11 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
     {permissions.includes('business.read')&&<>
       <div className="workspace-module">
         <div className="nav-section-label">销售管理</div>
-        <button type="button" title="销售模块" aria-expanded={salesExpanded} className={'nav-item '+(sales?'active-parent':'')} onClick={()=>{setSalesExpanded(!salesExpanded);if(!salesExpanded)go('sales-orders')}}><Icon name="orders"/><span>销售</span>{caret(salesExpanded)}</button>
-        {salesExpanded&&<div className="nav-sub">{[['sales-orders','销售订单信息'],['sales-items','订单产品明细'],['sales-receipts','订单收款明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
+        <button type="button" title="销售模块" aria-expanded={salesExpanded} className={'nav-item '+(sales?'active-parent':'')} onClick={()=>{setSalesExpanded(!salesExpanded);if(!salesExpanded)go('sales-items')}}><Icon name="orders"/><span>销售</span>{caret(salesExpanded)}</button>
+        {salesExpanded&&<div className="nav-sub">{[['sales-items','订单产品明细'],['sales-receipts','订单收款明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
       </div>
       <div className="nav-section-label">业务管理</div>
+      <button type="button" title="订单管理" aria-current={orders?'page':undefined} className={'nav-item '+(orders?'active':'')} onClick={()=>go('sales-orders')}><Icon name="orders"/><span>订单管理</span></button>
       <button type="button" title="收款管理" aria-expanded={paymentsExpanded} className={'nav-item '+(payments?'active-parent':'')} onClick={()=>setPaymentsExpanded(!paymentsExpanded)}><Icon name="cash"/><span>收款管理</span>{caret(paymentsExpanded)}</button>
       {paymentsExpanded&&<div className="nav-sub">{[['advance','预收款'],['receipt-orders','收款']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
       <button type="button" title="客户管理" className={'nav-item '+(page==='customers'?'active':'')} onClick={()=>go('customers')}><Icon name="customers"/><span>客户管理</span></button>
