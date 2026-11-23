@@ -30,10 +30,9 @@ import {useReceiptApprovals} from './ReceiptApprovals';
 import {receiptApprovalLabels,reservedReceiptOrderIds} from './receiptApprovalModel';
 import PaymentMethods from './PaymentMethods';
 import SalesDashboard from './SalesDashboard';
-import DashboardTargets from './DashboardTargets';
+import TargetWorkspace from './TargetWorkspace';
 import WorkspaceShell from './WorkspaceShell';
 import SalesItems from './SalesItems';
-import SalesTargets from './SalesTargets';
 import {dashboardMoney,sumDashboardMoney} from './dashboardModel';
 import {salesOrderFinance} from './salesModel';
 import './salesOrders.css';
@@ -83,12 +82,12 @@ function App({user,onLogout}){
  const[page,setPage]=usePageNavigation(user.permissions);
  const[orderIntent,setOrderIntent]=useState(null);
  const[salesTargetMonth,setSalesTargetMonth]=useState(null);
- useEffect(()=>{if(page!=='sales-targets')setSalesTargetMonth(null)},[page]);
- const openSalesTargets=month=>{setSalesTargetMonth(month||null);setPage('sales-targets')};
+ useEffect(()=>{if(page!=='targets-personnel')setSalesTargetMonth(null)},[page]);
+ const openSalesTargets=month=>{setSalesTargetMonth(month||null);setPage('targets-personnel')};
  const openSalesOrder=id=>{setOrderIntent({id,key:Date.now()});setPage('sales-orders')};
  if(!page)return <main className="login-screen"><section className="auth-card"><h1>暂无可访问的模块</h1><p>请联系管理员配置角色权限。</p><button type="button" className="secondary" onClick={onLogout}>退出登录</button></section></main>;
- if(page.startsWith('dashboard-')||page.startsWith('sys-')||['sales-items','sales-targets'].includes(page))return <WorkspaceShell user={user} onLogout={onLogout} page={page} go={setPage} Icon={Icon}>
-   {page==='sales-items'?<SalesItems api={api} Icon={Icon} DialogLayer={DialogLayer} onOpenOrder={openSalesOrder}/>:page==='sales-targets'?<SalesTargets key={salesTargetMonth||'sales-targets'} initialMonth={salesTargetMonth} api={api} Icon={Icon} DialogLayer={DialogLayer} canConfigureDepartments={user.permissions.includes('system.manage')} canManageTargets={user.permissions.includes('dashboard.targets.manage')} onCompanyTargets={user.permissions.includes('dashboard.targets.manage')?()=>setPage('dashboard-targets'):undefined}/>:page==='dashboard-sales'?<SalesDashboard api={api} Icon={Icon} DialogLayer={DialogLayer} canManageTargets={user.permissions.includes('dashboard.targets.manage')} onManageTargets={()=>setPage('dashboard-targets')} onSalesTargets={user.permissions.includes('business.read')?openSalesTargets:undefined}/>:page==='dashboard-targets'?<DashboardTargets api={api} Icon={Icon} onSalesTargets={user.permissions.includes('business.read')?openSalesTargets:undefined}/>:page==='sys-payment-methods'?<PaymentMethods api={api} Icon={Icon} DialogLayer={DialogLayer}/>:<SystemManagement page={page} api={api} Icon={Icon} DialogLayer={DialogLayer}/>}
+ if(page.startsWith('dashboard-')||page.startsWith('sys-')||['sales-items','targets-company','targets-personnel'].includes(page))return <WorkspaceShell user={user} onLogout={onLogout} page={page} go={setPage} Icon={Icon}>
+   {page==='sales-items'?<SalesItems api={api} Icon={Icon} DialogLayer={DialogLayer} onOpenOrder={openSalesOrder}/>:['targets-company','targets-personnel'].includes(page)?<TargetWorkspace api={api} Icon={Icon} DialogLayer={DialogLayer} user={user} view={page==='targets-company'?'company':'personnel'} initialMonth={salesTargetMonth} onPersonnelMonth={openSalesTargets} onViewChange={view=>setPage(view==='company'?'targets-company':'targets-personnel')}/>:page==='dashboard-sales'?<SalesDashboard api={api} Icon={Icon} DialogLayer={DialogLayer} canManageTargets={user.permissions.includes('dashboard.targets.manage')} onManageTargets={()=>setPage('targets-company')} onSalesTargets={user.permissions.includes('business.read')?openSalesTargets:undefined}/>:page==='sys-payment-methods'?<PaymentMethods api={api} Icon={Icon} DialogLayer={DialogLayer}/>:<SystemManagement page={page} api={api} Icon={Icon} DialogLayer={DialogLayer}/>}
  </WorkspaceShell>;
  return <BusinessApp user={user} onLogout={onLogout} page={page==='sales-orders'?'orders':page==='receipt-orders'?'receipts':page} navigationPage={page} salesMode={page.startsWith('sales-')} setPage={setPage} orderIntent={orderIntent} onOrderIntentHandled={()=>setOrderIntent(null)} onOpenSalesOrder={openSalesOrder}/>;
 }

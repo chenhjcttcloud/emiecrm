@@ -1,8 +1,8 @@
 export const workspacePages = {
   'dashboard-sales':'dashboard.read',
-  'dashboard-targets':'dashboard.targets.manage',
+  'targets-company':'dashboard.targets.manage',
   'sales-orders':'business.read', 'sales-items':'business.read',
-  'sales-targets':'business.read',
+  'targets-personnel':'business.read',
   advance:'business.read', 'receipt-orders':'business.read',
   customers:'business.read', products:'business.read',
   'sys-users':'system.manage', 'sys-roles':'system.manage',
@@ -11,7 +11,7 @@ export const workspacePages = {
 };
 
 export function defaultWorkspacePage(permissions){
-  return ['sales-orders','dashboard-sales','dashboard-targets','sys-users']
+  return ['sales-orders','dashboard-sales','targets-company','sys-users']
     .find(page=>permissions.includes(workspacePages[page])) || '';
 }
 
@@ -22,5 +22,7 @@ export function resolveWorkspacePage(page,permissions){
 }
 
 export function canonicalWorkspacePage(page){
+  if(page==='dashboard-targets')return 'targets-company';
+  if(page==='sales-targets')return 'targets-personnel';
   return page==='orders'?'sales-orders':['receipts','sales-receipts'].includes(page)?'receipt-orders':page;
 }

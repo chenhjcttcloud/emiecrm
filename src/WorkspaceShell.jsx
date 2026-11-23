@@ -5,10 +5,12 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
   const permissions=user.permissions;
   const canView=permissions.includes('dashboard.read');
   const canTargets=permissions.includes('dashboard.targets.manage');
-  const dashboard=page.startsWith('dashboard-');
+  const canPersonnelTargets=permissions.includes('business.read');
+  const targets=['targets-company','targets-personnel'].includes(page);
+  const dashboard=page==='dashboard-sales'||targets;
   const system=page.startsWith('sys-');
   const orders=['sales-orders','orders'].includes(page);
-  const sales=['sales-items','sales-targets'].includes(page);
+  const sales=page==='sales-items';
   const payments=['advance','receipt-orders'].includes(page);
   const[dashboardExpanded,setDashboardExpanded]=useState(dashboard);
   const[salesExpanded,setSalesExpanded]=useState(sales);
@@ -27,19 +29,19 @@ export default function WorkspaceShell({user,onLogout,page,go,Icon,mainArea,chil
     <div className="brand"><span className="brand-mark"><Icon name="layers" size={22}/></span><span>亿觅 CRM</span></div>
     <div className="header-end"><span className="current-user"><span className="status-dot"/><span title={user.displayName||user.name}>{user.displayName||user.name}</span></span><button type="button" className="logout-button" onClick={onLogout}><Icon name="logout" size={16}/>退出登录</button></div>
   </header><div className="shell"><nav className="sidebar" aria-label="主导航">
-    {(canView||canTargets)&&<div className="workspace-module">
+    {(canView||canTargets||canPersonnelTargets)&&<div className="workspace-module">
       <div className="nav-section-label">经营分析</div>
-      <button type="button" title="经营看板" aria-expanded={dashboardExpanded} className={'nav-item '+(dashboard?'active-parent':'')} onClick={()=>{setDashboardExpanded(!dashboardExpanded);if(!dashboardExpanded)go(canView?'dashboard-sales':'dashboard-targets')}}><Icon name="chart"/><span>经营看板</span>{caret(dashboardExpanded)}</button>
+      <button type="button" title="经营看板" aria-expanded={dashboardExpanded} className={'nav-item '+(dashboard?'active-parent':'')} onClick={()=>{setDashboardExpanded(!dashboardExpanded);if(!dashboardExpanded)go(canView?'dashboard-sales':canTargets?'targets-company':'targets-personnel')}}><Icon name="chart"/><span>经营看板</span>{caret(dashboardExpanded)}</button>
       {dashboardExpanded&&<div className="nav-sub">
         {canView&&<button type="button" aria-current={page==='dashboard-sales'?'page':undefined} className={page==='dashboard-sales'?'active':''} onClick={()=>go('dashboard-sales')}>销售看板</button>}
-        {canTargets&&<button type="button" aria-current={page==='dashboard-targets'?'page':undefined} className={page==='dashboard-targets'?'active':''} onClick={()=>go('dashboard-targets')}>业绩目标</button>}
+        {(canTargets||canPersonnelTargets)&&<button type="button" aria-current={targets?'page':undefined} className={targets?'active':''} onClick={()=>go(targets?page:canTargets?'targets-company':'targets-personnel')}>业绩目标</button>}
       </div>}
     </div>}
     {permissions.includes('business.read')&&<>
       <div className="workspace-module">
         <div className="nav-section-label">销售管理</div>
         <button type="button" title="销售模块" aria-expanded={salesExpanded} className={'nav-item '+(sales?'active-parent':'')} onClick={()=>{setSalesExpanded(!salesExpanded);if(!salesExpanded)go('sales-items')}}><Icon name="orders"/><span>销售</span>{caret(salesExpanded)}</button>
-        {salesExpanded&&<div className="nav-sub">{[['sales-items','订单产品明细'],['sales-targets','销售业绩目标']].map(([key,label])=><button type="button" key={key} aria-current={page===key?'page':undefined} className={page===key?'active':''} onClick={()=>go(key)}>{label}</button>)}</div>}
+        {salesExpanded&&<div className="nav-sub"><button type="button" aria-current={page==='sales-items'?'page':undefined} className={page==='sales-items'?'active':''} onClick={()=>go('sales-items')}>订单产品明细</button></div>}
       </div>
       <div className="nav-section-label">业务管理</div>
       <button type="button" title="订单管理" aria-current={orders?'page':undefined} className={'nav-item '+(orders?'active':'')} onClick={()=>go('sales-orders')}><Icon name="orders"/><span>订单管理</span></button>
