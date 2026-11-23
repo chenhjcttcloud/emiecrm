@@ -4,12 +4,12 @@ import{dashboardMoney}from'./dashboardModel';
 import{salesItemsCsv,salesQuantity}from'./salesModel';
 import './sales.css';
 
-export default function SalesItems({api,Icon,DialogLayer,onOpenOrder}){
+export default function SalesItems({api,Icon,DialogLayer,onOpenOrder,embedded=false,revision=0}){
  const[filters,setFilters]=useState({month:'',owner:'',customerId:''}),[query,setQuery]=useState(''),[debouncedQuery,setDebouncedQuery]=useState(''),[page,setPage]=useState(1),[pageSize,setPageSize]=useState(20),[reload,setReload]=useState(0),[showCosts,setShowCosts]=useState(false),[selected,setSelected]=useState(null);
  const[state,setState]=useState({key:'',loading:true,data:null,error:''}),[options,setOptions]=useState({owners:[],customers:[]});
  const request=useRef(0);
  useEffect(()=>{const timer=setTimeout(()=>setDebouncedQuery(query.trim()),240);return()=>clearTimeout(timer)},[query]);
- const requestKey=JSON.stringify({filters,q:debouncedQuery,page,pageSize,reload});
+ const requestKey=JSON.stringify({filters,q:debouncedQuery,page,pageSize,reload,revision});
  useEffect(()=>{
   let active=true;const id=++request.current;setState({key:requestKey,loading:true,data:null,error:''});setSelected(null);
   const params=new URLSearchParams({...filters,q:debouncedQuery,page,pageSize});
@@ -35,7 +35,7 @@ export default function SalesItems({api,Icon,DialogLayer,onOpenOrder}){
  function openOrder(orderId){if(onOpenOrder)onOpenOrder(orderId)}
  const itemDetail=selected&&<div className="drawer sales-item-detail"><div className="modal-title"><h2>订单产品明细</h2><button type="button" aria-label="关闭产品明细" onClick={()=>setSelected(null)}><Icon name="close" size={18}/></button></div><div className="modal-body"><div className="sales-detail-product"><span>商品信息</span><h3>{selected.product||'历史商品'}</h3><p>{selected.code||'未记录产品代码'}{selected.model?' · '+selected.model:''}</p></div><dl className="sales-detail-grid">{[['所属订单',selected.orderId],['客户名称',selected.customer],['签单人',selected.owner],['审批状态',selected.status],['归属日期',selected.date],['产品条码',selected.barcode||'未记录'],['上市时间',selected.listedOn||'未记录'],['产品数量',salesQuantity(selected.qty)],['销售单价',dashboardMoney(selected.price)],['销售小计',dashboardMoney(selected.amount)],['历史成本单价',selected.unitCost==null?'未记录':dashboardMoney(selected.unitCost)],['历史成本小计',selected.cost==null?'未记录':dashboardMoney(selected.cost)],['历史毛利',selected.profit==null?'未记录':dashboardMoney(selected.profit)]].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value||'—'}</dd></div>)}</dl><p className="sales-page-note">成本使用订单中已记录的历史数据。未记录的成本和毛利不按零元计算。</p></div><div className="modal-footer"><button type="button" className="secondary" onClick={()=>setSelected(null)}>关闭</button>{onOpenOrder&&<button type="button" className="primary" onClick={()=>{setSelected(null);openOrder(selected.orderId)}}>查看所属订单 <Icon name="arrow" size={15}/></button>}</div></div>;
  return <div className="sales-items sales-page">
-  <div className="page-heading"><div><div className="breadcrumb">销售管理 <span>/</span> 订单产品明细</div><h1>订单产品明细</h1><p>汇总订单中的商品、数量和销售金额，快速追溯每一项交易。</p></div><div className="page-heading-symbol"><Icon name="products" size={29}/></div></div>
+  {!embedded&&<div className="page-heading"><div><div className="breadcrumb">销售管理 <span>/</span> 订单产品明细</div><h1>订单产品明细</h1><p>汇总订单中的商品、数量和销售金额，快速追溯每一项交易。</p></div><div className="page-heading-symbol"><Icon name="products" size={29}/></div></div>}
   <section className="sales-toolbar" aria-label="产品明细筛选"><div className="sales-toolbar-controls">
    <label className="sales-search-control"><Icon name="search" size={16}/><input aria-label="搜索产品明细" maxLength={200} value={query} onChange={e=>{setQuery(e.target.value);setPage(1)}} placeholder="搜索商品、编码、订单或客户"/></label>
    <label className="sales-inline-control sales-month-filter"><span>月份</span><input aria-label="产品明细月份" type="month" min="2000-01" max="9999-12" value={filters.month} onChange={e=>{const value=e.target.value;if(!value||(/^\d{4}-(0[1-9]|1[0-2])$/.test(value)&&Number(value.slice(0,4))>=2000))changeFilter('month',value)}}/>{filters.month&&<button type="button" className="sales-clear-control" aria-label="清除产品明细月份" onClick={()=>changeFilter('month','')}><Icon name="close" size={12}/></button>}</label>

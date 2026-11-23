@@ -16,7 +16,7 @@ test('target management and viewing are separate permissions',()=>{
 test('existing business entry and browser routes remain available',()=>{
   const permissions=['business.read','dashboard.read','dashboard.targets.manage','system.manage'];
   assert.equal(defaultWorkspacePage(permissions),'sales-orders');
-  for(const page of ['sales-orders','sales-items','targets-personnel','advance','receipt-orders','customers','products','sys-roles','dashboard-sales','targets-company'])assert.equal(resolveWorkspacePage(page,permissions),page);
+  for(const page of ['sales-orders','order-items','targets-personnel','advance','receipt-orders','customers','products','sys-roles','dashboard-sales','targets-company'])assert.equal(resolveWorkspacePage(page,permissions),page);
   assert.equal(resolveWorkspacePage('unknown',permissions),'sales-orders');
   assert.equal(resolveWorkspacePage('toString',permissions),'sales-orders');
   assert.equal(resolveWorkspacePage('orders',permissions),'sales-orders');
@@ -25,8 +25,23 @@ test('existing business entry and browser routes remain available',()=>{
   assert.equal(resolveWorkspacePage('receipt-orders',['business.read']),'receipt-orders');
   assert.equal(resolveWorkspacePage('receipt-orders',['dashboard.read']),'dashboard-sales');
   assert.equal(resolveWorkspacePage('receipt-orders',[]),'');
-  for(const page of ['sales-orders','sales-items','sales-receipts','sales-targets'])assert.equal(resolveWorkspacePage(page,['dashboard.read']),'dashboard-sales');
+  for(const page of ['sales-orders','sales-items','order-items','sales-receipts','sales-targets'])assert.equal(resolveWorkspacePage(page,['dashboard.read']),'dashboard-sales');
   assert.equal(defaultWorkspacePage([]),'');
+});
+
+test('order product detail view preserves its legacy link and business permission boundary',()=>{
+  assert.equal(canonicalWorkspacePage('sales-items'),'order-items');
+  assert.equal(canonicalWorkspacePage('order-items'),'order-items');
+  assert.equal(canonicalWorkspacePage('orders'),'sales-orders');
+  for(const page of ['sales-items','order-items']){
+    assert.equal(resolveWorkspacePage(page,['business.read']),'order-items');
+    assert.equal(resolveWorkspacePage(page,['business.read','dashboard.read']),'order-items');
+    assert.equal(resolveWorkspacePage(page,['dashboard.read']),'dashboard-sales');
+    assert.equal(resolveWorkspacePage(page,['dashboard.targets.manage']),'targets-company');
+    assert.equal(resolveWorkspacePage(page,['system.manage']),'sys-users');
+    assert.equal(resolveWorkspacePage(page,[]),'');
+  }
+  assert.equal(defaultWorkspacePage(['business.read']),'sales-orders');
 });
 
 test('unified target views preserve legacy links and separate company and personnel permissions',()=>{

@@ -1,7 +1,7 @@
 export const workspacePages = {
   'dashboard-sales':'dashboard.read',
   'targets-company':'dashboard.targets.manage',
-  'sales-orders':'business.read', 'sales-items':'business.read',
+  'sales-orders':'business.read', 'order-items':'business.read',
   'targets-personnel':'business.read',
   advance:'business.read', 'receipt-orders':'business.read',
   customers:'business.read', products:'business.read',
@@ -22,6 +22,7 @@ export function resolveWorkspacePage(page,permissions){
 }
 
 export function canonicalWorkspacePage(page){
+  if(page==='sales-items')return 'order-items';
   if(page==='dashboard-targets')return 'targets-company';
   if(page==='sales-targets')return 'targets-personnel';
   return page==='orders'?'sales-orders':['receipts','sales-receipts'].includes(page)?'receipt-orders':page;
