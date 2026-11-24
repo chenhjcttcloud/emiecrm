@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {logisticsDetails,logisticsDraftValues,logisticsParcels,plannedLogistics,validLogisticsCode} from '../src/orderLogisticsModel.js';
+import {logisticsDetails,logisticsDraftValues,logisticsOptionValue,logisticsParcels,plannedLogistics,validLogisticsCode,WAREHOUSE_LOGISTICS_OPTION} from '../src/orderLogisticsModel.js';
 import {approvalDetails,approvalDraftValues} from '../src/feishuApprovalModel.js';
 
 const order={type:'销售订单',approvalDraft:{creditFulfillment:true,shopId:'1',shopName:'店铺',warehouseId:'15136229',warehouseName:'国内主仓',
@@ -9,6 +9,17 @@ const order={type:'销售订单',approvalDraft:{creditFulfillment:true,shopId:'1
 test('carrier codes preserve opaque punctuation and leading zeroes instead of becoming numeric IDs',()=>{
  for(const code of ['SF','SF.5','ZTZS','001','A-B_2','承运商代码'])assert.equal(validLogisticsCode(code),true);
  for(const code of [1,0,null,undefined,'',' SF','SF ','SF\n','X'.repeat(101)])assert.equal(validLogisticsCode(code),false);
+});
+
+test('single dropdown keeps real carrier codes separate from the warehouse option',()=>{
+ const codes=['warehouse','WAREHOUSE','carrier:','carrier:warehouse','SF.5','001'];
+ const values=codes.map(logisticsOptionValue);
+ assert.equal(new Set(values).size,codes.length);
+ for(const value of values)assert.notEqual(value,WAREHOUSE_LOGISTICS_OPTION);
+ for(const code of codes){
+  const details=logisticsDetails({},new Map([['logisticsMode','CARRIER'],['logisticsCode',code],['logisticsCompany','真实物流']]));
+  assert.equal(details.logisticsCode,code);
+ }
 });
 
 test('warehouse arrangement omits newly introduced plan fields and preserves legacy snapshots',()=>{

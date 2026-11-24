@@ -1,6 +1,9 @@
 const fields = ['logisticsMode', 'logisticsCode', 'logisticsCompany'];
 const control = /[\u0000-\u001f\u007f-\u009f]/;
 
+export const WAREHOUSE_LOGISTICS_OPTION = 'warehouse';
+export const logisticsOptionValue = code => 'carrier:' + code;
+
 export function validLogisticsCode(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 100
     && value.trim() === value && !control.test(value);
