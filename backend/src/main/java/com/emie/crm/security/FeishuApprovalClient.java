@@ -9,13 +9,16 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,7 +29,10 @@ public class FeishuApprovalClient {
   private static final String BASE = "https://open.feishu.cn/open-apis";
   private static final String APPROVALS = "/approval/v4/approvals/";
   private static final String INSTANCES = "/approval/v4/instances";
+  private static final URI FILE_UPLOAD = URI.create("https://www.feishu.cn/approval/openapi/v2/file/upload");
   private static final Duration TIMEOUT = Duration.ofSeconds(10);
+  private static final Duration UPLOAD_TIMEOUT = Duration.ofSeconds(30);
+  private static final int MAX_IMAGE_BYTES = 5 * 1024 * 1024;
   private static final Pattern ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
   private static final Set<Integer> CREATE_REJECTIONS =
       Set.of(60001, 60002, 60004, 60005, 60006, 60009, 60011, 60013, 99991672, 99991673);
@@ -49,7 +55,7 @@ public class FeishuApprovalClient {
       @Value("${CRM_FEISHU_PREPAYMENT_APPROVAL_CODE:}") String prepaymentApprovalCode,
       @Value("${CRM_FEISHU_RECEIPT_APPROVAL_CODE:}") String receiptApprovalCode) {
     this(identityClient, mapper, appSecret, approvalCode, prepaymentApprovalCode, receiptApprovalCode,
-        HttpClient.newBuilder().connectTimeout(TIMEOUT).build());
+        HttpClient.newBuilder().connectTimeout(TIMEOUT).followRedirects(HttpClient.Redirect.NEVER).build());
   }
 
   FeishuApprovalClient(FeishuClient identityClient, ObjectMapper mapper, String appSecret,
@@ -91,6 +97,64 @@ public class FeishuApprovalClient {
     };
   }
   public String appId() { return identityClient.appId(); }
+
+  /** Uploads one trusted CRM image; the returned file code is used in an approval form's value array. */
+  public String uploadFile(String fileName, String type, String contentType, byte[] content) {
+    requireReady();
+    if (!Set.of("image", "attachment").contains(type == null ? "" : type))
+      throw new ApiException("飞书凭证控件类型无效");
+    if (content == null || content.length == 0 || content.length > MAX_IMAGE_BYTES)
+      throw new ApiException("凭证图片须大于零且不能超过5MB");
+    if (fileName == null || fileName.isBlank() || fileName.length() > 200
+        || !fileName.equals(fileName.strip()) || fileName.chars().anyMatch(Character::isISOControl)
+        || fileName.indexOf('/') >= 0 || fileName.indexOf('\\') >= 0 || fileName.indexOf('"') >= 0)
+      throw new ApiException("凭证图片文件名无效");
+    byte[] bytes = content.clone();
+    String extension = imageExtension(contentType, bytes);
+    String lowerName = fileName.toLowerCase(java.util.Locale.ROOT);
+    if (!(lowerName.endsWith("." + extension) || extension.equals("jpeg") && lowerName.endsWith(".jpg")))
+      throw new ApiException("凭证图片扩展名与内容格式不匹配");
+    String boundary = "crm-approval-" + UUID.randomUUID().toString().replace("-", "");
+    String prefix = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n" + fileName
+        + "\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\n" + type
+        + "\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"content\"; filename=\"" + fileName
+        + "\"\r\nContent-Type: " + contentType + "\r\n\r\n";
+    var request = HttpRequest.newBuilder(FILE_UPLOAD).timeout(UPLOAD_TIMEOUT)
+        .header("Authorization", "Bearer " + tenantToken())
+        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+        .POST(HttpRequest.BodyPublishers.concat(
+            HttpRequest.BodyPublishers.ofByteArray(prefix.getBytes(StandardCharsets.UTF_8)),
+            HttpRequest.BodyPublishers.ofByteArray(bytes),
+            HttpRequest.BodyPublishers.ofByteArray(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.US_ASCII))))
+        .build();
+    try {
+      var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+      var json = mapper.readTree(response.body());
+      var code = json == null ? null : json.path("data").path("code");
+      if (response.statusCode() == 200 && json != null && json.isObject()
+          && json.path("code").isIntegralNumber() && json.path("code").canConvertToInt() && json.path("code").intValue() == 0
+          && code != null && code.isTextual() && ID.matcher(code.asText()).matches()) return code.asText();
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+    } catch (IOException error) {
+      // No response bodies, file bytes, tokens or temporary URLs enter logs or caller-facing errors.
+    }
+    throw new ApiException(502, "飞书凭证上传未完成，尚未发起本次审批，请重试");
+  }
+
+  private static String imageExtension(String contentType, byte[] bytes) {
+    if ("image/png".equals(contentType) && bytes.length >= 8
+        && Arrays.equals(Arrays.copyOf(bytes, 8), new byte[]{(byte)137,80,78,71,13,10,26,10})) return "png";
+    if ("image/jpeg".equals(contentType) && bytes.length >= 3
+        && bytes[0] == (byte)255 && bytes[1] == (byte)216 && bytes[2] == (byte)255) return "jpeg";
+    if ("image/gif".equals(contentType) && bytes.length >= 6
+        && (new String(bytes, 0, 6, StandardCharsets.US_ASCII).equals("GIF89a")
+            || new String(bytes, 0, 6, StandardCharsets.US_ASCII).equals("GIF87a"))) return "gif";
+    if ("image/webp".equals(contentType) && bytes.length >= 12
+        && new String(bytes, 0, 4, StandardCharsets.US_ASCII).equals("RIFF")
+        && new String(bytes, 8, 4, StandardCharsets.US_ASCII).equals("WEBP")) return "webp";
+    throw new ApiException("凭证仅支持内容格式匹配的PNG、JPEG、GIF和WebP图片");
+  }
 
   public JsonNode definition() {
     return definition(approvalCode);

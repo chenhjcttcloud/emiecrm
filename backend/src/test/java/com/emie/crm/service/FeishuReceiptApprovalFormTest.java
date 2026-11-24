@@ -1,14 +1,18 @@
 package com.emie.crm.service;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 import com.emie.crm.common.exception.ApiException;
+import com.emie.crm.security.FeishuApprovalClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class FeishuReceiptApprovalFormTest {
   private final ObjectMapper mapper = new ObjectMapper();
@@ -174,12 +178,46 @@ class FeishuReceiptApprovalFormTest {
 
   @Test void rejectsNewRequiredWidgetsAndRequiresCnyAndSingleContact() {
     widget("attachment").put("required", true);
-    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("附件"));
+    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("凭证"));
     widget("attachment").put("required", false);
     widget("amount").putObject("option").putArray("currencyRange").add("USD");
     assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("人民币"));
     widget("amount").putObject("option").putArray("currencyRange").add("CNY");
     widget("owner").putObject("option").put("multi", true);
     assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("单选"));
+  }
+
+  @ParameterizedTest @ValueSource(strings={"attachmentV2", "image", "imageV2"})
+  void frozenReceiptVouchersBecomeFileCodeArraysWithoutChangingPaymentAllocations(String type) {
+    String assetId = "d".repeat(64);
+    batch.putArray("attachments").addObject().put("name", "到账凭证.png").put("url", AssetService.PREFIX + assetId);
+    widget("attachment").put("type", type).put("required", true);
+    var original = batch.deepCopy();
+    var form = build();
+    assertEquals(type, field(form, "attachment").path("type").asText());
+    assertTrue(field(form, "attachment").path("value").isArray() && field(form, "attachment").path("value").isEmpty());
+    assertFalse(form.toString().contains(AssetService.PREFIX));
+    var record = batch.deepCopy(); record.set("form", form);
+    record.set(FeishuApprovalEvidence.FIELD, FeishuApprovalEvidence.plan(mapper, definition, batch.path("attachments")));
+    var assets = mock(AssetService.class);
+    var client = mock(FeishuApprovalClient.class);
+    byte[] bytes = {(byte)137,80,78,71,13,10,26,10,0};
+    when(assets.read(assetId)).thenReturn(new AssetService.Asset("image/png", bytes));
+    when(client.uploadFile("receipt-voucher-1.png", "attachmentV2".equals(type) ? "attachment" : "image", "image/png", bytes))
+        .thenReturn("receipt-voucher-file-code");
+    FeishuApprovalEvidence.prepare(record, assets, client, ignored -> {});
+    FeishuApprovalEvidence.beforeCreate(record, ignored -> {});
+    assertEquals(mapper.createArrayNode().add("receipt-voucher-file-code"), field(record.path("form"), "attachment").path("value"));
+    assertEquals(300, field(record.path("form"), "amount").path("value").asInt());
+    assertEquals(original.path("allocations"), record.path("allocations"));
+    assertEquals(original, batch);
+    assertFalse(record.path("form").toString().contains(AssetService.PREFIX));
+    verify(client, never()).create(any(), any(), any(), any());
+  }
+
+  @Test void attachedImagesCannotBeSilentlyDroppedIfTheReceiptTemplateHasNoVoucherWidget() {
+    batch.putArray("attachments").addObject().put("name", "凭证.png").put("url", AssetService.PREFIX + "d".repeat(64));
+    ((ArrayNode) definition.path("form")).remove(6);
+    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("尚无"));
   }
 }

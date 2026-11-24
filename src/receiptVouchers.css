@@ -1,0 +1,7 @@
+.receipt-vouchers{margin:12px 0 16px}.receipt-vouchers h3{margin:0 0 12px;font-size:14px}
+.receipt-voucher-images{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:12px;min-width:0}
+.receipt-voucher-images figure{margin:0;padding:8px;border:1px solid #e5ebf6;border-radius:8px;min-width:0;background:#fff}
+.receipt-voucher-images figure>a{display:flex;align-items:center;justify-content:center;height:100px;background:#f6f8fc;border-radius:6px}
+.receipt-voucher-images img{max-width:100%;max-height:100px;object-fit:contain}
+.receipt-voucher-images figcaption{margin-top:8px;font-size:11px;line-height:1.5;overflow-wrap:anywhere;color:#72829f}
+.receipt-voucher-upload{margin:16px 0}.receipt-voucher-upload>.form-hint{margin:10px 0;font-size:12px;line-height:1.7}

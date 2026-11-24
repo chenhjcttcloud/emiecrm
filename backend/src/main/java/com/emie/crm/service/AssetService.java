@@ -100,6 +100,70 @@ public class AssetService {
     return result;
   }
 
+  /** Frozen approval snapshots and receipt vouchers can outlive editable order attachments. */
+  public Map<String, Object> backup(JsonNode state, Collection<JsonNode> receipts,
+      Collection<JsonNode> approvals, Collection<JsonNode> receiptApprovals) {
+    var result = new LinkedHashMap<String, Object>(backup(state));
+    for (var documents : List.of(receipts, approvals, receiptApprovals))
+      for (var document : documents) evidenceImages(document, (node, key) -> {
+        String url = node.path(key).asText("");
+        if (url.startsWith(PREFIX)) {
+          String id = url.substring(PREFIX.length());
+          if (!result.containsKey(id)) {
+            var asset = read(id);
+            result.put(id, Map.of("contentType", asset.contentType(), "data", Base64.getEncoder().encodeToString(asset.content())));
+          }
+        }
+      });
+    return result;
+  }
+
+  private void evidenceImages(JsonNode document, java.util.function.BiConsumer<ObjectNode, String> action) {
+    var pending = new ArrayDeque<JsonNode>();
+    pending.add(document);
+    while (!pending.isEmpty()) {
+      var current = pending.removeFirst();
+      if (current.isArray()) current.forEach(pending::addLast);
+      else if (current.isObject()) current.fields().forEachRemaining(field -> {
+        if (field.getKey().equals("attachments")) {
+          var attachments = field.getValue();
+          if (attachments.isNull()) return;
+          require(attachments.isArray(), "附件格式无效");
+          for (var image : attachments) {
+            require(image.isObject(), "附件格式无效");
+            action.accept((ObjectNode) image, "url");
+          }
+        } else if (field.getValue().isContainerNode()) pending.addLast(field.getValue());
+      });
+    }
+  }
+
+  /** Validate restored immutable references without rewriting approval payloads or receipt records. */
+  public void validateEvidence(JsonNode... documents) {
+    var referenced = new HashSet<String>();
+    for (var document : documents) evidenceImages(document, (node, key) -> {
+      var raw = node.path(key);
+      require(raw.isMissingNode() || raw.isNull() || raw.isTextual(), "附件地址格式无效");
+      String url = raw.asText("");
+      if (url.startsWith(PREFIX)) {
+        String id = url.substring(PREFIX.length());
+        require(id.matches("[a-f0-9]{64}"), "图片地址无效");
+        referenced.add(id);
+      } else if (url.startsWith("data:image/")) {
+        int comma = url.indexOf(',');
+        require(comma > 0 && url.substring(0, comma).endsWith(";base64"), "图片编码无效");
+        imageType(decode(url.substring(comma + 1)));
+      } else require(url.isBlank(), "请通过上传图片添加附件");
+    });
+    var ids = new ArrayList<>(referenced);
+    for (int start = 0; start < ids.size(); start += 1000) {
+      var batch = ids.subList(start, Math.min(start + 1000, ids.size()));
+      String placeholders = String.join(",", Collections.nCopies(batch.size(), "?"));
+      Long count = db.jdbc().queryForObject("SELECT COUNT(*) FROM assets WHERE id IN (" + placeholders + ")", Long.class, batch.toArray());
+      require(count != null && count == batch.size(), "图片不存在，请重新上传");
+    }
+  }
+
   public void restore(JsonNode assets) {
     require(assets.isMissingNode() || assets.isObject(), "附件备份格式无效");
     assets.fields().forEachRemaining(entry -> {

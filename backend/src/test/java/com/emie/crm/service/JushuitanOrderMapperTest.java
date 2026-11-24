@@ -10,7 +10,7 @@ class JushuitanOrderMapperTest {
   private final ObjectMapper m = new ObjectMapper();
   private JsonNode json(String s) throws Exception { return m.readTree(s); }
   private ObjectNode order() throws Exception { return (ObjectNode)json("""
-    {"id":"o1","customerId":"c1","status":"已批准","type":"销售订单","total":19.98,"paid":19.98,
+    {"id":"o1","customerId":"c1","customer":"客户甲","status":"已批准","type":"销售订单","total":19.98,"paid":19.98,
     "items":[{"product":"p1","qty":"2","price":"9.99"}]}
     """); }
   private JsonNode products() throws Exception { return json("[{\"id\":\"p1\",\"name\":\"产品甲\",\"source\":\"jushuitan\",\"enabled\":true,\"jstSku\":\"SKU-1\",\"jstEnvironment\":\"sandbox\"}]"); }
@@ -56,18 +56,45 @@ class JushuitanOrderMapperTest {
     assertEquals("SKU-1",r.path("items").get(0).path("sku_id").asText());
     assertTrue(r.path("remark").asText().contains("禁止实际发货"));
   }
-  @Test void customerBuyerIdentityStaysStableAcrossOrdersAndRenames() throws Exception {
-    var first = JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-order-1",true);
-    var renamed = order().put("id","o2").put("customer","客户已改名");
+  @Test void buyerAccountUsesTheCustomerDisplayNameWhileOrderAndPaymentIdentitiesStaySeparate() throws Exception {
+    var initial = order().put("customer", "爱品儿（授权定制）");
+    var first = JushuitanOrderMapper.build(m,initial,products(),input(),"CRM-order-1",true);
+    var renamed = initial.deepCopy().put("id","o2").put("customer","客户已改名");
     var second = JushuitanOrderMapper.build(m,renamed,products(),input(),"CRM-order-2",true);
-    assertEquals(first.path("shop_buyer_id"), second.path("shop_buyer_id"));
-    assertNotEquals(first.path("so_id"), second.path("so_id"));
-    assertNotEquals(first.path("pay").path("outer_pay_id"), second.path("pay").path("outer_pay_id"));
-    assertTrue(first.path("shop_buyer_id").asText().length() <= 50);
-    var other = order().put("customerId", "c2");
-    assertNotEquals(first.path("shop_buyer_id"), JushuitanOrderMapper.build(m,other,products(),input(),"CRM-order-3",true).path("shop_buyer_id"));
-    assertTrue(JushuitanOrderMapper.buyerAccount("长客户编号".repeat(100)).length() <= 50);
+    assertEquals("爱品儿（授权定制）",first.path("shop_buyer_id").asText());
+    assertEquals("客户已改名",second.path("shop_buyer_id").asText());
+    assertNotEquals(first.path("so_id"),second.path("so_id"));
+    assertNotEquals(first.path("pay").path("outer_pay_id"),second.path("pay").path("outer_pay_id"));
+    assertEquals("CRM-order-1",first.path("pay").path("buyer_account").asText());
+    var sameName = initial.deepCopy().put("customerId","another-customer");
+    assertEquals(first.path("shop_buyer_id"),JushuitanOrderMapper.build(m,sameName,products(),input(),"CRM-order-3",true).path("shop_buyer_id"));
+    for(String invalid : new String[]{"", " ", "长".repeat(51), "客户\n甲"}) {
+      var bad=order().put("customer",invalid);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,bad,products(),input(),"CRM-invalid",true));
+    }
+    assertEquals("长".repeat(50),JushuitanOrderMapper.buyerAccount("长".repeat(50)));
   }
+
+  @Test void productionRemarksContainOnlyTheBusinessNoteAndAnEmptyNoteStaysEmpty() throws Exception {
+    var productionProducts=products().deepCopy();((ObjectNode)productionProducts.get(0)).put("jstEnvironment","production");
+    var ordinary=order().put("note","请分箱包装，周五送达\n外箱贴客户标签");
+    var before=ordinary.deepCopy();
+    assertEquals(ordinary.path("note").asText(),JushuitanOrderMapper.build(m,ordinary,productionProducts,input(),"CRM-note",false).path("remark").asText());
+    var credit=ordinary.deepCopy().put("paid",0);
+    var result=JushuitanOrderMapper.buildCredit(m,credit,productionProducts,input(),"CRM-note-credit",false);
+    assertEquals(ordinary.path("note").asText(),result.path("remark").asText());
+    assertEquals("账期挂账（非实收）",result.path("pay").path("payment").asText());
+    assertEquals(before,ordinary);
+    ordinary.remove("note");
+    assertEquals("",JushuitanOrderMapper.build(m,ordinary,productionProducts,input(),"CRM-empty",false).path("remark").asText());
+    ordinary.put("note","长".repeat(1000));
+    assertEquals(1000,JushuitanOrderMapper.build(m,ordinary,productionProducts,input(),"CRM-boundary",false).path("remark").asText().length());
+    ordinary.put("note","长".repeat(1001));
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,ordinary,productionProducts,input(),"CRM-oversize",false));
+    ordinary.set("note",m.createObjectNode());
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,ordinary,productionProducts,input(),"CRM-malformed",false));
+  }
+
   @Test void unapprovedOrUnpaidCannotCreateShippingOrder() throws Exception {
     var o=order();o.put("status","审批中");
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,o,products(),input(),"CRM-id",true));
@@ -129,14 +156,8 @@ class JushuitanOrderMapperTest {
       assertEquals("CRM-credit-PAY", result.path("pay").path("outer_pay_id").asText());
       assertEquals("EMIE-CRM", result.path("pay").path("seller_account").asText());
       assertEquals("CRM-credit", result.path("pay").path("buyer_account").asText());
-      var remark = result.path("remark").asText();
-      assertTrue(remark.contains("客户：真实客户甲"));
-      assertTrue(remark.contains("审批快照时CRM已收：" + new java.math.BigDecimal(paid).setScale(2).toPlainString()));
-      assertTrue(remark.contains("审批快照应收：" + new java.math.BigDecimal("19.98").subtract(new java.math.BigDecimal(paid)).setScale(2).toPlainString()));
-      assertTrue(remark.contains("账期挂账（非实收）结算金额：19.98"));
-      assertTrue(remark.contains("不代表现金到账"));
-      assertTrue(remark.contains("禁止实际发货"));
-      assertEquals(JushuitanOrderMapper.buyerAccount("c1"), result.path("shop_buyer_id").asText());
+      assertEquals("【CRM沙箱测试，禁止实际发货】",result.path("remark").asText());
+      assertEquals("真实客户甲",result.path("shop_buyer_id").asText());
       assertEquals(originalOrder, o); assertEquals(originalProducts, p); assertEquals(originalRequest, request);
     }
   }
@@ -150,7 +171,7 @@ class JushuitanOrderMapperTest {
       assertEquals(0,result.path("pay").path("amount").decimalValue().compareTo(o.path("total").decimalValue()));
       assertEquals("账期挂账（非实收）",result.path("pay").path("payment").asText());
       assertEquals("WAIT_SELLER_SEND_GOODS",result.path("shop_status").asText());
-      assertTrue(result.path("remark").asText().contains("财务须在聚水潭审核"));
+      assertEquals("【CRM沙箱测试，禁止实际发货】",result.path("remark").asText());
       assertEquals(before,o);
       if (!"已批准".equals(status)) assertThrows(ApiException.class,
           ()->JushuitanOrderMapper.buildCredit(m,o,products(),request,"CRM-legacy",true));
@@ -170,7 +191,7 @@ class JushuitanOrderMapperTest {
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,o,products(),request,"CRM-credit",true));
     var result = JushuitanOrderMapper.buildCredit(m,o,products(),request,"CRM-credit",true);
     assertEquals("账期挂账（非实收）", result.path("pay").path("payment").asText());
-    assertTrue(result.path("remark").asText().contains("审批快照时CRM已收：0.00"));
+    assertEquals("【CRM沙箱测试，禁止实际发货】",result.path("remark").asText());
     var legacy = JushuitanOrderMapper.build(m,order(),products(),request,"CRM-paid",true);
     assertEquals("CRM已收款", legacy.path("pay").path("payment").asText());
     assertFalse(legacy.path("remark").asText().contains("账期挂账"));

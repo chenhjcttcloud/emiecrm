@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import ReceiptProductDetails from './ReceiptProductDetails';
+import {ReceiptVoucherGallery} from './ReceiptVoucherUpload';
 import './ReceiptApprovals.css';
 import './OrderDetails.css';
 import './feishuApproval.css';
@@ -202,6 +203,7 @@ function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose, or
           <ReceiptProductDetails items={allocation.items || []} source="snapshot"/>
         </section>)}
         {record.note && <section><h3>备注</h3><p className="order-detail-note">{record.note}</p></section>}
+        <ReceiptVoucherGallery attachments={record.attachments} empty/>
         <ReceiptApprovalFlow api={api} record={record}/>
         {error && <p className="system-error" role="alert">{error}</p>}
       </div>

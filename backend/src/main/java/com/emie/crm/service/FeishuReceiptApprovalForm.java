@@ -74,6 +74,7 @@ final class FeishuReceiptApprovalForm {
       value(form, fields, "备注").put("value", "本次收款审批通过后才计入订单已收金额，不触发聚水潭发货。"
           + (note.isEmpty() ? "" : "\n" + note));
     }
+    FeishuApprovalEvidence.append(mapper, definition, batch.path("attachments"), form);
     return form;
   }
 
@@ -91,6 +92,7 @@ final class FeishuReceiptApprovalForm {
     var ids = new HashSet<String>();
     for (var widget : widgets) {
       String name = widget.path("name").asText().strip();
+      if (FeishuApprovalEvidence.widget(widget)) continue;
       String id = widget.path("id").asText();
       if (id.isBlank() || !ids.add(id)) throw invalid("飞书收款审批模板字段编号缺失或重复");
       String expected = REQUIRED_FIELDS.get(name);

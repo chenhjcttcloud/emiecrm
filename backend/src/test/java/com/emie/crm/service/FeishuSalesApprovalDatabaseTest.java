@@ -124,6 +124,60 @@ class FeishuSalesApprovalDatabaseTest {
     assertEquals(so,creditTask().path("soId").asText());
   }
 
+  @Test void firstCreditSubmissionRejectsOversizedErpRemarkAndRollsBackBothQueues() throws Exception {
+    var input = request();
+    var submitted = order(input.path("data"));
+    submitted.put("note", "备".repeat(1001));
+    submitted.putObject("approvalDraft").put("creditFulfillment", true).put("shopId", "15")
+        .put("recipientName", "隔离收件人").put("recipientPhone", "00000000000")
+        .put("recipientAddress", "广东省深圳市龙岗区隔离测试路10号");
+    var before = db.state(false).deepCopy();
+
+    var failure = assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer));
+
+    assertTrue(failure.getMessage().contains("1000"));
+    assertEquals(before, db.state(false));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_credit_pushes", Integer.class));
+    assertTrue(workers.isEmpty());
+    verify(client, never()).create(any(), any(), any(), any());
+  }
+
+  @Test void rejectedCreditApprovalCanResubmitLongLocalNoteWithoutReplacingFrozenErpIntent() throws Exception {
+    var input = request();
+    order(input.path("data")).putObject("approvalDraft").put("creditFulfillment", true).put("shopId", "15")
+        .put("recipientName", "隔离收件人").put("recipientPhone", "00000000000")
+        .put("recipientAddress", "广东省深圳市龙岗区隔离测试路10号");
+    service.createAndSubmit("o1", input, writer);
+    runWorkers();
+    var firstApproval = record();
+    var originalTask = creditTask().deepCopy();
+    when(client.instance("fixture-instance")).thenReturn(instance(firstApproval, "REJECTED"));
+    var rejected = service.sync("o1", writer);
+    assertEquals("草稿", currentOrder().path("status").asText());
+
+    String localNote = "备".repeat(1001);
+    var retry = stateBody();
+    order(retry.path("data")).put("status", "审批中").put("note", localNote);
+    retry.putObject("approval").put("retryVersion", rejected.path("retryVersion").asText());
+    var response = service.createAndSubmit("o1", retry, writer);
+
+    assertEquals("QUEUED", response.path("approval").path("status").asText());
+    assertEquals(localNote, currentOrder().path("note").asText());
+    assertEquals(localNote, record().path("orderSnapshot").path("note").asText());
+    assertEquals("REJECTED", record().path("history").get(0).path("status").asText());
+    assertNotEquals(firstApproval.path("uuid"), record().path("uuid"));
+    assertEquals(originalTask, creditTask());
+    assertEquals("订单备注", creditTask().path("orderSnapshot").path("note").asText());
+    assertEquals(originalTask.path("soId"), creditTask().path("soId"));
+    assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM jst_credit_pushes", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments", Integer.class));
+    runWorkers();
+    assertEquals("PENDING", record().path("status").asText());
+    assertEquals(originalTask, creditTask());
+    verify(client, times(2)).create(any(), any(), any(), any());
+  }
+
   @Test void approvalResultRollbackCannotEraseAnAlreadyCommittedSubmissionTask() throws Exception {
     var request=request();order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15")
         .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
@@ -546,6 +600,104 @@ class FeishuSalesApprovalDatabaseTest {
     assertThrows(ApiException.class, () -> new TransactionTemplate(manager).execute(tx -> business.deleteOrder("o1", writer)));
     assertEquals("草稿", currentOrder().path("status").asText());
     verify(client, never()).cancel(any(), any(), any());
+  }
+
+  private ObjectNode prepaymentVoucherRequest(int count) throws Exception {
+    var assets = new AssetService(db);
+    business = new BusinessService(db, assets);
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor);
+    var definition = FeishuApprovalFixtures.definition();
+    definition.withArray("form").addObject().put("id","voucher").put("name","收款凭证").put("type","attachmentV2").put("required",false);
+    when(client.definition("fixture-template")).thenReturn(definition);
+    var input = request(); var draft = order(input.path("data"));
+    draft.put("type","预收款订单").put("total",60);
+    var images=draft.putArray("attachments");
+    for(int i=0;i<count;i++) {
+      byte[] png={(byte)137,80,78,71,13,10,26,10,(byte)i};
+      images.addObject().put("name","收款单"+i+".png").put("url",assets.store(png));
+    }
+    return input;
+  }
+
+  @Test void prepaymentVouchersAreFrozenAndUploadedBeforeTheOriginalNativeApprovalWithoutBookingCash() throws Exception {
+    var input=prepaymentVoucherRequest(1);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class))).thenReturn("file-prepayment-1");
+    service.createAndSubmit("o1",input,writer);
+    var uuid=record().path("uuid").asText();
+    var frozen=record().path("orderSnapshot").path("attachments").deepCopy();
+    verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
+    assertFalse(record().path("form").toString().contains("/api/assets/"));
+    when(client.create(eq("fixture-template"),eq("ou_sales"),eq(uuid),any(ArrayNode.class))).thenAnswer(call->{
+      var field=java.util.stream.StreamSupport.stream(((ArrayNode)call.getArgument(3)).spliterator(),false)
+          .filter(row->"voucher".equals(row.path("id").asText())).findFirst().orElseThrow();
+      assertEquals(mapper.createArrayNode().add("file-prepayment-1"),field.path("value"));
+      assertTrue(record().path(FeishuApprovalEvidence.FIELD).path("createAttempted").asBoolean());
+      return "fixture-instance";
+    });
+    runWorkers();
+    assertEquals("PENDING",record().path("status").asText());
+    assertEquals(frozen,record().path("orderSnapshot").path("attachments"));
+    assertEquals(0,currentOrder().path("paid").asInt());
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
+    verify(client,times(1)).uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class));
+  }
+
+  @Test void partialVoucherUploadFailureCanRetryTheSamePrepaymentWithoutReuploadingSuccessfulImages() throws Exception {
+    var input=prepaymentVoucherRequest(2);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
+        .thenReturn("file-first").thenThrow(new ApiException("isolated upload failure")).thenReturn("file-second");
+    service.createAndSubmit("o1",input,writer);var uuid=record().path("uuid").asText();runWorkers();
+    assertEquals("FAILED",record().path("status").asText());
+    assertEquals("草稿",currentOrder().path("status").asText());
+    assertEquals(1,record().path(FeishuApprovalEvidence.FIELD).path("codes").size());
+    verify(client,never()).create(any(),any(),any(),any());
+    assertTrue(service.list(writer).getFirst().path("canRetryOriginal").asBoolean());
+    var retry=mapper.createObjectNode().put("retryOriginal",true).put("originalVersion",uuid);
+    service.submit("o1",retry,writer);
+    assertEquals(uuid,record().path("uuid").asText());
+    assertEquals("PENDING",record().path("status").asText());
+    assertEquals(mapper.createArrayNode().add("file-first").add("file-second"),record().path(FeishuApprovalEvidence.FIELD).path("codes"));
+    verify(client,times(1)).uploadFile(eq("receipt-voucher-1.png"),anyString(),anyString(),any(byte[].class));
+    verify(client,times(2)).uploadFile(eq("receipt-voucher-2.png"),anyString(),anyString(),any(byte[].class));
+    verify(client,times(1)).create(eq("fixture-template"),eq("ou_sales"),eq(uuid),any(ArrayNode.class));
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
+  }
+
+  @ParameterizedTest @ValueSource(strings={"amount", "voucher", "note"})
+  void failedVoucherPreparationCannotApproveChangedPrepaymentContentsUsingTheOldForm(String changed) throws Exception {
+    var input=prepaymentVoucherRequest(1);
+    when(client.uploadFile(anyString(),anyString(),anyString(),any(byte[].class))).thenThrow(new ApiException("isolated upload failure"));
+    service.createAndSubmit("o1",input,writer);runWorkers();
+    var uuid=record().path("uuid").asText();var original=record().deepCopy();
+    assertEquals("FAILED",record().path("status").asText());
+    var edited=stateBody();
+    if(changed.equals("amount"))order(edited.path("data")).put("total",61);
+    else if(changed.equals("voucher"))order(edited.path("data")).putArray("attachments");
+    else order(edited.path("data")).put("note","新申请说明");
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(edited,writer));
+    assertFalse(service.list(writer).getFirst().path("canRetryOriginal").asBoolean());
+    var failure=assertThrows(ApiException.class,()->service.submit("o1",mapper.createObjectNode()
+        .put("retryOriginal",true).put("originalVersion",uuid),writer));
+    assertTrue(failure.getMessage().contains("重新提交"));assertEquals(original,record());
+    verify(client,never()).create(any(),any(),any(),any());
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
+  }
+
+  @Test void uncertainNativePrepaymentCreationKeepsItsExactFileCodesAndNeverUploadsAgainOnOriginalRetry() throws Exception {
+    var input=prepaymentVoucherRequest(1);
+    when(client.uploadFile(anyString(),anyString(),anyString(),any(byte[].class))).thenReturn("file-frozen");
+    var constructor=FeishuApprovalClient.Uncertain.class.getDeclaredConstructor();constructor.setAccessible(true);
+    when(client.create(any(),any(),any(),any(ArrayNode.class))).thenThrow(constructor.newInstance()).thenReturn("fixture-instance");
+    service.createAndSubmit("o1",input,writer);var uuid=record().path("uuid").asText();runWorkers();
+    assertEquals("UNKNOWN",record().path("status").asText());
+    var form=record().path("form").deepCopy();var evidence=record().path(FeishuApprovalEvidence.FIELD).deepCopy();
+    service.submit("o1",mapper.createObjectNode().put("retryOriginal",true).put("originalVersion",uuid),writer);
+    assertEquals("PENDING",record().path("status").asText());
+    assertEquals(evidence,record().path(FeishuApprovalEvidence.FIELD));
+    var forms=org.mockito.ArgumentCaptor.forClass(ArrayNode.class);
+    verify(client,times(2)).create(eq("fixture-template"),eq("ou_sales"),eq(uuid),forms.capture());
+    assertEquals(form,forms.getAllValues().get(0));assertEquals(form,forms.getAllValues().get(1));
+    verify(client,times(1)).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
   }
 
   @Test void optionalPrepaymentProductsStayIndependentAndNewPaymentsSaveSnapshots() throws Exception {

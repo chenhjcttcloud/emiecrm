@@ -2,6 +2,7 @@ import React from 'react';
 import {orderTotal} from './orderMoney';
 import {receiptProductMoney as money} from './receiptProductModel';
 import {orderNumberForId} from './orderNumber';
+import {ReceiptVoucherGallery} from './ReceiptVoucherUpload';
 import './ReceiptProductDetails.css';
 
 export {itemsFromOrder,productSummary,productDetailsText} from './receiptProductModel';
@@ -27,6 +28,7 @@ export function ReceiptDetailDrawer({receipt,DialogLayer,Icon,onClose,orders=[]}
   <div className="modal-title"><h2>收款流水详情</h2><button type="button" aria-label="关闭收款详情" onClick={onClose}><Icon name="close"/></button></div>
   <div className="modal-body"><div className="receipt-detail-heading"><div><span>本笔流水金额</span><strong>{money(receipt.amount)}</strong></div><span>{receipt.id}</span></div>
    <dl className="receipt-detail-fields">{[['订单编号',receipt.orderNumber||orderNumberForId(receipt.orderId||receipt.order,orders)],['客户',receipt.customer],['签单人',receipt.owner],['流水类型',receipt.type],['收款方式',receipt.method],['实际到账日期',receipt.receivedOn],['登记时间',time],['操作人',receipt.operator],['备注',receipt.note]].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value||'—'}</dd></div>)}</dl>
+   <ReceiptVoucherGallery attachments={receipt.attachments} empty/>
    <div className="receipt-detail-products"><h3>产品明细</h3><p>商品合计是关联订单的商品金额，不代表本笔收款、核销或退款金额。</p><ReceiptProductDetails items={receipt.items} source={receipt.itemsSource}/></div>
   </div><div className="modal-footer"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>
  </section>}</DialogLayer>;

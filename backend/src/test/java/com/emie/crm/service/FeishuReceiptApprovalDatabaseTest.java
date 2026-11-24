@@ -334,6 +334,172 @@ class FeishuReceiptApprovalDatabaseTest {
     assertEquals("审批期间补充备注", db.state(false).at("/orders/0/note").asText());
   }
 
+  @Test void uploadedReceiptVouchersRemainFrozenThroughNativeApprovalBookingAndBackup() throws Exception {
+    var assets=new AssetService(db);
+    byte[] proof=java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=");
+    String proofUrl=assets.store(proof);
+    byte[] oldImage=proof.clone();oldImage[oldImage.length-1]^=1;
+    String oldUrl=assets.store(oldImage);
+    var state=db.state(false).deepCopy();
+    ((ObjectNode)state.at("/orders/0")).putArray("attachments").addObject().put("name","原订单.png").put("url",oldUrl);
+    saveFixtureState(state);
+    business=new BusinessService(db,assets);ReflectionTestUtils.setField(business,"feishuReceiptApprovalCode",CODE);
+    first=new FeishuReceiptApprovalService(db,client,mapper,business,manager);
+    second=new FeishuReceiptApprovalService(db,client,mapper,business,manager);
+    var template=definition();((com.fasterxml.jackson.databind.node.ArrayNode)template.path("form"))
+        .addObject().put("id","voucher").put("name","附件").put("type","attachmentV2").put("required",false);
+    when(client.definition(CODE)).thenReturn(template);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class))).thenReturn("file-code-1");
+    var input=input("receipt-with-proof",true);
+    var originals=input.putArray("attachments");originals.addObject().put("name","本次收款单.png").put("url",proofUrl);
+    var submitted=first.create(input,finance).path("approval");
+    assertEquals("PENDING",submitted.path("status").asText());
+    assertEquals(originals,submitted.path("attachments"));
+    var pending=record("receipt-with-proof");
+    assertEquals(originals,pending.path("attachments"));
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+    assertTrue(db.documents("receipts",false,0).isEmpty());
+    var nativeForm=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client).create(eq(CODE),eq("ou_finance"),eq(pending.path("uuid").asText()),nativeForm.capture());
+    assertTrue(nativeForm.getValue().toString().contains("file-code-1"));
+    assertFalse(nativeForm.getValue().toString().contains(AssetService.PREFIX));
+    ((ObjectNode)originals.get(0)).put("name","本地提交后修改.png");
+    assertEquals("本次收款单.png",first.create(input,finance).at("/approval/attachments/0/name").asText());
+    verify(client,times(1)).uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class));
+    state=db.state(false).deepCopy();((ObjectNode)state.at("/orders/0")).remove("attachments");saveFixtureState(state);
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    assertTrue(second.sync("receipt-with-proof",reader).path("approval").path("booked").asBoolean());
+    var receipts=db.documents("receipts",false,0);assertEquals(2,receipts.size());
+    for(var receipt:receipts)assertEquals(pending.path("attachments"),receipt.path("attachments"));
+    assertEquals(100,db.state(false).at("/orders/0/paid").asInt());
+    assertEquals(30,db.state(false).at("/orders/1/paid").asInt());
+    assertEquals(30,db.state(false).at("/customers/0/balance").asInt());
+    var backup=(ObjectNode)mapper.valueToTree(business.backup());
+    assertEquals(java.util.Base64.getEncoder().encodeToString(proof),backup.path("assets")
+        .path(proofUrl.substring(AssetService.PREFIX.length())).path("data").asText());
+    assertTrue(backup.path("assets").has(oldUrl.substring(AssetService.PREFIX.length())),"原订单移除附件后，收款审批冻结快照仍须备份原图");
+    var transaction=new org.springframework.transaction.support.TransactionTemplate(manager);
+    transaction.execute(status->{business.restore(backup,finance);return null;});
+    var forged=backup.deepCopy();
+    ((ObjectNode)forged.at("/feishuReceiptApprovals/0")).putArray("attachments");
+    assertThrows(ApiException.class,()->transaction.execute(status->{business.restore(forged,finance);return null;}));
+    assertEquals(pending.path("attachments"),record("receipt-with-proof").path("attachments"));
+    assertEquals(100,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  private ObjectNode voucherRequest(String id, int imageCount) throws Exception {
+    var assets=new AssetService(db);
+    business=new BusinessService(db,assets);ReflectionTestUtils.setField(business,"feishuReceiptApprovalCode",CODE);
+    first=new FeishuReceiptApprovalService(db,client,mapper,business,manager);
+    second=new FeishuReceiptApprovalService(db,client,mapper,business,manager);
+    var template=definition();((com.fasterxml.jackson.databind.node.ArrayNode)template.path("form"))
+        .addObject().put("id","voucher").put("name","附件").put("type","attachmentV2").put("required",false);
+    when(client.definition(CODE)).thenReturn(template);
+    var input=input(id,false);var attachments=input.putArray("attachments");
+    byte[] image=java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=");
+    for(int i=0;i<imageCount;i++) {
+      byte[] bytes=image.clone();bytes[bytes.length-1]^=i;
+      attachments.addObject().put("name","收款单"+(i+1)+".png").put("url",assets.store(bytes));
+    }
+    return input;
+  }
+
+  @ParameterizedTest @ValueSource(ints={0,1})
+  void failedVoucherUploadRetriesOnlyMissingFilesWithoutCreatingOrBookingAnIncompleteApproval(int alreadyUploaded) throws Exception {
+    String id="retry-voucher-files";var input=voucherRequest(id,2);
+    var assets=input.path("attachments").deepCopy();var calls=new AtomicInteger();
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class))).thenAnswer(call->{
+      if(calls.getAndIncrement()==alreadyUploaded)throw new ApiException("isolated upload failure");
+      return call.getArgument(0,String.class).equals("receipt-voucher-1.png")?"file-first":"file-second";
+    });
+    var failed=first.create(input,finance).path("approval");var original=record(id);String uuid=original.path("uuid").asText();
+    assertEquals("FAILED",failed.path("status").asText());assertTrue(failed.path("canRetryOriginal").asBoolean());
+    assertEquals(alreadyUploaded,original.path(FeishuApprovalEvidence.FIELD).path("codes").size());
+    assertFalse(original.path(FeishuApprovalEvidence.FIELD).path("createAttempted").asBoolean());
+    assertEquals(assets,original.path("attachments"));assertEquals(assets,original.path(FeishuApprovalEvidence.FIELD).path("assets"));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    assertTrue(db.documents("receipts",false,0).isEmpty());assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+    var retried=second.retry(id,finance).path("approval");var pending=record(id);
+    assertEquals("PENDING",retried.path("status").asText());assertEquals(uuid,pending.path("uuid").asText());
+    for(String field:List.of("id","approvalCode","openId","amount","method","customerId","receiptDate","receiptCategory","allocations","attachments"))
+      assertEquals(original.path(field),pending.path(field),field);
+    assertEquals(assets,pending.path(FeishuApprovalEvidence.FIELD).path("assets"));
+    assertEquals(mapper.createArrayNode().add("file-first").add("file-second"),pending.path(FeishuApprovalEvidence.FIELD).path("codes"));
+    verify(client,times(alreadyUploaded==0?2:1)).uploadFile(eq("receipt-voucher-1.png"),eq("attachment"),eq("image/png"),any(byte[].class));
+    verify(client,times(alreadyUploaded==0?1:2)).uploadFile(eq("receipt-voucher-2.png"),eq("attachment"),eq("image/png"),any(byte[].class));
+    verify(client,times(1)).create(eq(CODE),eq("ou_finance"),eq(uuid),any(com.fasterxml.jackson.databind.node.ArrayNode.class));
+    assertTrue(db.documents("receipts",false,0).isEmpty());assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  @Test void uncertainReceiptCreationRetriesTheSameUuidAndExactFileCodesWithoutReuploadOrDuplicateBooking() throws Exception {
+    String id="uncertain-voucher-create";var input=voucherRequest(id,1);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class))).thenReturn("file-frozen");
+    when(client.create(eq(CODE),eq("ou_finance"),anyString(),any()))
+        .thenThrow(mock(FeishuApprovalClient.Uncertain.class)).thenReturn("receipt-recovered-instance");
+    var unknown=first.create(input,finance).path("approval");var original=record(id);String uuid=original.path("uuid").asText();
+    assertEquals("UNKNOWN",unknown.path("status").asText());assertTrue(unknown.path("canRetryOriginal").asBoolean());
+    assertTrue(original.path(FeishuApprovalEvidence.FIELD).path("createAttempted").asBoolean());
+    var frozenForm=original.path("form").deepCopy();var evidence=original.path(FeishuApprovalEvidence.FIELD).deepCopy();
+    when(client.instance(uuid)).thenThrow(mock(FeishuApprovalClient.NotFound.class));
+    var retried=second.retry(id,finance).path("approval");var pending=record(id);
+    assertEquals("PENDING",retried.path("status").asText());assertEquals(uuid,pending.path("uuid").asText());
+    assertEquals(evidence,pending.path(FeishuApprovalEvidence.FIELD));assertEquals(original.path("attachments"),pending.path("attachments"));
+    var forms=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client,times(2)).create(eq(CODE),eq("ou_finance"),eq(uuid),forms.capture());
+    assertEquals(frozenForm,forms.getAllValues().get(0));assertEquals(frozenForm,forms.getAllValues().get(1));
+    var recoveryOrder=inOrder(client);
+    recoveryOrder.verify(client).instance(uuid);
+    recoveryOrder.verify(client).create(eq(CODE),eq("ou_finance"),eq(uuid),any(com.fasterxml.jackson.databind.node.ArrayNode.class));
+    verify(client,times(1)).uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class));
+    assertTrue(db.documents("receipts",false,0).isEmpty());assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    assertTrue(first.sync(id,reader).path("approval").path("booked").asBoolean());
+    assertTrue(second.sync(id,reader).path("approval").path("booked").asBoolean());
+    assertEquals(1,db.documents("receipts",false,0).size());
+    assertEquals(original.path("attachments"),db.documents("receipts",false,0).getFirst().path("attachments"));
+    assertEquals(100,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  @Test void failedVoucherPreparationCannotRetryWhileAnotherReceiptApprovalReservesTheOrder() throws Exception {
+    String originalId="failed-voucher-original";var originalInput=voucherRequest(originalId,1);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
+        .thenThrow(new ApiException("isolated upload failure")).thenReturn("file-active");
+    assertEquals("FAILED",first.create(originalInput,finance).at("/approval/status").asText());
+    var original=record(originalId).deepCopy();
+    var activeInput=voucherRequest("replacement-active-receipt",1);
+    assertEquals("PENDING",second.create(activeInput,finance).at("/approval/status").asText());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+    clearInvocations(client);
+    assertThrows(ApiException.class,()->first.retry(originalId,finance));
+    assertEquals(original,record(originalId));
+    assertEquals("PENDING",record("replacement-active-receipt").path("status").asText());
+    verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
+  @ParameterizedTest @ValueSource(strings={"paid","owner","items"})
+  void failedVoucherPreparationCannotRetryAfterItsFrozenOrderContentsOrPaidAmountChange(String changedField) throws Exception {
+    String id="failed-voucher-stale-order";var input=voucherRequest(id,1).put("amount",40);
+    ((ObjectNode)input.at("/allocations/0")).put("amount",40);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
+        .thenThrow(new ApiException("isolated upload failure"));
+    assertEquals("FAILED",first.create(input,finance).at("/approval/status").asText());
+    var original=record(id).deepCopy();var state=db.state(false).deepCopy();var order=(ObjectNode)state.at("/orders/0");
+    switch(changedField) {
+      case "paid" -> order.put("paid",10);
+      case "owner" -> order.put("owner","其他签单人");
+      case "items" -> ((ObjectNode)order.at("/items/0")).put("qty",2).put("price",50);
+      default -> fail("Unexpected fixture field");
+    }
+    saveFixtureState(state);clearInvocations(client);
+    assertThrows(ApiException.class,()->second.retry(id,finance));
+    assertEquals(original,record(id));assertEquals(state,db.state(false));
+    verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
   private void creditFixture() {
     var state = db.state(false).deepCopy(); ((ObjectNode) state.at("/customers/0")).put("balance", 70);
     ((ObjectNode) state.at("/orders/1")).put("paid", 70);

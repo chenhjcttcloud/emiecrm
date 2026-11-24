@@ -139,7 +139,8 @@ public class FeishuSalesApprovalService {
           && Set.of("草稿", "审批中", CANCELED_ORDER).contains(order.path("status").asText())
           && (Set.of("REJECTED", "CANCELED", "DELETED").contains(status) || ("FAILED".equals(status) && !hasInstance(record)))
           && (!hasInstance(record) || CANCELED_ORDER.equals(order.path("status").asText())));
-      if (!openId.isBlank() && openId.equals(record.path("openId").asText()) && recoverable(record)
+      if (!openId.isBlank() && openId.equals(record.path("openId").asText())
+          && (recoverable(record) || (FeishuApprovalEvidence.retryable(record) && evidenceOrderMatches(record, order)))
           && record.path("form").isArray() && !record.path("uuid").asText().isBlank())
         result.put("canRetryOriginal", true).put("originalVersion", record.path("uuid").asText());
       return result;
@@ -300,7 +301,9 @@ public class FeishuSalesApprovalService {
         require(record.path("openId").asText().equals(openId), "请由原发起人重试这笔飞书审批");
         require(!record.path("approvalCode").asText().isBlank(), "原审批模板信息缺失，请先核对飞书审批状态");
         require(record.path("form").isArray(), "原审批提交信息缺失，请先核对飞书审批状态");
-        return claim(record, true);
+        require(!FeishuApprovalEvidence.retryable(record) || evidenceOrderMatches(record, order),
+            "预收款内容或凭证已修改，请按新内容重新提交审批，不能继续旧申请");
+        return claim(record, !FeishuApprovalEvidence.retryable(record));
       }
       if (definition == null) throw new ApiException(409, SUBMISSION_CHANGED);
       require(orderType.equals(order.path("type").asText()), "订单类型已更新，请刷新后重新发起审批");
@@ -328,6 +331,11 @@ public class FeishuSalesApprovalService {
   private ObjectNode newSubmission(String openId, String approvalCode, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, Actor actor) {
     String orderId = order.path("id").asText();
+    if ("预收款订单".equals(order.path("type").asText()) && order.hasNonNull("attachments")) {
+      ObjectNode snapshot = order.deepCopy();
+      snapshot.set("attachments", business.receiptEvidence(order.path("attachments")));
+      order = snapshot;
+    }
     if (JushuitanDocumentService.isSettlement(order)) {
       ObjectNode snapshot = order.deepCopy();
       var sales = snapshot.withObject("settlement").putArray("sales");
@@ -347,6 +355,10 @@ public class FeishuSalesApprovalService {
         .put("uuid", UUID.randomUUID().toString()).put("openId", openId).put("createdAt", CrmRepository.now());
     record.set("form", form);
     record.set("orderSnapshot", order.deepCopy());
+    if ("预收款订单".equals(order.path("type").asText())) {
+      var evidence = FeishuApprovalEvidence.plan(mapper, definition, order.path("attachments"));
+      if (evidence != null) record.set(FeishuApprovalEvidence.FIELD, evidence);
+    }
     JushuitanCreditPushPolicy.markSubmission(record, order, products, jstEnvironment);
     JushuitanCreditPushService.registerSubmission(db, record, order, products, jstEnvironment);
     db.audit(actor.name(), "发起飞书" + order.path("type").asText() + "审批：" + OrderNumbers.display(order));
@@ -388,6 +400,15 @@ public class FeishuSalesApprovalService {
   private ObjectNode dispatch(Submission claim) {
     String instanceCode;
     try {
+      FeishuApprovalEvidence.prepare(claim.record(), new AssetService(db), client, value -> evidenceCheckpoint(claim, value));
+      FeishuApprovalEvidence.beforeCreate(claim.record(), value -> evidenceCheckpoint(claim, value));
+    } catch (ApiException failure) {
+      if (!FeishuApprovalEvidence.attempted(claim.record())) {
+        return evidenceFailure(claim);
+      }
+      return finishSubmission(claim, "", "UNKNOWN", "原审批凭证尚待核对，请同步原审批；不会重新上传或更换凭证");
+    }
+    try {
       instanceCode = client.create(claim.record().path("approvalCode").asText(), claim.record().path("openId").asText(), claim.record().path("uuid").asText(),
           (ArrayNode) claim.record().path("form"));
     } catch (FeishuApprovalClient.Rejected failure) {
@@ -398,6 +419,37 @@ public class FeishuSalesApprovalService {
       return finishSubmission(claim, "", claim.retry() ? "UNKNOWN" : "FAILED", failure.getMessage());
     }
     return finishSubmission(claim, instanceCode, "PENDING", "");
+  }
+
+  private void evidenceCheckpoint(Submission claim, ObjectNode prepared) {
+    tx.executeWithoutResult(transaction -> {
+      db.state(true);
+      var current = load(claim.record().path("orderId").asText(), true);
+      require(current != null && claim.attempt().equals(current.path("attempt").asText())
+          && "SUBMITTING".equals(current.path("status").asText()), "凭证上传申请已变化，请刷新核对原申请");
+      if (FeishuApprovalEvidence.attempted(current)) {
+        require(current.path("form").equals(prepared.path("form")), "原审批表单已冻结，不能在重试时更换凭证或金额");
+      } else {
+        prepared.set("form", db.parse(db.encode(prepared.path("form"))));
+      }
+      current.set(FeishuApprovalEvidence.FIELD, prepared.path(FeishuApprovalEvidence.FIELD).deepCopy());
+      current.set("form", prepared.path("form").deepCopy());
+      current.put("leaseUntil", System.currentTimeMillis() + SUBMISSION_LEASE_MS);
+      store(current);
+    });
+  }
+
+  private ObjectNode evidenceFailure(Submission claim) {
+    return tx.execute(transaction -> {
+      db.state(true);
+      var current = load(claim.record().path("orderId").asText(), true);
+      require(current != null, "未找到飞书审批记录");
+      if (!claim.attempt().equals(current.path("attempt").asText())) return publicRecord(current);
+      require(!FeishuApprovalEvidence.attempted(current), "原审批已提交，请同步核对");
+      ((ObjectNode)current.path(FeishuApprovalEvidence.FIELD)).put("preparationFailed", true);
+      store(current);
+      return finishSubmission(claim, "", "FAILED", "凭证尚未上传至飞书，审批未发起；图片已保存在CRM，可重试原审批");
+    });
   }
 
   private ObjectNode finishSubmission(Submission claim, String instanceCode, String status, String message) {
@@ -782,6 +834,16 @@ public class FeishuSalesApprovalService {
     return record != null && !record.path("instanceCode").asText().isEmpty();
   }
 
+  private static boolean evidenceOrderMatches(JsonNode record, JsonNode order) {
+    if (order == null) return false;
+    var snapshot = record.path("orderSnapshot");
+    if (!snapshot.isObject()) return false;
+    for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "note", "attachments", "approvalDraft"))
+      if (!snapshot.path(field).equals((left, right) -> left.isNumber() && right.isNumber()
+          ? left.decimalValue().compareTo(right.decimalValue()) : left.equals(right) ? 0 : 1, order.path(field))) return false;
+    return true;
+  }
+
   private static boolean queued(JsonNode record) {
     return record != null && record.path("status").asText().equals("QUEUED");
   }
@@ -798,7 +860,7 @@ public class FeishuSalesApprovalService {
     var version = input.path(retryOriginal ? "originalVersion" : "retryVersion");
     if (record == null && !retryOriginal && (version.isMissingNode() || (version.isTextual() && version.asText().isBlank())))
       return;
-    if (record != null && (retryOriginal ? recoverable(record) : RESUBMITTABLE.contains(record.path("status").asText()))) {
+    if (record != null && (retryOriginal ? recoverable(record) || FeishuApprovalEvidence.retryable(record) : RESUBMITTABLE.contains(record.path("status").asText()))) {
       String uuid = record.path("uuid").asText();
       if (version.isTextual() && !uuid.isBlank() && uuid.equals(version.asText())) return;
     }

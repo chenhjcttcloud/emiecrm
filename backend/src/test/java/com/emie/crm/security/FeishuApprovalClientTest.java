@@ -15,6 +15,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -38,8 +39,8 @@ class FeishuApprovalClientTest {
           Object next = responses.removeFirst();
           if (next instanceof Exception failure) throw failure;
           @SuppressWarnings("unchecked") HttpResponse<String> response = mock(HttpResponse.class);
-          when(response.statusCode()).thenReturn(200);
-          when(response.body()).thenReturn((String) next);
+          when(response.statusCode()).thenReturn(next instanceof StubResponse stub ? stub.status() : 200);
+          when(response.body()).thenReturn(next instanceof StubResponse stub ? stub.body() : (String) next);
           return response;
         });
   }
@@ -50,6 +51,110 @@ class FeishuApprovalClientTest {
 
   private void authorized() {
     responses.add("{\"code\":0,\"tenant_access_token\":\"test-token\",\"expire\":7200}");
+  }
+
+  private record StubResponse(int status, String body) {}
+
+  private static byte[] png() {
+    return new byte[]{(byte)137,80,78,71,13,10,26,10,0,(byte)255,0,42};
+  }
+
+  @Test void fileUploadUsesTheApprovalEndpointMultipartContractAndPreservesBinaryContent() {
+    var client = client("sales-code", "prepayment-code");
+    authorized();
+    responses.add("{\"code\":0,\"data\":{\"code\":\"D93653C3-2609-4EE0-8041-61DC1D84F0B5\",\"url\":\"https://temporary.example/image\"}}");
+    responses.add("{\"code\":0,\"data\":{\"code\":\"second-image-code\"}}");
+    byte[] image = png();
+    assertEquals("D93653C3-2609-4EE0-8041-61DC1D84F0B5", client.uploadFile("收款凭证.png", "attachment", "image/png", image));
+    assertEquals("second-image-code", client.uploadFile("deposit.png", "image", "image/png", image));
+    assertEquals(3, requests.size(), "Both uploads reuse the same tenant token");
+    var upload = requests.get(1);
+    assertEquals("POST", upload.method());
+    assertEquals("https://www.feishu.cn/approval/openapi/v2/file/upload", upload.uri().toString());
+    assertEquals("Bearer test-token", upload.headers().firstValue("Authorization").orElseThrow());
+    String contentType = upload.headers().firstValue("Content-Type").orElseThrow();
+    assertTrue(contentType.startsWith("multipart/form-data; boundary=crm-approval-"));
+    String boundary = contentType.substring(contentType.indexOf("boundary=") + 9);
+    byte[] wire = bodyBytes(upload);
+    String text = new String(wire, StandardCharsets.UTF_8);
+    assertTrue(text.contains("name=\"name\"\r\n\r\n收款凭证.png\r\n--" + boundary));
+    assertTrue(text.contains("name=\"type\"\r\n\r\nattachment\r\n--" + boundary));
+    assertTrue(text.contains("name=\"content\"; filename=\"收款凭证.png\"\r\nContent-Type: image/png\r\n\r\n"));
+    String bytesAsLatin = new String(wire, StandardCharsets.ISO_8859_1);
+    int start = bytesAsLatin.indexOf("\r\n\r\n", bytesAsLatin.indexOf("name=\"content\"")) + 4;
+    int end = bytesAsLatin.lastIndexOf("\r\n--" + boundary + "--\r\n");
+    assertArrayEquals(image, Arrays.copyOfRange(wire, start, end));
+    image[8] = 99;
+    assertEquals(0, bodyBytes(upload)[start + 8], "The request owns immutable image bytes");
+    assertTrue(body(requests.get(2)).contains("name=\"type\"\r\n\r\nimage\r\n"));
+    assertTrue(requests.stream().noneMatch(request -> request.uri().getPath().contains("instances")));
+  }
+
+  @Test void imageUploadAcceptsOnlyTheFourSupportedSignaturesAndMatchingFileExtensions() {
+    var client = client("sales-code", "");
+    authorized();
+    var names = List.of("proof.JPG", "proof.jpeg", "proof.gif", "proof.webp");
+    var types = List.of("image/jpeg", "image/jpeg", "image/gif", "image/webp");
+    var bytes = List.of(new byte[]{(byte)255,(byte)216,(byte)255,0}, new byte[]{(byte)255,(byte)216,(byte)255,0},
+        "GIF89aexample".getBytes(StandardCharsets.US_ASCII), "RIFF0000WEBPexample".getBytes(StandardCharsets.US_ASCII));
+    for (int index = 0; index < names.size(); index++) {
+      responses.add("{\"code\":0,\"data\":{\"code\":\"file-" + index + "\"}}");
+      assertEquals("file-" + index, client.uploadFile(names.get(index), "attachment", types.get(index), bytes.get(index)));
+    }
+    assertEquals(5, requests.size());
+  }
+
+  @Test void invalidUploadInputsCannotAcquireTokenOrSendAnHttpRequest() {
+    var client = client("sales-code", "");
+    for (String name : Arrays.asList(null, "", "../proof.png", "proof\\test.png", "proof\".png", "proof\r\nX-Header:bad.png",
+        "proof\u0000.png", " proof.png", "p".repeat(201) + ".png", "proof.jpg", "proof"))
+      assertThrows(ApiException.class, () -> client.uploadFile(name, "attachment", "image/png", png()));
+    for (String type : Arrays.asList(null, "file", "image\r\nInjected"))
+      assertThrows(ApiException.class, () -> client.uploadFile("proof.png", type, "image/png", png()));
+    for (String type : Arrays.asList(null, "application/octet-stream", "image/jpeg", "image/png\r\nInjected"))
+      assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "image", type, png()));
+    assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "image", "image/png", null));
+    assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "image", "image/png", new byte[0]));
+    assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "image", "image/png", new byte[5 * 1024 * 1024 + 1]));
+    assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "image", "image/png", "not a PNG".getBytes(StandardCharsets.UTF_8)));
+    assertTrue(requests.isEmpty());
+  }
+
+  @Test void uploadFailuresNeverBecomeInstanceUncertaintyOrExposeUpstreamDetailsAndAreNotRetried() {
+    var client = client("sales-code", "");
+    authorized();
+    List<Object> failures = List.of(
+        "{\"code\":99991672,\"msg\":\"private-upstream-message\"}",
+        "{\"code\":0,\"data\":{}}", "{\"code\":0,\"data\":{\"code\":123}}",
+        "{\"code\":0,\"data\":{\"code\":\"http://untrusted/file\"}}",
+        "{\"code\":0,\"data\":{\"code\":\"" + "x".repeat(129) + "\"}}",
+        "{\"code\":4294967296,\"data\":{\"code\":\"unexpected\"}}", "[]", "not json",
+        new StubResponse(302, "{\"code\":0,\"data\":{\"code\":\"redirected\"}}"),
+        new StubResponse(500, "{\"code\":0,\"data\":{\"code\":\"unexpected\"}}"),
+        new IOException("private-token-and-file-bytes"));
+    for (Object response : failures) {
+      responses.add(response);
+      var failure = assertThrows(ApiException.class, () -> client.uploadFile("proof.png", "attachment", "image/png", png()));
+      assertEquals(ApiException.class, failure.getClass());
+      assertEquals(502, failure.status());
+      assertEquals("飞书凭证上传未完成，尚未发起本次审批，请重试", failure.getMessage());
+    }
+    assertEquals(failures.size() + 1, requests.size());
+    assertTrue(requests.stream().noneMatch(request -> request.uri().getPath().contains("instances")));
+  }
+
+  @Test void interruptedUploadRestoresInterruptAndLeavesInstanceCreationUntouched() {
+    var client = client("sales-code", "");
+    authorized();
+    responses.add(new InterruptedException("private-interrupt-details"));
+    try {
+      assertEquals(ApiException.class, assertThrows(ApiException.class,
+          () -> client.uploadFile("proof.png", "image", "image/png", png())).getClass());
+      assertTrue(Thread.currentThread().isInterrupted());
+      assertEquals(2, requests.size());
+    } finally {
+      Thread.interrupted();
+    }
   }
 
   @Test void definitionsAreIndependentAndTrimmed() {
@@ -226,7 +331,11 @@ class FeishuApprovalClientTest {
   }
 
   private static String body(HttpRequest request) {
-    var result = new CompletableFuture<String>();
+    return new String(bodyBytes(request), StandardCharsets.UTF_8);
+  }
+
+  private static byte[] bodyBytes(HttpRequest request) {
+    var result = new CompletableFuture<byte[]>();
     var bytes = new ByteArrayOutputStream();
     request.bodyPublisher().orElseThrow().subscribe(new Flow.Subscriber<ByteBuffer>() {
       public void onSubscribe(Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
@@ -236,7 +345,7 @@ class FeishuApprovalClientTest {
         bytes.writeBytes(chunk);
       }
       public void onError(Throwable error) { result.completeExceptionally(error); }
-      public void onComplete() { result.complete(bytes.toString(StandardCharsets.UTF_8)); }
+      public void onComplete() { result.complete(bytes.toByteArray()); }
     });
     return result.join();
   }

@@ -60,3 +60,17 @@ test('explicit unconfigured mode retains verified direct booking and settlement 
  assert.throws(()=>buildDirectReceiptChange({...data,config:{enabled:true,required:true}}),/必须先通过/);
  assert.throws(()=>buildDirectReceiptChange({...data,selected:[{...orders[0],source:'jushuitan-settlement'}],receiptDate:''}),/实际到账日期/);
 });
+
+test('this receipt snapshots only its own uploaded vouchers and direct booking retains them in verification',()=>{
+ const source=input();source.db.orders=structuredClone(orders);source.selected[0].attachments=[{name:'原销售单图片.png',url:'/api/assets/order-only.png'}];
+ assert.equal(Object.hasOwn(buildReceiptApprovalRequest(source),'attachments'),false);
+ const images=[{name:'本笔收款.png',url:'/api/assets/receipt-only.png'}];
+ const request=buildReceiptApprovalRequest({...source,attachments:images});
+ assert.deepEqual(request.attachments,images);assert.notEqual(request.attachments[0],images[0]);
+ images[0].name='编辑界面后来改变.png';images.push({name:'第二次.png',url:'/api/assets/second.png'});
+ assert.deepEqual(request.attachments,[{name:'本笔收款.png',url:'/api/assets/receipt-only.png'}]);
+ const direct=buildDirectReceiptChange({...source,attachments:request.attachments,config:{enabled:false,required:false}});
+ assert.deepEqual(direct.verification.attachments,request.attachments);assert.notEqual(direct.verification.attachments,request.attachments);
+ assert.equal(Object.hasOwn(direct.data.orders[0],'attachments'),false);
+ assert.equal(source.db.orders[0].paid,10);
+});

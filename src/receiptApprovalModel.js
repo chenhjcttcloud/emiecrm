@@ -1,4 +1,5 @@
 import {moneyCents} from './orderMoney.js';
+import {copyReceiptVouchers} from './receiptVoucherModel.js';
 
 export const receiptApprovalLabels = {
   QUEUED:'待发起审批', SUBMITTING:'正在发起', PENDING:'审批中', UNKNOWN:'发起结果待核对',
@@ -30,7 +31,7 @@ export function validReceiptDate(value) {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
 }
 export function buildReceiptApprovalRequest({requestId, db, customerId, selected, payments, amount, method,
-  receiptDate, receiptCategory, note = '', methods, config, records = []}) {
+  receiptDate, receiptCategory, note = '', attachments, methods, config, records = []}) {
   if (!config?.enabled) throw Error('收款审批尚未配置');
   const problem = receiptApprovalProblem(config);
   if (problem) throw Error(problem);
@@ -55,8 +56,9 @@ export function buildReceiptApprovalRequest({requestId, db, customerId, selected
   });
   if (!Number.isSafeInteger(allocated) || allocated !== total) throw Error('实际收款金额必须与本次付款合计一致');
   if (method === '预收款核销' && (moneyCents(customer.balance) ?? 0) < total) throw Error('客户预收款余额不足');
+  const vouchers=copyReceiptVouchers(attachments);
   return {requestId,revision:db.revision,customerId,amount:total / 100,method,receiptDate,receiptCategory,
-    note:String(note).trim(),allocations};
+    note:String(note).trim(),allocations,...(vouchers.length?{attachments:vouchers}:{})};
 }
 
 // Only an explicit server opt-out may use the existing direct-booking path.
@@ -75,6 +77,7 @@ export function buildDirectReceiptChange(input) {
       method:input.method,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:order)},
     verification:{amount:details.amount,customerId:input.customerId,
       customer:input.db.customers.find(customer=>customer.id===input.customerId)?.name,method:input.method,
+      ...(details.attachments?.length?{attachments:copyReceiptVouchers(details.attachments)}:{}),
       ...(settlement?{receivedOn:input.receiptDate}:{})},
   };
 }

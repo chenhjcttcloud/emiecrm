@@ -39,6 +39,8 @@ public class BusinessService {
     this.assets = assets;
   }
 
+  ArrayNode receiptEvidence(JsonNode value) { return ReceiptEvidence.validate(assets, value); }
+
   public JsonNode state() {
     var state = db.state(false);
     if (!state.isNull()) normalizeOrders(state, state);
@@ -412,6 +414,9 @@ public class BusinessService {
     var input = body.path("data");
     validState(input);
     ObjectNode next = input.deepCopy();
+    JsonNode receiptImages = approvedReceipt == null
+        ? body.path("receiptVerification").path("attachments") : approvedReceipt.path("attachments");
+    ArrayNode evidence = receiptImages.isMissingNode() || receiptImages.isNull() ? null : receiptEvidence(receiptImages);
     SettlementOrderNumbers.protect(old, next, false);
     require(next.path("products").equals(old.path("products")) || (old.isNull() && next.path("products").isEmpty()),
         "商品资料由聚水潭管理，请使用同步商品，不能在CRM新增、编辑或删除");
@@ -587,6 +592,7 @@ public class BusinessService {
         if (settlement) r.put("receivedOn", JushuitanSettlementService.receivedOn(
             body.path("receiptVerification").path("receivedOn").asText(), entry));
         r.put("operator", actor.name());
+        if (evidence != null) r.set("attachments", evidence.deepCopy());
         r.set("items", productItems(entry, nextRefs.products()));
         r.put("itemsSource", "snapshot");
         if (approvedReceipt != null) {
@@ -700,23 +706,28 @@ public class BusinessService {
   public Map<String, Object> backup() {
     var snapshot = state();
     var refs = references(snapshot);
+    var receipts = db.documents("receipts", false, 0).stream().map(r -> normalizeReceipt(r, refs)).toList();
+    var approvals = db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id").stream()
+        .map(r -> db.parse(r.get("payload").toString())).toList();
+    var receiptApprovals = db.rows("SELECT payload FROM feishu_receipt_approvals ORDER BY id").stream()
+        .map(r -> db.parse(r.get("payload").toString())).toList();
     return Map.of(
         "version",
         1,
         "state",
         snapshot,
         "receipts",
-        db.documents("receipts", false, 0).stream().map(r -> normalizeReceipt(r, refs)).toList(),
+        receipts,
         "assets",
-        assets.backup(snapshot),
+        assets.backup(snapshot, receipts, approvals, receiptApprovals),
         "jstShipments",
         db.rows("SELECT payload FROM jst_shipments").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "jstDocumentLinks",
         JushuitanDocumentBackup.exportLinks(db),
         "feishuApprovals",
-        db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
+        approvals,
         "feishuReceiptApprovals",
-        db.rows("SELECT payload FROM feishu_receipt_approvals ORDER BY id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
+        receiptApprovals,
         "jstCreditPushes",
         db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "exported",
@@ -922,6 +933,9 @@ public class BusinessService {
     JushuitanDocumentBackup.restoreLinks(db, body.path("jstDocumentLinks"), restoredOrders, shipmentsToImport, old);
     assets.restore(body.path("assets"));
     assets.externalize(next);
+    assets.validateEvidence(body.path("receipts"), body.path("feishuApprovals"), body.path("feishuReceiptApprovals"));
+    for (var receipt : body.path("receipts"))
+      if (receipt.hasNonNull("attachments")) receiptEvidence(receipt.path("attachments"));
     SettlementOrderNumbers.assignMissing(next);
     next.put("revision", old.path("revision").asLong() + 1);
     db.state(next);
@@ -1048,6 +1062,9 @@ public class BusinessService {
       }
     }
     for (var receipt : db.documents("receipts", false, 0)) {
+      if (receipt.path("attachments").isArray() && !receipt.path("attachments").isEmpty())
+        require(normalizeReceipt(receipt, references(current)).equals(incoming.get(receipt.path("id").asText())),
+            "备份缺少或修改了已保存凭证的收款流水");
       if (receipt.path("approvalId").asText().isBlank()) continue;
       require(normalizeReceipt(receipt, references(current)).equals(incoming.get(receipt.path("id").asText())), "备份缺少或修改了审批通过的收款流水");
       String id = receipt.path("order").asText();

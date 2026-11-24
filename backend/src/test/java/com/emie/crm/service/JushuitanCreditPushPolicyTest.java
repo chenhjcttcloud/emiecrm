@@ -13,7 +13,7 @@ class JushuitanCreditPushPolicyTest {
   JsonNode json(String text) throws Exception { return mapper.readTree(text); }
   ObjectNode order() throws Exception {
     return (ObjectNode) json("""
-      {"id":"o1","type":"销售订单","status":"已批准","customerId":"c1","owner":"销售","total":10,"paid":0,
+      {"id":"o1","type":"销售订单","status":"已批准","customerId":"c1","customer":"客户甲","owner":"销售","total":10,"paid":0,
        "items":[{"product":"p1","qty":1,"price":10}],"approvalDraft":{"creditFulfillment":true,
        "shopId":"15","shopName":"国内店铺","warehouseId":"42","warehouseName":"主仓",
        "recipientName":"测试收货人","recipientPhone":"00000000000","recipientAddress":"广东省深圳市南山区仅隔离验证不实际发货"}}
@@ -33,6 +33,24 @@ class JushuitanCreditPushPolicyTest {
     // This shared fixture represents the retained approval-triggered v1 contract.
     if (approval.has("creditPushPolicyVersion")) approval.put("creditPushPolicyVersion",JushuitanCreditPushPolicy.VERSION);
     return approval;
+  }
+
+
+  @Test void buyerNameAndWarehouseNoteAreValidatedOnlyBeforeCreatingANewAutomaticPushTask() throws Exception {
+    for(String invalid : new String[]{"", " ", "长".repeat(51), "客户\n甲"}) {
+      var invalidOrder=order().put("customer",invalid);
+      var approval=approval(invalidOrder);
+      assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.intentForSubmission(approval,invalidOrder,products(),"production"));
+      assertFalse(approval.has("creditPush"));
+    }
+    var invalidOrder=order().put("note","长".repeat(1001));
+    var approval=approval(invalidOrder);
+    assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.intentForSubmission(approval,invalidOrder,products(),"production"));
+    invalidOrder.put("note","长".repeat(1000));
+    assertDoesNotThrow(()->JushuitanCreditPushPolicy.intentForSubmission(approval,invalidOrder,products(),"production"));
+    assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.intentForSubmission(approval,invalidOrder,products(),"sandbox"));
+    invalidOrder.put("note","请按客户要求分箱包装");
+    assertDoesNotThrow(()->JushuitanCreditPushPolicy.validateDraft(invalidOrder));
   }
 
   @Test void onlyExplicitNewOrdinarySalesSubmissionsReceiveThePolicy() throws Exception {

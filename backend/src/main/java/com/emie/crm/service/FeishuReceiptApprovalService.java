@@ -98,6 +98,8 @@ public class FeishuReceiptApprovalService {
       var record = prepare(id, input, business.state(), actor).put("approvalCode", code)
           .put("openId", openId).put("uuid", UUID.randomUUID().toString());
       record.set("form", FeishuReceiptApprovalForm.build(mapper, definition, record, openId));
+      var evidence = FeishuApprovalEvidence.plan(mapper, definition, record.path("attachments"));
+      if (evidence != null) record.set(FeishuApprovalEvidence.FIELD, evidence);
       db.audit(actor.name(), "发起飞书收款审批：" + id);
       return claim(record);
     });
@@ -139,6 +141,7 @@ public class FeishuReceiptApprovalService {
     String note = input.path("note").asText();
     require(note.length() <= 2000, "收款备注不能超过2000字");
     record.put("note", note);
+    if (input.hasNonNull("attachments")) record.set("attachments", business.receiptEvidence(input.path("attachments")));
     var profiles = db.rows("SELECT display_name FROM user_profiles WHERE name=?", actor.name());
     record.put("operatorDisplayName", profiles.isEmpty() ? actor.name() : profiles.getFirst().get("display_name").toString());
     var lines = record.putArray("allocations");
@@ -195,8 +198,9 @@ public class FeishuReceiptApprovalService {
       db.state(true);
       var current = requiredLocked(id);
       requireInitiator(current, openId);
-      if (!recoverable(current)) return new Claim(current, "", false);
+      if (!recoverable(current) && !FeishuApprovalEvidence.retryable(current)) return new Claim(current, "", false);
       require(current.path("form").isArray(), "原收款审批表单缺失，请先核对飞书审批");
+      if (FeishuApprovalEvidence.retryable(current)) requireEvidenceRetry(current, actor);
       return claim(current);
     });
     return response(claim.attempt().isEmpty() ? claim.record() : dispatch(claim), actor);
@@ -210,8 +214,35 @@ public class FeishuReceiptApprovalService {
     return new Claim(record, attempt, retry);
   }
 
+  private void requireEvidenceRetry(ObjectNode original, Actor actor) {
+    // Failed file preparation released its reservations. Recheck them before resuming that UUID.
+    var checked = prepare(original.path("id").asText(), original, business.state(), actor);
+    var before = original.path("allocations"); var now = checked.path("allocations");
+    require(before.size() == now.size(), "原收款分配已变化，请核对后重新申请");
+    for (int i = 0; i < before.size(); i++) {
+      require(before.get(i).path("orderId").equals(now.get(i).path("orderId")), "原收款分配已变化，请核对后重新申请");
+      for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt"))
+        require(sameEvidenceValue(before.get(i).path("orderSnapshot").path(field), now.get(i).path("orderSnapshot").path(field)),
+            "原收款订单或已收金额已变化，请核对后重新申请");
+      for (String field : List.of("items", "total", "paid"))
+        require(sameEvidenceValue(before.get(i).path("executionSnapshot").path(field), now.get(i).path("executionSnapshot").path(field)),
+            "原收款执行金额已变化，请核对后重新申请");
+    }
+  }
+
+  private static boolean sameEvidenceValue(JsonNode left, JsonNode right) {
+    return left.equals((a, b) -> a.isNumber() && b.isNumber() ? a.decimalValue().compareTo(b.decimalValue()) : a.equals(b) ? 0 : 1, right);
+  }
+
   private ObjectNode dispatch(Claim claim) {
     String instanceCode;
+    try {
+      FeishuApprovalEvidence.prepare(claim.record(), new AssetService(db), client, value -> evidenceCheckpoint(claim, value));
+      FeishuApprovalEvidence.beforeCreate(claim.record(), value -> evidenceCheckpoint(claim, value));
+    } catch (ApiException failure) {
+      if (!FeishuApprovalEvidence.attempted(claim.record())) return evidenceFailure(claim);
+      return dispatchResult(claim, "UNKNOWN", "原收款审批凭证尚待核对，请同步原申请；不会更换凭证", null);
+    }
     try {
       instanceCode = client.create(claim.record().path("approvalCode").asText(), claim.record().path("openId").asText(),
           claim.record().path("uuid").asText(), (ArrayNode) claim.record().path("form"));
@@ -227,6 +258,36 @@ public class FeishuReceiptApprovalService {
     return dispatchResult(claim, "PENDING", null, instanceCode);
   }
 
+  private void evidenceCheckpoint(Claim claim, ObjectNode prepared) {
+    tx.executeWithoutResult(transaction -> {
+      db.state(true);
+      var current = requiredLocked(claim.record().path("id").asText());
+      require(claim.attempt().equals(current.path("attempt").asText()) && "SUBMITTING".equals(current.path("status").asText()),
+          "凭证上传申请已变化，请刷新核对原申请");
+      if (FeishuApprovalEvidence.attempted(current)) {
+        require(current.path("form").equals(prepared.path("form")), "原收款审批表单已冻结，不能在重试时更换凭证或金额");
+      } else {
+        prepared.set("form", db.parse(db.encode(prepared.path("form"))));
+      }
+      current.set(FeishuApprovalEvidence.FIELD, prepared.path(FeishuApprovalEvidence.FIELD).deepCopy());
+      current.set("form", prepared.path("form").deepCopy());
+      current.put("leaseUntil", System.currentTimeMillis() + LEASE_MS);
+      store(current);
+    });
+  }
+
+  private ObjectNode evidenceFailure(Claim claim) {
+    return tx.execute(transaction -> {
+      db.state(true);
+      var current = requiredLocked(claim.record().path("id").asText());
+      if (!claim.attempt().equals(current.path("attempt").asText())) return current;
+      require(!FeishuApprovalEvidence.attempted(current), "原收款审批已提交，请同步核对");
+      ((ObjectNode)current.path(FeishuApprovalEvidence.FIELD)).put("preparationFailed", true);
+      store(current);
+      return dispatchResult(claim, "FAILED", "凭证尚未上传至飞书，审批未发起；图片已保存在CRM，可重试原申请", null);
+    });
+  }
+
   private ObjectNode dispatchResult(Claim claim, String status, String message, String instanceCode) {
     return tx.execute(transaction -> {
       db.state(true);
@@ -236,7 +297,7 @@ public class FeishuReceiptApprovalService {
       current.put("status", status); current.remove(List.of("attempt", "leaseUntil"));
       if (instanceCode != null) current.put("instanceCode", instanceCode);
       if (message != null) current.put("message", message); else current.remove("message");
-      if (!"UNKNOWN".equals(status)) current.remove("form");
+      if (!"UNKNOWN".equals(status) && !FeishuApprovalEvidence.retryable(current)) current.remove("form");
       store(current); return current;
     });
   }
@@ -396,7 +457,7 @@ public class FeishuReceiptApprovalService {
   private ObjectNode publicRecord(JsonNode record, Actor actor) {
     var result = db.object();
     for (String field : List.of("id", "status", "amount", "method", "customerId", "customer", "receiptDate", "receiptCategory",
-        "operator", "createdAt", "updatedAt", "instanceCode", "message", "booked", "bookedAt", "bookingError", "note"))
+        "operator", "createdAt", "updatedAt", "instanceCode", "message", "booked", "bookedAt", "bookingError", "note", "attachments"))
       if (record.has(field)) result.set(field, record.path(field).deepCopy());
     if (recoverable(record)) result.put("status", "UNKNOWN");
     if (!record.path("operatorDisplayName").asText().isBlank())
@@ -409,7 +470,7 @@ public class FeishuReceiptApprovalService {
     boolean initiator = canSubmitReceipt(actor)
         && client.identityReady() && openId(actor).equals(record.path("openId").asText());
     result.put("canCancel", initiator && "PENDING".equals(record.path("status").asText()));
-    result.put("canRetryOriginal", initiator && recoverable(record) && record.path("form").isArray());
+    result.put("canRetryOriginal", initiator && (recoverable(record) || FeishuApprovalEvidence.retryable(record)) && record.path("form").isArray());
     return result;
   }
 

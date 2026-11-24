@@ -198,6 +198,46 @@ class BusinessServiceTest {
     verify(db).receipt(capture.capture());
     assertEquals(10, capture.getValue().path("amount").asInt());
     assertNotEquals("r1", capture.getValue().path("id").asText());
+    assertFalse(capture.getValue().has("attachments"));
+  }
+  @Test void directReceiptKeepsItsOwnVouchersWithoutReusingEditableOrderAttachments() {
+    String id="a".repeat(64);var assets=mock(AssetService.class);
+    when(assets.read(id)).thenReturn(new AssetService.Asset("image/png",new byte[]{(byte)137,80,78,71}));
+    service=new BusinessService(db,assets);
+    order(stored).putArray("attachments").addObject().put("name","原订单附件.png").put("url","/api/assets/"+"b".repeat(64));
+    var next=draft();order(next).put("paid",10).put("method","银行转账");
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    var verification=body.putObject("receiptVerification").put("amount",10).put("customerId","c1")
+        .put("customer","客户甲").put("method","银行转账");
+    verification.putArray("attachments").addObject().put("name","本次回单.png").put("url",AssetService.PREFIX+id);
+    service.save(body,admin);
+    assertEquals(1,history.size());
+    assertEquals(verification.path("attachments"),history.getFirst().path("attachments"));
+    assertEquals("原订单附件.png",order(stored).at("/attachments/0/name").asText());
+    assertEquals("本次回单.png",service.receipts().getFirst().at("/attachments/0/name").asText());
+    ((ObjectNode)verification.at("/attachments/0")).put("name","提交后篡改.png");
+    assertEquals("本次回单.png",history.getFirst().at("/attachments/0/name").asText());
+  }
+  @Test void invalidReceiptEvidenceFailsBeforeAnyCashOrLedgerChange() {
+    var next=draft();order(next).put("paid",10).put("method","银行转账");
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    body.putObject("receiptVerification").put("amount",10).put("customerId","c1").put("customer","客户甲")
+        .put("method","银行转账").putArray("attachments").addObject().put("name","外链.png").put("url","https://example.com/proof.png");
+    assertThrows(ApiException.class,()->service.save(body,admin));
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+  @Test void backupCannotRemoveOrAlterVouchersOnAnExistingDirectReceipt() {
+    order(stored).put("paid",10);
+    var receipt=mapper.createObjectNode().put("id","cash-proof").put("order","o1").put("customerId","c1")
+        .put("customer","客户甲").put("amount",10).put("type","销售订单").put("method","银行转账");
+    receipt.putArray("attachments").addObject().put("name","回单.png").put("url",AssetService.PREFIX+"a".repeat(64));
+    history.add(receipt);
+    var backup=(ObjectNode)mapper.valueToTree(service.backup());
+    ((ObjectNode)backup.path("receipts").get(0)).remove("attachments");
+    assertTrue(assertThrows(ApiException.class,()->service.restore(backup,admin)).getMessage().contains("凭证"));
+    assertEquals(10,order(stored).path("paid").asInt());assertEquals(1,history.size());
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
   }
   @Test void ambiguousLegacyOrdersRemainReadableButCannotReceivePayments() {
     ((ArrayNode) stored.path("customers")).addObject().put("id", "c2").put("name", "客户甲").put("balance", 0);

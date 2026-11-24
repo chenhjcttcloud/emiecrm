@@ -25,7 +25,7 @@ class JushuitanServiceTest {
   when(db.parse(anyString())).thenAnswer(i->m.readTree((String)i.getArgument(0)));
   when(db.encode(any())).thenAnswer(i->m.writeValueAsString(i.getArgument(0)));
   when(db.state(true)).thenReturn(json("""
-   {"products":[{"id":"p1","name":"甲","source":"jushuitan","enabled":true,"jstEnvironment":"sandbox","jstSku":"A"}],"orders":[{"id":"o1","customerId":"c1","type":"销售订单","status":"已批准","paid":10,"total":10,"items":[{"product":"p1","qty":1,"price":10}]}]}
+   {"products":[{"id":"p1","name":"甲","source":"jushuitan","enabled":true,"jstEnvironment":"sandbox","jstSku":"A"}],"orders":[{"id":"o1","customerId":"c1","customer":"客户甲","type":"销售订单","status":"已批准","paid":10,"total":10,"items":[{"product":"p1","qty":1,"price":10}]}]}
    """));
   when(db.state(false)).thenAnswer(i->db.state(true));
   when(db.rows(anyString(),eq("o1"))).thenAnswer(i->i.getArgument(0,String.class).contains("FROM jst_credit_pushes")
@@ -210,6 +210,76 @@ class JushuitanServiceTest {
   assertEquals("新测试地址勿投递",result.path("request").path("receiver_address").asText());
   assertEquals(before,result.path("changes").get(0).path("before"));
   assertEquals(before.path("items"),result.path("request").path("items"));
+ }
+ void productionRemarkOrder() throws Exception {
+  acceptedOrder();
+  var record=(ObjectNode)m.readTree(persisted);
+  record.put("environment","production").put("creditFulfillment",true);
+  ((ObjectNode)record.path("request")).put("shop_buyer_id","CRM-C-d0f631ca1ddba8db3bcfcb9e057cdc98d0379f1b")
+      .put("remark","CRM订单：o1\n账期挂账（非实收）；CRM实收按实际收款记录核算。\n旧业务备注");
+  persisted=record.toString();
+  var manager=mock(PlatformTransactionManager.class);
+  when(manager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+  service=new JushuitanService(db,client,m,manager,"production");
+  upstreamOrder("WaitConfirm",null);
+  clearInvocations(client);
+ }
+ void confirmRemarkMutation(String expected) {
+  when(client.mutate(anyString(),anyString(),any())).thenAnswer(i->{
+   assertEquals("/open/jushuitan/order/remark/upload",i.getArgument(1));
+   var target=((ObjectNode)i.getArgument(2)).deepCopy();
+   assertEquals(2,target.size());assertEquals(123,target.path("o_id").asLong());
+   assertEquals(expected,target.path("remark").asText());
+   target.remove("o_id");upstreamOrder("WaitConfirm",target);
+   return json("{\"code\":0,\"issuccess\":true}");
+  });
+ }
+ @Test void remarkChangeSendsOnlyMultilineWarehouseInstructionsAndPreservesFrozenBuyerIdentity() throws Exception {
+  productionRemarkOrder();
+  var original=m.readTree(persisted).path("request").deepCopy();
+  String remark="分两箱包装\n请随箱附清单，外箱标注*易碎*";
+  var body=changeInput("REMARK");body.put("remark","  "+remark+"\n ");
+  confirmRemarkMutation(remark);
+  var result=service.change("o1",body,admin);
+  assertEquals("CONFIRMED",result.path("change").path("status").asText());
+  assertEquals(remark,result.path("request").path("remark").asText());
+  var expected=((ObjectNode)original).deepCopy();expected.put("remark",remark);
+  assertEquals(expected,result.path("request"));
+  assertEquals(original,result.path("changes").get(0).path("before"));
+  verify(client,never()).upload(any());
+ }
+ @Test void productionRemarkCanBeClearedWithoutLeavingCrmOrAccountingBoilerplate() throws Exception {
+  productionRemarkOrder();confirmRemarkMutation("");
+  var body=changeInput("REMARK");body.put("remark","");
+  var result=service.change("o1",body,admin);
+  assertEquals("CONFIRMED",result.path("change").path("status").asText());
+  assertEquals("",result.path("request").path("remark").asText());
+ }
+ @Test void sandboxRemarkKeepsOnlySafetyWarningAndWarehouseInstructions() throws Exception {
+  acceptedOrder();
+  String remark="【CRM沙箱测试，禁止实际发货】请使用测试包装";
+  var body=changeInput("REMARK");body.put("remark","请使用测试包装");
+  confirmRemarkMutation(remark);
+  var result=service.change("o1",body,admin);
+  assertEquals("CONFIRMED",result.path("change").path("status").asText());
+  assertEquals(remark,result.path("request").path("remark").asText());
+ }
+ @Test void clearingSandboxRemarkRetainsSafetyWarning() throws Exception {
+  acceptedOrder();confirmRemarkMutation("【CRM沙箱测试，禁止实际发货】");
+  var body=changeInput("REMARK");body.putNull("remark");
+  var result=service.change("o1",body,admin);
+  assertEquals("CONFIRMED",result.path("change").path("status").asText());
+  assertEquals("【CRM沙箱测试，禁止实际发货】",result.path("request").path("remark").asText());
+ }
+ @Test void invalidOrOverlongBusinessRemarkCannotReachTheMutationApi() throws Exception {
+  productionRemarkOrder();
+  var body=changeInput("REMARK");body.putObject("remark").put("text","不能隐式清空");
+  assertThrows(ApiException.class,()->service.change("o1",body,admin));
+  body.put("remark","字".repeat(401));
+  assertThrows(ApiException.class,()->service.change("o1",body,admin));
+  body.put("remark","备注\u0000不合法");
+  assertThrows(ApiException.class,()->service.change("o1",body,admin));
+  verify(client,never()).mutate(anyString(),anyString(),any());
  }
  @Test void timeoutBlocksFurtherChangesAndCanReconcileLater() throws Exception {
   acceptedOrder();doThrow(new ApiException("超时")).when(client).mutate(anyString(),anyString(),any());

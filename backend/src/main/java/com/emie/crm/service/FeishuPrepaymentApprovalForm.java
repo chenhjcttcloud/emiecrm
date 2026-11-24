@@ -70,6 +70,7 @@ final class FeishuPrepaymentApprovalForm {
       value(form, fields, "备注").put("value", "审批申请，不代表已登记实际收款。"
           + (note.isEmpty() ? "" : "\n" + note));
     }
+    FeishuApprovalEvidence.append(mapper, definition, order.path("attachments"), form);
     return form;
   }
 
@@ -87,6 +88,7 @@ final class FeishuPrepaymentApprovalForm {
     var ids = new HashSet<String>();
     for (var widget : widgets) {
       String name = widget.path("name").asText().strip();
+      if (FeishuApprovalEvidence.widget(widget)) continue;
       String expected = REQUIRED_FIELDS.get(name);
       if ("备注".equals(name)) expected = "textarea";
       if (expected == null) {

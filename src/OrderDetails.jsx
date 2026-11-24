@@ -2,6 +2,7 @@ import React, {useState} from 'react';
 import BusinessImage from './BusinessImage';
 import OrderChangeLog from './OrderChangeLog';
 import CreditOrderPush from './CreditOrderPush';
+import {ReceiptVoucherGallery} from './ReceiptVoucherUpload';
 import OrderLogistics from './OrderLogistics';
 import {plannedLogistics} from './orderLogisticsModel';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
@@ -120,7 +121,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
           {prepayment && <p className="order-products-caption">商品明细合计 {money(orderTotal(items))}，预收款金额独立填写。</p>}
         </section>}
         {order.note && <section><h3>备注</h3><p className="order-detail-note">{order.note}</p></section>}
-        {Boolean(order.attachments?.length) && <section><h3>图片附件</h3><div className="order-detail-attachments">
+        {prepayment?<ReceiptVoucherGallery attachments={order.attachments} empty/>:Boolean(order.attachments?.length) && <section><h3>图片附件</h3><div className="order-detail-attachments">
           {order.attachments.map((image, index) => <BusinessImage key={`${image.url}-${index}`} link src={image.url}
             alt={image.name || `订单图片 ${index + 1}`} title={image.name} loading="lazy"/>)}
         </div></section>}

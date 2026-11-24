@@ -147,6 +147,9 @@ final class JushuitanCreditPushPolicy {
   }
 
   static ObjectNode intentForSubmission(JsonNode approval, JsonNode snapshot, JsonNode products, String environment) {
+    // Existing ERP tasks return before this point when Feishu approval is resubmitted.
+    JushuitanOrderMapper.buyerAccount(snapshot.path("customer").asText());
+    JushuitanOrderMapper.warehouseRemark(snapshot.path("note"), "sandbox".equals(environment), 1000);
     return intent(approval, snapshot, products, environment, true);
   }
 

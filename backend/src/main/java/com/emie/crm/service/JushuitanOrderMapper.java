@@ -4,22 +4,28 @@ import static com.emie.crm.common.exception.ApiException.require;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.*;
 import java.math.*;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /** Converts an authoritative CRM order, with explicit SKU mapping and recipient data. */
 public class JushuitanOrderMapper {
-  static String buyerAccount(String customerId) {
-    require(customerId != null && !customerId.isBlank(), "请先确认客户关联");
-    try {
-      // Keep one bounded, name-independent buyer identity across this customer's orders.
-      return "CRM-C-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-          .digest(customerId.getBytes(StandardCharsets.UTF_8))).substring(0, 40);
-    } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+  static String buyerAccount(String customerName) {
+    require(customerName != null && !customerName.isBlank(), "请先确认客户名称，聚水潭买家账号使用客户名称");
+    String name = customerName.strip();
+    require(name.length() <= 50 && name.chars().noneMatch(Character::isISOControl),
+        "聚水潭买家账号使用客户名称，名称须不超过50字且不含控制字符，请先核对客户名称");
+    return name;
+  }
+
+  static String warehouseRemark(JsonNode value, boolean sandbox, int limit) {
+    require(value.isMissingNode() || value.isNull() || value.isTextual(), "发货备注须为文本");
+    String note = value.asText("").strip();
+    require(note.chars().noneMatch(c -> Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t'),
+        "发货备注含无效控制字符，请重新填写");
+    String remark = (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + note;
+    require(remark.length() <= limit, "聚水潭发货备注不超过" + limit + "字（含沙箱提示），请精简备注后提交");
+    return remark;
   }
 
   public static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
@@ -65,11 +71,10 @@ public class JushuitanOrderMapper {
     ObjectNode out = mapper.createObjectNode();
     out.put("wms_co_id", input.path("warehouseId").asLong());
     out.put("shop_id", input.path("shopId").asLong()).put("so_id", soId)
-        .put("shop_buyer_id", buyerAccount(order.path("customerId").asText())).put("shop_status", "WAIT_SELLER_SEND_GOODS")
+        .put("shop_buyer_id", buyerAccount(order.path("customer").asText())).put("shop_status", "WAIT_SELLER_SEND_GOODS")
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
         .put("pay_amount", total).put("freight", 0)
-        .put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + order.path("id").asText()
-            + (credit ? creditRemark(order, total, paid, submitted) : ""));
+        .put("remark", warehouseRemark(order.path("note"), sandbox, 1000));
     var recipient = input.path("recipient");
     if (credit) require(CreditShippingAddress.valid(recipient), CreditShippingAddress.MESSAGE);
     boolean hasRegions = recipient.has("province") || recipient.has("city") || recipient.has("district");
@@ -123,14 +128,4 @@ public class JushuitanOrderMapper {
     return out;
   }
 
-  private static String creditRemark(JsonNode order, BigDecimal total, BigDecimal paid, boolean submitted) {
-    String customer = order.path("customer").asText().trim();
-    if (customer.isBlank()) customer = order.path("customerId").asText();
-    if (customer.length() > 200) customer = customer.substring(0, 200);
-    return "；客户：" + customer + "；审批快照时CRM已收：" + paid.setScale(2).toPlainString()
-        + "；审批快照应收：" + total.subtract(paid).setScale(2).toPlainString()
-        + "；账期挂账（非实收）结算金额：" + total.setScale(2).toPlainString()
-        + "；ERP按全额结算放行，付款状态为已付，不代表现金到账"
-        + (submitted ? "；正式提交即推单，财务须在聚水潭审核，飞书审批并行；发货以ERP审核为准" : "");
-  }
 }

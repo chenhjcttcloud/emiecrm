@@ -65,6 +65,7 @@ public final class FeishuSalesApprovalForm {
       validateId(widget, seen);
       String key = FIELDS.get(widget.path("name").asText().strip());
       if (key == null) {
+        if (prepayment && FeishuApprovalEvidence.widget(widget)) continue;
         requireOptional(widget);
         continue;
       }
@@ -190,6 +191,7 @@ public final class FeishuSalesApprovalForm {
         default -> writeText(form, widget, order.path(key).asText());
       }
     }
+    if (prepayment) FeishuApprovalEvidence.append(mapper, definition, order.path("attachments"), form);
     return form;
   }
 

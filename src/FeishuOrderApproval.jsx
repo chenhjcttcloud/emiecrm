@@ -122,7 +122,7 @@ export function ApprovalActions({order, approvals, onSubmit, onMessage, canWrite
       <button type="button" className="link-btn" disabled={busy} onClick={onSubmit}>{record ? '重新发起审批' : '发起飞书审批'}</button>}
     {record && <button type="button" className="link-btn" disabled={busy}
       onClick={() => synchronize()}>{busy ? '同步中…' : '同步审批'}</button>}
-    {canWrite && record?.status === 'UNKNOWN' && record.canRetryOriginal && record.originalVersion &&
+    {canWrite && ['UNKNOWN','FAILED'].includes(record?.status) && record.canRetryOriginal && record.originalVersion &&
       <button type="button" className="link-btn" disabled={busy}
         onClick={() => synchronize({retryOriginal: true, originalVersion: record.originalVersion})}>重试原审批</button>}
     {approvalInstanceUrl(record?.instanceCode) && <a className="link-btn" target="_blank" rel="noreferrer"

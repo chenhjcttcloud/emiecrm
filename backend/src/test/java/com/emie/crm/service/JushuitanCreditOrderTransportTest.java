@@ -18,6 +18,9 @@ import static org.mockito.Mockito.*;
 
 class JushuitanCreditOrderTransportTest {
   private static final String SO = "CRM-0123456789abcdef0123456789abcdef";
+  private static final String SANDBOX_WARNING = "【CRM沙箱测试，禁止实际发货】";
+  private static final String OLD_BUYER = "CRM-C-" + "a".repeat(40);
+  private static final String OLD_REMARK = SANDBOX_WARNING + "CRM订单：o1；审批快照时CRM已收：0.00；账期挂账（非实收）；财务须在聚水潭审核";
   private final ObjectMapper mapper = new ObjectMapper();
   private CrmRepository db;
   private JushuitanClient client;
@@ -97,8 +100,102 @@ class JushuitanCreditOrderTransportTest {
     assertEquals("ORDER_SUBMISSION",saved().path("trigger").asText());
     assertEquals("submission-stable",saved().path("submissionId").asText());
     assertEquals(0,saved().path("snapshot").path("paid").asInt());
-    assertTrue(saved().path("request").path("remark").asText().contains("财务须在聚水潭审核"));
+    String remark=saved().path("request").path("remark").asText();
+    assertEquals(SANDBOX_WARNING,remark.strip());
+    assertFalse(remark.contains("CRM订单"));assertFalse(remark.contains("审批"));assertFalse(remark.contains("账期挂账"));
     assertEquals(before,submitted.orderSnapshot());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void firstAutomaticSubmissionUsesSnapshotCustomerAndOnlyBusinessRemarkWhileKeepingNoncashSettlement() throws Exception {
+    var automatic=submitted("initial-approval","","submission-stable");
+    var snapshot=(ObjectNode)automatic.orderSnapshot();
+    String note="请按客户要求分箱\n到货前联系收货人";
+    snapshot.put("customer","爱品儿（授权定制）").put("note",note);
+    var before=snapshot.deepCopy();
+    when(client.upload(any())).thenAnswer(call->{
+      var request=((JsonNode)call.getArgument(0)).get(0);
+      assertEquals("爱品儿（授权定制）",request.path("shop_buyer_id").asText());
+      String remark=request.path("remark").asText();
+      assertTrue(remark.startsWith(SANDBOX_WARNING));assertEquals(note,remark.substring(SANDBOX_WARNING.length()).strip());
+      assertFalse(remark.contains("CRM订单"));assertFalse(remark.contains("审批"));assertFalse(remark.contains("账期"));
+      assertFalse(remark.contains("财务"));assertFalse(remark.contains(SO));
+      assertEquals(10,request.path("pay_amount").asInt());assertEquals(10,request.path("pay").path("amount").asInt());
+      assertEquals("账期挂账（非实收）",request.path("pay").path("payment").asText());
+      assertEquals(SO,request.path("so_id").asText());assertEquals(SO+"-PAY",request.path("pay").path("outer_pay_id").asText());
+      assertEquals(SO,request.path("pay").path("buyer_account").asText());
+      assertEquals(request,saved().path("request"));assertEquals(0,saved().path("snapshot").path("paid").asInt());
+      return upload(true,"123",SO);
+    });
+    assertEquals("ACCEPTED",transport.push(automatic).path("status").asText());
+    assertEquals(before,snapshot);assertFalse(saved().has("effectiveOrder"));
+    verify(client,times(1)).upload(any());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void productionAutomaticSubmissionSendsTheBusinessRemarkWithoutAnySystemPrefix() throws Exception {
+    var original=submitted("initial-approval","","submission-stable");
+    var products=original.products().deepCopy();((ObjectNode)products.get(0)).put("jstEnvironment","production");
+    var snapshot=(ObjectNode)original.orderSnapshot().deepCopy();snapshot.put("customer","爱品儿（授权定制）").put("note","请分箱送货");
+    var production=new JushuitanCreditPushService.Submission(original.orderId(),SO,original.approvalUuid(),original.instanceCode(),"production",
+        snapshot,products,original.input(),original.attemptId(),original.policyVersion(),original.trigger(),original.submissionId());
+    when(client.upload(any())).thenAnswer(call->{
+      var request=((JsonNode)call.getArgument(0)).get(0);
+      assertEquals("爱品儿（授权定制）",request.path("shop_buyer_id").asText());assertEquals("请分箱送货",request.path("remark").asText());
+      assertEquals("账期挂账（非实收）",request.path("pay").path("payment").asText());return upload(true,"123",SO);
+    });
+    assertEquals("ACCEPTED",configured("production","ON_ACCOUNT_TENDER").push(production).path("status").asText());
+    assertEquals(0,saved().path("snapshot").path("paid").asInt());verify(db,never()).receipt(any());
+  }
+
+  /** Simulates a request already durably written by the earlier hash/system-remark mapper. */
+  private ObjectNode oldFrozenRecord(String status,boolean rejected) throws Exception {
+    var request=(ObjectNode)json("""
+        {"shop_id":1,"wms_co_id":15136229,"shop_status":"WAIT_SELLER_SEND_GOODS","order_date":"2026-11-24 09:00:00",
+         "pay_amount":10,"freight":0,"receiver_name":"客户甲","receiver_mobile":"13800000000","receiver_address":"广东省深圳市南山区测试路1号",
+         "items":[{"sku_id":"A","shop_sku_id":"A","i_id":"STYLE-A","shop_i_id":"STYLE-A","name":"产品甲","qty":1,"amount":10.0,"price":10,"base_price":10}],
+         "pay":{"amount":10,"payment":"账期挂账（非实收）","seller_account":"EMIE-CRM","pay_date":"2026-11-24 09:00:00"}}
+        """);
+    request.put("so_id",SO).put("shop_buyer_id",OLD_BUYER).put("remark",OLD_REMARK);
+    ((ObjectNode)request.path("items").get(0)).put("outer_oi_id",SO+"-1");
+    ((ObjectNode)request.path("pay")).put("outer_pay_id",SO+"-PAY").put("buyer_account",SO);
+    var record=mapper.createObjectNode().put("orderId","o1").put("soId",SO).put("environment","sandbox")
+        .put("approvalUuid","approval-1").put("instanceCode","instance-1").put("creditFulfillment",true)
+        .put("accountingMode","ON_ACCOUNT_TENDER").put("status",status).put("upstreamAttempted",true)
+        .put("confirmedRejected",rejected).put("attemptId","legacy-attempt").put("transportVersion","legacy-frozen-version").put("busy",false);
+    record.set("request",request);record.set("snapshot",submission().orderSnapshot().deepCopy());return record;
+  }
+
+  @Test void unknownLegacyHashAndSystemRemarkRemainFrozenAndOnlyTheOriginalIdentityIsQueried() throws Exception {
+    persisted=oldFrozenRecord("UNKNOWN",false).toString();var original=saved().path("request").deepCopy();
+    var submission=submission();((ObjectNode)submission.orderSnapshot()).put("customer","客户已改名").put("note","新规则的业务备注");
+    when(client.query(eq("/open/orders/single/query"),any())).thenAnswer(call->{
+      JsonNode query=call.getArgument(1);assertEquals(1,query.path("shop_id").asLong());assertEquals(SO,query.path("so_ids").get(0).asText());
+      return queried("WaitConfirm",123,SO);
+    });
+    var result=transport.push(submission);
+    assertEquals("ACCEPTED",result.path("status").asText());assertEquals(SO,result.path("soId").asText());
+    assertEquals(original,saved().path("request"));assertEquals(OLD_BUYER,saved().path("request").path("shop_buyer_id").asText());
+    assertEquals(OLD_REMARK,saved().path("request").path("remark").asText());
+    assertEquals(SO+"-PAY",saved().path("request").path("pay").path("outer_pay_id").asText());
+    verify(client,never()).upload(any());verify(shipments,never()).validateCreditRequest(any());verify(queue,never()).renew(any());
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void explicitlyRejectedLegacyRequestRetriesTheSameOldHashRemarkAndPaymentReferences() throws Exception {
+    persisted=oldFrozenRecord("FAILED",true).toString();var original=saved().path("request").deepCopy();
+    var base=submission();var snapshot=(ObjectNode)base.orderSnapshot().deepCopy();snapshot.put("customer","客户已改名").put("note","新的业务备注");
+    var retry=new JushuitanCreditPushService.Submission(base.orderId(),SO,base.approvalUuid(),base.instanceCode(),base.environment(),
+        snapshot,base.products(),base.input(),"explicit-new-attempt");
+    when(client.upload(any())).thenAnswer(call->{
+      var request=((JsonNode)call.getArgument(0)).get(0);
+      assertEquals(original,request);assertEquals(original,saved().path("request"));
+      assertEquals(OLD_BUYER,request.path("shop_buyer_id").asText());assertEquals(OLD_REMARK,request.path("remark").asText());
+      assertEquals(SO,request.path("so_id").asText());assertEquals(SO+"-PAY",request.path("pay").path("outer_pay_id").asText());
+      assertEquals(SO,request.path("pay").path("buyer_account").asText());assertEquals("账期挂账（非实收）",request.path("pay").path("payment").asText());
+      return upload(true,"123",SO);
+    });
+    assertEquals("ACCEPTED",transport.push(retry).path("status").asText());assertEquals(original,saved().path("request"));
+    verify(client,times(1)).upload(any());verify(queue).renew(retry);verify(client,never()).query(eq("/open/orders/single/query"),any());
+    assertEquals(0,saved().path("snapshot").path("paid").asInt());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
   }
 
   @Test void feishuResubmissionKeepsTheOriginalErpIdentityAndCannotUploadTwice() throws Exception {

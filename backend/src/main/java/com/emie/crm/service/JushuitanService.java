@@ -362,12 +362,9 @@ public class JushuitanService {
       }
       require(target.path("receiver_mobile").asText().matches("[0-9+() -]{7,30}"), "收件电话格式无效");
     } else if (kind.equals("REMARK")) {
-      String remark = input.path("remark").asText().trim();
-      require(remark.length() <= 400, "发货备注不超过400字");
-      target.put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + orderId + "\n"
-          + (record.path("creditFulfillment").asBoolean() ? "账期挂账（非实收）；CRM实收按实际收款记录核算。\n" : "") + remark);
+      JushuitanOrderMapper.warehouseRemark(input.path("remark"), false, 400);
+      target.put("remark", JushuitanOrderMapper.warehouseRemark(input.path("remark"), sandbox, 500));
     }
-    if (target.has("remark")) require(target.path("remark").asText().length() <= 500, "含订单编号的备注总长度不能超过500字");
     // Fetch authoritative order and outbound records immediately before the mutation.
     var params = db.object().put("shop_id", record.path("request").path("shop_id").asLong());
     params.putArray("so_ids").add(record.path("soId").asText());
