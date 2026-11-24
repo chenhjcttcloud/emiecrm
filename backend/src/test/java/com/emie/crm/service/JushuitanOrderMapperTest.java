@@ -25,6 +25,26 @@ class JushuitanOrderMapperTest {
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),tampered,"CRM-id",true));
     assertEquals(10048859,JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-id",true).path("wms_co_id").asLong());
   }
+  @Test void rejectsNonIntegralOrOutOfRangeShipmentIdentifiersInsteadOfTruncating() throws Exception {
+    for (String key : new String[]{"shopId", "warehouseId"}) {
+      for (String raw : new String[]{"15136229.9", "15136229.0", "1e3", "true", "false", "null",
+          "0", "-1", "9223372036854775808", "-9223372036854775809", "[]", "{}", "\"15136229\""}) {
+        var request = input(); request.set(key, json(raw));
+        assertThrows(ApiException.class, () -> JushuitanOrderMapper.build(m,order(),products(),request,"CRM-id",true),
+            key + "=" + raw);
+      }
+      var missing = input(); missing.remove(key);
+      assertThrows(ApiException.class, () -> JushuitanOrderMapper.build(m,order(),products(),missing,"CRM-id",true));
+    }
+  }
+  @Test void preservesExactPositiveIntegerIdentifiersIncludingLongBoundary() throws Exception {
+    for (long id : new long[]{1, 15136229, Long.MAX_VALUE}) {
+      var request = input().put("shopId", id).put("warehouseId", id);
+      var result = JushuitanOrderMapper.build(m,order(),products(),request,"CRM-id",true);
+      assertEquals(id, result.path("shop_id").longValue());
+      assertEquals(id, result.path("wms_co_id").longValue());
+    }
+  }
   @Test void payloadUsesAuthoritativeAmountsAndPreservesIdentity() throws Exception {
     var r=JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-identity",true);
     assertEquals("CRM-identity-1",r.path("items").get(0).path("outer_oi_id").asText());

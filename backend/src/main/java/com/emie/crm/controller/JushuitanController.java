@@ -1,5 +1,7 @@
 package com.emie.crm.controller;
 
+import static com.emie.crm.common.exception.ApiException.require;
+
 import com.emie.crm.security.AuthService;
 import com.emie.crm.service.JushuitanService;
 import com.emie.crm.service.JushuitanCatalogJob;
@@ -30,7 +32,11 @@ public class JushuitanController {
   @GetMapping("/warehouses") public Object warehouses(HttpServletRequest req) { auth.actor(req).require("business.read"); return service.warehouses(); }
   @PostMapping("/products/sync") public Object syncProducts(@RequestBody JsonNode body, HttpServletRequest req) { return service.syncProducts(auth.actor(req), body); }
   @PostMapping("/inventory") public Object inventory(@RequestBody JsonNode body, HttpServletRequest req) {
-    auth.actor(req).require("business.read"); return service.inventory(body.path("skuId").asText(), body.path("warehouseId").asLong());
+    auth.actor(req).require("business.read");
+    var warehouse = body.path("warehouseId");
+    require(warehouse.isIntegralNumber()
+        && warehouse.canConvertToLong() && warehouse.asLong() > 0, "请选择有效的发货仓库编号");
+    return service.inventory(body.path("skuId").asText(), warehouse.asLong());
   }
   @PostMapping("/orders/{id}/submit") public Object submit(@PathVariable String id, @RequestBody JsonNode body, HttpServletRequest req) {
     return service.submit(id, body, auth.actor(req));

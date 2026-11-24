@@ -31,8 +31,10 @@ public class JushuitanOrderMapper {
     try { total = new BigDecimal(order.path("total").asText()); paid = new BigDecimal(order.path("paid").asText("0")); }
     catch (Exception e) { throw new com.emie.crm.common.exception.ApiException("订单金额无效"); }
     require(total.signum() > 0 && total.compareTo(paid) == 0, "请完成收款后再提交发货；当前暂不支持账期发货");
-    require(input.path("shopId").canConvertToLong() && input.path("shopId").asLong() > 0, "请选择聚水潭店铺");
-    require(input.path("warehouseId").canConvertToLong() && input.path("warehouseId").asLong() > 0, "请手工选择发货仓库");
+    require(input.path("shopId").isIntegralNumber() && input.path("shopId").canConvertToLong()
+        && input.path("shopId").asLong() > 0, "请选择聚水潭店铺");
+    require(input.path("warehouseId").isIntegralNumber() && input.path("warehouseId").canConvertToLong()
+        && input.path("warehouseId").asLong() > 0, "请手工选择发货仓库");
     ObjectNode out = mapper.createObjectNode();
     out.put("wms_co_id", input.path("warehouseId").asLong());
     out.put("shop_id", input.path("shopId").asLong()).put("so_id", soId)
