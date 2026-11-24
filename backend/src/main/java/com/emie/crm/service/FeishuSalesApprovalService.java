@@ -24,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -52,6 +53,8 @@ public class FeishuSalesApprovalService {
   private final BusinessService business;
   private final AsyncTaskExecutor executor;
   private final JushuitanService warehouseDirectory;
+  @Value("${CRM_JST_ENV:sandbox}")
+  private String jstEnvironment = "sandbox";
   private final Map<String, Readiness> readiness = new java.util.concurrent.ConcurrentHashMap<>();
 
   public FeishuSalesApprovalService(CrmRepository db, FeishuApprovalClient client, ObjectMapper mapper,
@@ -186,6 +189,11 @@ public class FeishuSalesApprovalService {
       store(record);
       return result(state, record);
     });
+    dispatchQueued(orderId);
+    return result;
+  }
+
+  void dispatchQueued(String orderId) {
     try {
       executor.execute(() -> {
         try { dispatchAutomatic(orderId); }
@@ -196,7 +204,38 @@ public class FeishuSalesApprovalService {
     } catch (TaskRejectedException failure) {
       LOG.warn("Queued Feishu approval for order {} will be sent by the scheduler", orderId);
     }
-    return result;
+  }
+
+  record SettlementPreparation(String openId, String approvalCode, JsonNode definition) {}
+
+  SettlementPreparation prepareSettlement(Actor actor) {
+    String openId = submissionOpenId(actor);
+    String code = configuredCode("销售订单");
+    return new SettlementPreparation(openId, code, client.definition(code));
+  }
+
+  ObjectNode existingSettlement(String orderId, String requestId, Actor actor) {
+    return existingSettlement(db.state(false), orderId, requestId, submissionOpenId(actor));
+  }
+
+  ObjectNode existingSettlement(JsonNode state, String orderId, String requestId, String openId) {
+    for (var order : state.path("orders")) {
+      if (!orderId.equals(order.path("id").asText())) continue;
+      var record = load(orderId, false);
+      require(JushuitanDocumentService.isSettlement(order) && requestId.equals(order.path("approvalRequestId").asText())
+          && record != null && openId.equals(record.path("openId").asText()),
+          "结算补录提交编号已被使用，请刷新后重新提交");
+      return result(state, record);
+    }
+    return null;
+  }
+
+  /** The settlement creator owns the transaction containing the order, ERP links and approval queue. */
+  ObjectNode queueSettlement(JsonNode state, JsonNode order, JsonNode input, Actor actor, SettlementPreparation prepared) {
+    var record = newSubmission(prepared.openId(), prepared.approvalCode(), prepared.definition(), order,
+        state.path("products"), input, actor).put("status", "QUEUED").put("automatic", true);
+    store(record);
+    return result(state, record);
   }
 
   private void requireSameCreation(JsonNode state, JsonNode approval, JsonNode input, String openId, String orderId) {
@@ -288,6 +327,18 @@ public class FeishuSalesApprovalService {
   private ObjectNode newSubmission(String openId, String approvalCode, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, Actor actor) {
     String orderId = order.path("id").asText();
+    if (JushuitanDocumentService.isSettlement(order)) {
+      ObjectNode snapshot = order.deepCopy();
+      var sales = snapshot.withObject("settlement").putArray("sales");
+      for (var row : db.rows("SELECT shop_id,o_id,so_id,sale_metadata FROM jst_document_sales WHERE environment=? AND order_id=? ORDER BY shop_id,o_id", jstEnvironment, orderId)) {
+        Object raw = row.get("sale_metadata");
+        ObjectNode sale = raw == null ? db.object() : (ObjectNode) db.parse(raw.toString()).deepCopy();
+        sale.put("id", row.get("o_id").toString()).put("shopId", row.get("shop_id").toString())
+            .put("soId", row.get("so_id").toString());
+        sales.add(sale);
+      }
+      order = snapshot;
+    }
     JsonNode approval = input;
     String ownerOpenId = FeishuSalesApprovalForm.requiresOwnerIdentity(mapper, definition) ? ownerOpenId(order) : "";
     var form = FeishuSalesApprovalForm.build(mapper, definition, order, products, approval, ownerOpenId);
@@ -679,7 +730,7 @@ public class FeishuSalesApprovalService {
   private static ObjectNode approvalOrder(JsonNode state, String orderId) {
     for (var order : state.path("orders"))
       if (orderId.equals(order.path("id").asText()) && APPROVAL_TYPES.contains(order.path("type").asText())
-          && !JushuitanDocumentService.isSettlement(order) && !order.hasNonNull("deletedAt"))
+          && !order.hasNonNull("deletedAt"))
         return (ObjectNode) order;
     throw new ApiException(404, "未找到可发起审批的销售订单、海外提货单或预收款");
   }

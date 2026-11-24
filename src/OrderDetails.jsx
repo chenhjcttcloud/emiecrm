@@ -1,17 +1,19 @@
-import React from 'react';
+import React, {useState} from 'react';
 import BusinessImage from './BusinessImage';
 import OrderChangeLog from './OrderChangeLog';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
 import {shipmentLabel} from './JushuitanOrders';
 import {orderTotal} from './orderMoney';
-import {orderExecutionView,plannedOrderWarehouse} from './feishuApprovalModel';
+import {canSubmitApproval,isLegacyApprovedSettlement,isSettlementApprovalOrder,orderExecutionView,plannedOrderWarehouse,submissionProblem} from './feishuApprovalModel';
 import './OrderDetails.css';
 
 const money = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value))
   ? '—' : new Intl.NumberFormat('zh-CN', {style: 'currency', currency: 'CNY'}).format(Number(value));
 const display = value => value === undefined || value === null || value === '' ? '—' : value;
 
-export default function OrderDetails({order, customer, products, approvals, shipment, api, DialogLayer, Badge, Icon, onClose}) {
+export default function OrderDetails({order, customer, products, approvals, shipment, api, DialogLayer, Badge, Icon, onClose, onSubmitApproval}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   if (!order) return null;
   const execution = orderExecutionView(order, shipment);
   const items = execution.items;
@@ -21,6 +23,22 @@ export default function OrderDetails({order, customer, products, approvals, ship
   const hasRecipient = recipient?.recipientName || recipient?.recipientPhone || recipient?.recipientAddress;
   const canceled = order.status === '已取消';
   const prepayment = order.type === '预收款订单';
+  const settlement = isSettlementApprovalOrder(order);
+  const record = approvals.records[order.id];
+  const legacyApproved = isLegacyApprovedSettlement(order, record);
+  const canSubmit = settlement && Boolean(onSubmitApproval) && canSubmitApproval(order, record, approvals.config);
+  const problem = settlement && ['草稿', '审批中'].includes(order.status)
+    ? submissionProblem(approvals.config, order, approvals.error) : '';
+  const busy = submitting || Boolean(approvals.busy[order.id]);
+  const close = () => { if (!busy) onClose(); };
+  async function submitApproval() {
+    if (!canSubmit || busy) return;
+    setSubmitting(true);
+    setSubmitError('');
+    try { await onSubmitApproval(order); }
+    catch (error) { setSubmitError(error.message); }
+    finally { setSubmitting(false); }
+  }
   const fields = [
     ['客户名称', order.customer || customer?.name], ['客户主体', customer?.entity], ['签单人', order.owner],
     ['订单类型', prepayment ? '预收款' : order.type], ['创建时间', order.created], ['更新时间', order.updated],
@@ -28,10 +46,10 @@ export default function OrderDetails({order, customer, products, approvals, ship
   if(warehouse)fields.push(['计划发货仓库',(warehouse.name||'仓库')+'（编号 '+warehouse.id+'）']);
   if (order.type === '销售订单' && order.source !== 'jushuitan-settlement') fields.push(['发货状态', shipmentLabel(shipment)]);
   if (order.source === 'jushuitan-settlement') fields.push(['订单来源', '聚水潭结算补录']);
-  return <DialogLayer open kind="drawer" label="订单详情" onClose={onClose}>
+  return <DialogLayer open kind="drawer" label="订单详情" onClose={close}>
     <div className="drawer order-detail-drawer">
       <div className="modal-title"><h2>{prepayment ? '预收款详情' : '订单详情'}</h2>
-        <button type="button" aria-label="关闭订单详情" onClick={onClose}><Icon name="close" size={18}/></button>
+        <button type="button" disabled={busy} aria-label="关闭订单详情" onClick={close}><Icon name="close" size={18}/></button>
       </div>
       <div className="modal-body">
         <div className="order-detail-heading"><strong>{order.id}</strong>
@@ -48,7 +66,15 @@ export default function OrderDetails({order, customer, products, approvals, ship
           <div><dt>收货电话</dt><dd>{display(recipient.recipientPhone)}</dd></div>
           <div className="order-detail-wide"><dt>收货地址</dt><dd>{display(recipient.recipientAddress)}</dd></div>
         </dl></section>}
-        <section><h3>{execution.executionItems ? '当前执行明细' : prepayment ? '产品明细（选填）' : '产品明细'}</h3>
+        {settlement ? <section><h3>结算补录信息</h3>
+          <dl className="order-detail-fields">
+            <div><dt>结算方式</dt><dd>{order.settlement?.cycle === 'month' ? '月结' : '日结'}</dd></div>
+            <div><dt>发货账期</dt><dd>{display(order.settlement?.periodStart)} 至 {display(order.settlement?.periodEnd)}</dd></div>
+            <div><dt>聚水潭合计</dt><dd>{money(order.settlement?.erpAmount)}</dd></div>
+            {order.settlement?.adjustmentReason && <div className="order-detail-wide"><dt>差额说明</dt><dd>{order.settlement.adjustmentReason}</dd></div>}
+          </dl>
+          <p className="order-products-caption">关联聚水潭销售单可从订单操作中的“关联单据”查看。{legacyApproved ? '历史已批准的结算补录，保留原确认结果；无飞书审批记录。' : '结算补录须经飞书审批通过后生效。'}</p>
+        </section> : <section><h3>{execution.executionItems ? '当前执行明细' : prepayment ? '产品明细（选填）' : '产品明细'}</h3>
           {items.length ? <div className="order-detail-table-scroll"><table className="order-detail-table" aria-label="订单产品明细">
             <thead><tr><th scope="col">商品 / SKU</th><th scope="col">规格型号</th><th scope="col">数量</th><th scope="col">单价</th><th scope="col">小计</th></tr></thead>
             <tbody>{items.map((item, index) => {const product = catalog.get(item.product);return <tr key={`${item.product}-${index}`}>
@@ -57,16 +83,20 @@ export default function OrderDetails({order, customer, products, approvals, ship
             </tr>;})}</tbody>
           </table></div> : <p className="order-detail-empty">暂无产品明细。</p>}
           {prepayment && <p className="order-products-caption">商品明细合计 {money(orderTotal(items))}，预收款金额独立填写。</p>}
-        </section>
+        </section>}
         {order.note && <section><h3>备注</h3><p className="order-detail-note">{order.note}</p></section>}
         {Boolean(order.attachments?.length) && <section><h3>图片附件</h3><div className="order-detail-attachments">
           {order.attachments.map((image, index) => <BusinessImage key={`${image.url}-${index}`} link src={image.url}
             alt={image.name || `订单图片 ${index + 1}`} title={image.name} loading="lazy"/>)}
         </div></section>}
         <ApprovalFlow order={order} approvals={approvals} api={api} Badge={Badge}/>
+        {problem && <p className="system-error" role="alert">{problem}</p>}
+        {submitError && <p className="system-error" role="alert">{submitError}</p>}
         <section><OrderChangeLog key={order.id} orderId={order.id} api={api}/></section>
       </div>
-      <div className="modal-footer"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>
+      <div className="modal-footer"><button type="button" className="secondary" disabled={busy} onClick={close}>关闭</button>
+        {canSubmit && <button type="button" className="primary" disabled={busy || Boolean(problem)} onClick={submitApproval}>{busy ? '正在提交…' : record ? '重新发起飞书审批' : '发起飞书审批'}</button>}
+      </div>
     </div>
   </DialogLayer>;
 }

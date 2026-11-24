@@ -213,6 +213,7 @@ public class JushuitanDocumentService {
     actor.require("business.write");
     var order = requireMutableSalesOrder(orderId, false);
     require(isSettlement(order), "只有聚水潭补录总单支持批量更新销售单");
+    requireSettlementApprovalMutable(orderId);
     require(body.path("customerConfirmed").isBoolean() && body.path("customerConfirmed").asBoolean(),
         "请确认所选销售单属于该结算客户");
     var expected = new HashSet<>(saleKeys(body.path("previousSales"), true));
@@ -220,6 +221,7 @@ public class JushuitanDocumentService {
     tx.executeWithoutResult(transaction -> {
       var current = requireMutableSalesOrder(orderId, true);
       require(isSettlement(current), "只有聚水潭补录总单支持批量更新销售单");
+      requireSettlementApprovalMutable(orderId);
       if (!current.path("customerId").equals(order.path("customerId")))
         throw new ApiException(409, "订单客户已更新，请刷新后重试");
       requireSettlementPeriod(next, current.path("settlement"));
@@ -240,6 +242,12 @@ public class JushuitanDocumentService {
           "调整销售单关联须保持聚水潭合计一致；金额不同请核对后重新补录");
       replaceSales(orderId, previous, updated, actor);
     });
+  }
+
+  private void requireSettlementApprovalMutable(String orderId) {
+    for (var row : db.rows("SELECT status FROM feishu_order_approvals WHERE order_id=?", orderId))
+      require(!Set.of("QUEUED", "SUBMITTING", "UNKNOWN", "PENDING", "APPROVED").contains(row.get("status").toString()),
+          "结算补录已提交飞书审批，不能修改已送审的销售子单关联");
   }
 
   // The caller's business transaction already holds the state row lock.

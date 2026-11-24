@@ -5,14 +5,16 @@ export const approvalLabels = {
 };
 
 export const isSalesApprovalOrder = order => order?.source !== 'jushuitan-settlement' && ['销售订单', '海外提货单'].includes(order?.type);
-export const isApprovalOrder = order => isSalesApprovalOrder(order) || (order?.source !== 'jushuitan-settlement' && order?.type === '预收款订单');
+export const isSettlementApprovalOrder = order => order?.source === 'jushuitan-settlement' && order?.type === '销售订单';
+export const isLegacyApprovedSettlement = (order, record) => isSettlementApprovalOrder(order) && order.status === '已批准' && !record;
+export const isApprovalOrder = order => isSalesApprovalOrder(order) || isSettlementApprovalOrder(order) || (order?.source !== 'jushuitan-settlement' && order?.type === '预收款订单');
 export const approvalLocksOrder = record => ['QUEUED', 'SUBMITTING', 'PENDING', 'UNKNOWN', 'APPROVED'].includes(record?.status);
 export const completedApproval = record => ['APPROVED', 'REJECTED', 'CANCELED', 'DELETED'].includes(record?.status);
 
 export function approvalSettings(config, order) {
   if (!config) return null;
   if (!isApprovalOrder(order)) return {required: false, enabled: false, canSubmit: false};
-  const prefix = isSalesApprovalOrder(order) ? 'sales' : order?.type === '预收款订单' ? 'prepayment' : null;
+  const prefix = isSalesApprovalOrder(order) || isSettlementApprovalOrder(order) ? 'sales' : order?.type === '预收款订单' ? 'prepayment' : null;
   if (!prefix) return {required: false, enabled: false, canSubmit: false};
   const enabled = Boolean(config[prefix + 'Enabled'] ?? config.enabled);
   return {required: true, enabled,
@@ -22,18 +24,14 @@ export function approvalSettings(config, order) {
 
 export function submissionProblem(config, order, error = '') {
   if (!isApprovalOrder(order)) return '';
-  if (error) return '无法读取飞书审批设置，请重试。可先保存草稿。';
+  const draftHint = isSettlementApprovalOrder(order) ? '' : '可先保存草稿。';
+  if (error) return '无法读取飞书审批设置，请重试。' + draftHint;
   const settings = approvalSettings(config, order);
   if (!settings) return '正在读取飞书审批设置…';
-  if (settings.message) return settings.message + '。可先保存草稿。';
-  if (!settings.enabled) return '飞书审批尚未接通：请管理员配置该类型的审批模板。可先保存草稿。';
-  if (!settings.canSubmit) return '当前账号暂不能发起飞书审批，请核对应用配置、业务权限和飞书身份绑定。可先保存草稿。';
+  if (settings.message) return settings.message + '。' + draftHint;
+  if (!settings.enabled) return '飞书审批尚未接通：请管理员配置该类型的审批模板。' + draftHint;
+  if (!settings.canSubmit) return '当前账号暂不能发起飞书审批，请核对应用配置、业务权限和飞书身份绑定。' + draftHint;
   return '';
-}
-
-export function canConfirmSettlement(order) {
-  return Boolean(order && !order.deletedAt && order.status === '审批中'
-    && order.type === '销售订单' && order.source === 'jushuitan-settlement');
 }
 
 export function canSubmitApproval(order, record, config) {
@@ -55,7 +53,7 @@ export function approvalStatus(order, record, config, error = '') {
 }
 
 export function canCancelOrder(order, record, shipment) {
-  if (!isApprovalOrder(order) || order.deletedAt || shipment || !['草稿', '审批中'].includes(order.status) || moneyCents(order.paid ?? 0) !== 0) return false;
+  if (!isApprovalOrder(order) || isSettlementApprovalOrder(order) || order.deletedAt || shipment || !['草稿', '审批中'].includes(order.status) || moneyCents(order.paid ?? 0) !== 0) return false;
   return record ? record.canCancel === true : true;
 }
 

@@ -13,7 +13,6 @@ import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.List;
-import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -24,12 +23,14 @@ public class JushuitanSettlementService {
   private final CrmRepository db;
   private final JushuitanDocumentService documents;
   private final TransactionTemplate transactions;
+  private final FeishuSalesApprovalService approvals;
 
   public JushuitanSettlementService(CrmRepository db, JushuitanDocumentService documents,
-                                   PlatformTransactionManager manager) {
+                                   PlatformTransactionManager manager, FeishuSalesApprovalService approvals) {
     this.db = db;
     this.documents = documents;
     this.transactions = new TransactionTemplate(manager);
+    this.approvals = approvals;
   }
 
   public record Preview(List<JushuitanDocumentService.Sale> sales, BigDecimal erpAmount) {}
@@ -62,6 +63,12 @@ public class JushuitanSettlementService {
   public ObjectNode create(JsonNode body, Actor actor) {
     actor.require("business.read");
     actor.require("business.write");
+    String requestId = body.path("approvalRequestId").asText();
+    require(requestId.matches("[A-Za-z0-9_-]{16,128}"), "审批提交请求编号缺失或无效，请重新打开结算补录");
+    String id = "JS-" + requestId;
+    var existing = approvals.existingSettlement(id, requestId, actor);
+    if (existing != null) return existing;
+    var prepared = approvals.prepareSettlement(actor);
     require(body.path("customerConfirmed").isBoolean() && body.path("customerConfirmed").asBoolean(),
         "请确认所有销售单均属于所选付款客户");
     var period = period(body);
@@ -81,9 +88,11 @@ public class JushuitanSettlementService {
     period.put("adjustmentReason", adjustment);
     period.put("erpAmount", verified.erpAmount());
 
-    return transactions.execute(transaction -> {
+    var result = transactions.execute(transaction -> {
       var state = db.state(true);
       require(state.isObject() && state.path("orders").isArray(), "请先初始化 CRM 业务数据");
+      var duplicate = approvals.existingSettlement(state, id, requestId, prepared.openId());
+      if (duplicate != null) return duplicate;
       JsonNode customer = null;
       for (var item : state.path("customers")) {
         if (item.path("id").asText().equals(customerId)) {
@@ -94,13 +103,13 @@ public class JushuitanSettlementService {
       require(customer != null, "付款客户不存在，请刷新重试");
       var next = (ObjectNode) state.deepCopy();
       String now = CrmRepository.now();
-      String id = "JS-" + UUID.randomUUID();
       var profiles = db.rows("SELECT display_name FROM user_profiles WHERE name=?", actor.name());
       String owner = profiles.isEmpty() ? actor.name() : profiles.getFirst().get("display_name").toString();
       var order = db.object().put("id", id).put("type", "销售订单")
           .put("source", JushuitanDocumentService.SETTLEMENT_SOURCE)
           .put("customerId", customerId).put("customer", customer.path("name").asText())
           .put("owner", owner).put("note", note).put("paid", 0).put("total", total)
+          .put("approvalRequestId", requestId)
           .put("status", "审批中").put("created", now).put("updated", now);
       order.putArray("items");
       order.set("settlement", period);
@@ -111,8 +120,10 @@ public class JushuitanSettlementService {
       var detail = db.object().put("type", "JST_SETTLEMENT_CREATED").put("source", "CRM").put("orderId", id);
       detail.set("after", order);
       db.audit(actor.name(), "新建聚水潭结算补录单", detail);
-      return next;
+      return approvals.queueSettlement(next, order, body.path("approval"), actor, prepared);
     });
+    approvals.dispatchQueued(id);
+    return result;
   }
 
   private ObjectNode period(JsonNode input) {

@@ -1,7 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import OrderSelect from './OrderSelect';
 import {approvalInstanceUrl, approvalLabels, approvalStatus, approvalTime, canSubmitApproval,
-  completedApproval, isApprovalOrder, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
+  completedApproval, isApprovalOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
 import './feishuApproval.css';
 
 const pollingDelay = rows => rows.some(row => ['QUEUED', 'SUBMITTING'].includes(row.status)) ? 5000 : 30000;
@@ -218,13 +218,15 @@ export function ApprovalFlow({order, approvals, api, Badge}) {
 
   if (!supported) return null;
   const nodes = flow?.nodes ?? [], timeline = flow?.timeline ?? [];
-  const problem = submissionProblem(approvals.config, order, approvals.error);
+  const legacyApproved = isLegacyApprovedSettlement(order, record);
+  const problem = legacyApproved ? '' : submissionProblem(approvals.config, order, approvals.error);
   return <section className="feishu-flow" aria-label="飞书审批流程">
     <div className="feishu-flow-heading"><h3>飞书审批流程</h3>
       <ApprovalStatus order={order} record={record} config={approvals.config} error={approvals.error} Badge={Badge}/>
     </div>
     {order.status === '已取消' && <p className="feishu-flow-hint">订单已取消，不再发起审批。已有审批记录保留供查阅。</p>}
-    {order.status !== '已取消' && (!record || (!record.instanceCode && problem)) && <p className="feishu-flow-hint" role="status">{problem || (order.id ? '尚未发起飞书审批。提交后会按飞书模板流转，并同步审批结果。' : '保存草稿不会发起审批；提交后会在此显示审批人和流程。')}</p>}
+    {legacyApproved && <p className="feishu-flow-hint" role="status">历史已批准的结算补录，保留原确认结果；无飞书审批记录。</p>}
+    {!legacyApproved && order.status !== '已取消' && (!record || (!record.instanceCode && problem)) && <p className="feishu-flow-hint" role="status">{problem || (order.id ? '尚未发起飞书审批。提交后会按飞书模板流转，并同步审批结果。' : '保存草稿不会发起审批；提交后会在此显示审批人和流程。')}</p>}
     {record?.message && <p className="feishu-flow-error" role="alert">{record.message}</p>}
     {record && !record.instanceCode && <p className="feishu-flow-hint" role="status">
       {record.status === 'UNKNOWN' ? '提交结果待核对，系统会沿用原审批编号恢复，请勿另建订单重复提交。' :

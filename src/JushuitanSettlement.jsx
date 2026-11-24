@@ -3,6 +3,8 @@ import PaymentMethodPicker from './PaymentMethodPicker';
 import Pagination from './Pagination';
 import { customerOptions } from './customerOptions';
 import { moneyCents } from './orderMoney';
+import { submissionProblem } from './feishuApprovalModel';
+import { createSettlementApprovalRequest, submitSettlementApproval } from './settlementApprovalSubmission';
 
 const statusLabels = { Sent: '已发货', Archive: '已归档', Cancelled: '已取消' };
 const positiveId = /^[1-9][0-9]{0,18}$/;
@@ -105,7 +107,7 @@ export function salesAmountCents(sales) {
   return total;
 }
 
-function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
+function SettlementForm({ api, customers, Icon, onClose, onCreated, pending, attempt, approvals }) {
   const today = currentDate();
   const [cycle, setCycle] = useState('day');
   const [start, setStart] = useState(today);
@@ -128,7 +130,9 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
   const [confirmed, setConfirmed] = useState(false);
   const [action, setAction] = useState('');
   const [error, setError] = useState('');
-  const busy = Boolean(action);
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  const busy = Boolean(action) || unconfirmed;
+  const approvalProblem = submissionProblem(approvals.config, {type: '销售订单', source: 'jushuitan-settlement'}, approvals.error);
   const [periodStart, periodEnd] = cycle === 'month' ? monthPeriod(month) : [start, end];
   const periodValid = periodStart && periodEnd && periodStart <= periodEnd && periodEnd <= today;
   const invalidPeriod = periodStart && periodEnd && !periodValid;
@@ -209,18 +213,23 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
 
   async function submit(event) {
     event.preventDefault();
-    if (!canCreate || pending.current) return;
+    if (!canCreate || pending.current || (!unconfirmed && approvalProblem)) return;
     pending.current = true;
     setAction('create');
     setError('');
     try {
-      const state = await api('jst/settlements', {
+      attempt.current ??= createSettlementApprovalRequest({
         cycle, periodStart, periodEnd, sales: chosen.map(saleRef), customerId,
         total, expectedErpAmount: erpCents == null ? null : erpCents / 100,
         adjustmentReason: requiresReason ? adjustmentReason : '', note, customerConfirmed: true,
       });
-      onCreated(state);
+      const result = await submitSettlementApproval(api, attempt.current);
+      attempt.current = null;
+      setUnconfirmed(false);
+      onCreated(result);
     } catch (problem) {
+      setUnconfirmed(Boolean(problem.uncertain));
+      if (!problem.uncertain) attempt.current = null;
       setError(problem.message);
     } finally {
       pending.current = false;
@@ -232,7 +241,9 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
     <div className="modal-title"><h2>聚水潭结算补录</h2>
       <button type="button" aria-label="关闭结算补录" disabled={busy} onClick={onClose}><Icon name="close" /></button>
     </div>
-    <div className="modal-body jst-form" aria-busy={busy}>
+    <div className="modal-body jst-form" aria-busy={Boolean(action)}>
+      <p className="form-hint">结算补录须经飞书审批通过后生效；审批内容包含结算账期、金额和关联聚水潭销售单。</p>
+      {approvalProblem && <p role="alert">{approvalProblem}</p>}
       <div className="field"><span>付款客户</span><PaymentMethodPicker label="付款客户" value={customerId}
         options={customerOptions(customers)} disabled={busy}
         onChange={value => { setCustomerId(value); setConfirmed(false); setError(''); }} /></div>
@@ -306,15 +317,16 @@ function SettlementForm({ api, customers, Icon, onClose, onCreated, pending }) {
       {error && <p role="alert">{error}</p>}
     </div>
     <div className="modal-footer"><button type="button" className="secondary" disabled={busy} onClick={onClose}>取消</button>
-      <button type="submit" className="primary" disabled={busy || !canCreate}>{action === 'create' ? '正在提交…' : '提交审批'}</button></div>
+      <button type="submit" className="primary" disabled={Boolean(action) || !canCreate || (!unconfirmed && Boolean(approvalProblem))}>{action === 'create' ? '正在提交…' : unconfirmed ? '重试本次提交' : '提交飞书审批'}</button></div>
   </form>;
 }
 
-export default function JushuitanSettlement({ open, api, customers, DialogLayer, Icon, onClose, onCreated }) {
+export default function JushuitanSettlement({ open, api, customers, DialogLayer, Icon, onClose, onCreated, approvals }) {
   const pending = useRef(false);
-  const close = () => { if (!pending.current) onClose(); };
+  const attempt = useRef(null);
+  const close = () => { if (!pending.current && !attempt.current) onClose(); };
   return <DialogLayer open={open} onClose={close} kind="drawer" label="聚水潭结算补录">
     {open && <SettlementForm api={api} customers={customers} Icon={Icon} onClose={close} onCreated={onCreated}
-      pending={pending} />}
+      pending={pending} attempt={attempt} approvals={approvals} />}
   </DialogLayer>;
 }

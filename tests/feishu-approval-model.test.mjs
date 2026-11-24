@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {activeBusinessOrders, approvalDetails, approvalDiscount, approvalDraftValues, approvalInstanceUrl, approvalLocksOrder, approvalSettings, approvalStatus, approvalTime,
-  canConfirmSettlement, canCancelOrder, canDeleteOrder, canSubmitApproval, orderExecutionView, submissionProblem, visibleBusinessOrders} from '../src/feishuApprovalModel.js';
+  canCancelOrder, canDeleteOrder, canSubmitApproval, isApprovalOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, isSettlementApprovalOrder, orderExecutionView, submissionProblem, visibleBusinessOrders} from '../src/feishuApprovalModel.js';
 
 const order = {id: '2026-11-00000001', type: '销售订单', status: '审批中'};
 const configured = {required: true, salesEnabled: true, salesCanSubmit: true};
@@ -9,7 +9,6 @@ const configured = {required: true, salesEnabled: true, salesCanSubmit: true};
 test('ordinary order types require Feishu even when the obsolete opt-out is supplied', () => {
   for (const type of ['销售订单','海外提货单','预收款订单']) {
     const ordinary = {...order,type};
-    assert.equal(canConfirmSettlement(ordinary), false);
     const disabled = {required:false,enabled:false,salesEnabled:false,prepaymentEnabled:false};
     assert.equal(approvalSettings(disabled,ordinary).required,true);
     assert.match(submissionProblem(disabled,ordinary),/审批模板/);
@@ -25,7 +24,6 @@ test('a configured template without application permission or an identity cannot
   const blocked = {...configured, salesCanSubmit: false, salesMessage: '飞书应用尚未获得审批接口权限'};
   assert.equal(canSubmitApproval(order, null, blocked), false);
   assert.match(submissionProblem(blocked, order), /审批接口权限/);
-  assert.equal(canConfirmSettlement(order), false);
 });
 
 test('uncertain and active submissions stay locked even when client configuration is unavailable', () => {
@@ -33,7 +31,6 @@ test('uncertain and active submissions stay locked even when client configuratio
     const record = {status, retryVersion: 'stale-retry'};
     assert.equal(approvalLocksOrder(record), true);
     assert.equal(canSubmitApproval(order, record, configured), false);
-    assert.equal(canConfirmSettlement(order), false);
   }
 });
 
@@ -46,21 +43,55 @@ test('resubmission requires a server issued version and respects the order statu
   assert.equal(canSubmitApproval({...order, status: '已批准'}, null, configured), false);
 });
 
-test('prepayments require their own template and only settlement supplements can be confirmed locally', () => {
+test('prepayments require their own template and settlement supplements use sales approval', () => {
   const deposit = {...order, type: '预收款订单'};
   assert.equal(approvalSettings(configured, deposit).enabled, false);
   assert.equal(canSubmitApproval(deposit, null, configured), false);
-  assert.equal(canConfirmSettlement(order), false);
   const overseasPickup = {...order, type: '海外提货单'};
-  assert.equal(canConfirmSettlement(overseasPickup), false);
   assert.equal(canSubmitApproval(overseasPickup, null, configured), true);
   assert.deepEqual(approvalSettings(configured, overseasPickup), approvalSettings(configured, order));
   const settlement={...order,source:'jushuitan-settlement'};
-  assert.equal(canConfirmSettlement(settlement),true);
-  for(const invalid of [{status:'已批准'},{status:'草稿'},{status:'已取消'},{deletedAt:'2026-11-23'},{type:'预收款订单'},{type:'海外提货单'}])
-    assert.equal(canConfirmSettlement({...settlement,...invalid}),false);
-  assert.equal(canConfirmSettlement(null),false);
-  assert.equal(canSubmitApproval({...order, source: 'jushuitan-settlement'}, null, configured), false);
+  assert.equal(isSettlementApprovalOrder(settlement),true);
+  assert.equal(isApprovalOrder(settlement),true);
+  assert.equal(isSalesApprovalOrder(settlement),false);
+  assert.deepEqual(approvalSettings(configured,settlement),approvalSettings(configured,order));
+  assert.equal(canSubmitApproval(settlement,null,configured),true);
+  assert.equal(approvalStatus(settlement,null,configured),'待发起飞书审批');
+  assert.equal(approvalStatus(settlement,{status:'PENDING'},configured),'飞书审批中');
+  assert.equal(canCancelOrder(settlement,null,null),false);
+  assert.equal(canDeleteOrder({...settlement,status:'草稿'},null,null),false);
+});
+
+test('settlement supplements require Feishu permissions and versioned retries without ordinary shipping inputs', () => {
+  const settlement={...order,source:'jushuitan-settlement',items:[],approvalDraft:{warehouseId:'42'}};
+  const fullConfig={...configured,salesRecipientRequired:true,salesDiscountRequired:true};
+  assert.deepEqual(approvalDetails(fullConfig,settlement,new Map()),{});
+  assert.deepEqual(approvalDraftValues(fullConfig,settlement,new Map()),{});
+  const disabled={salesEnabled:false,salesCanSubmit:false};
+  assert.equal(approvalSettings(disabled,settlement).required,true);
+  assert.equal(canSubmitApproval(settlement,null,disabled),false);
+  assert.match(submissionProblem(disabled,settlement),/审批模板/);
+  assert.doesNotMatch(submissionProblem(disabled,settlement),/保存草稿/);
+  for(const status of ['REJECTED','CANCELED','DELETED','FAILED']){
+    const draft={...settlement,status:'草稿'};
+    assert.equal(canSubmitApproval(draft,{status},configured),false);
+    assert.equal(canSubmitApproval(draft,{status,retryVersion:'previous-request'},configured),true);
+  }
+  for(const status of ['QUEUED','SUBMITTING','PENDING','UNKNOWN','APPROVED'])
+    assert.equal(canSubmitApproval(settlement,{status,retryVersion:'stale-request'},configured),false);
+  for(const invalid of [{status:'已批准'},{status:'已取消'},{deletedAt:'2026-11-24'}])
+    assert.equal(canSubmitApproval({...settlement,...invalid},null,configured),false);
+});
+
+test('only approved settlement supplements without an approval record keep the legacy confirmation notice', () => {
+  const settlement={...order,source:'jushuitan-settlement',status:'已批准'};
+  assert.equal(isLegacyApprovedSettlement(settlement,null),true);
+  assert.equal(isLegacyApprovedSettlement(settlement,undefined),true);
+  for(const status of ['草稿','审批中','已取消'])
+    assert.equal(isLegacyApprovedSettlement({...settlement,status},null),false);
+  assert.equal(isLegacyApprovedSettlement({...settlement,source:undefined},null),false);
+  assert.equal(isLegacyApprovedSettlement(settlement,{status:'APPROVED'}),false);
+  assert.equal(isLegacyApprovedSettlement(null,null),false);
 });
 
 test('status loading failures are visible and do not hide a recorded Feishu outcome', () => {
@@ -144,7 +175,7 @@ test('soft deletion never removes an active external approval and respects serve
   assert.equal(canDeleteOrder(draft, {canDelete: true}, {status: 'queued'}), false);
 });
 
-test('canceled and deleted orders cannot be resubmitted, manually approved or counted as active amounts', () => {
+test('canceled and deleted orders cannot be resubmitted or counted as active amounts', () => {
   const canceled = {...order, id: 'canceled', status: '已取消', total: 100};
   const deleted = {...order, id: 'deleted', deletedAt: '2026-11-23', total: 200};
   const active = {...order, id: 'active', total: 50};
@@ -154,7 +185,6 @@ test('canceled and deleted orders cannot be resubmitted, manually approved or co
   assert.equal(approvalStatus(canceled, {status: 'CANCELED'}, configured), '已取消');
   for (const row of [canceled, deleted]) {
     assert.equal(canSubmitApproval(row, {status: 'REJECTED', retryVersion: 'previous'}, configured), false);
-    assert.equal(canConfirmSettlement(row), false);
   }
 });
 

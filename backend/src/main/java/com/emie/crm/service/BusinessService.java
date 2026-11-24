@@ -1078,8 +1078,7 @@ public class BusinessService {
   private static boolean deletedOrder(JsonNode order) { return order != null && order.hasNonNull("deletedAt"); }
 
   private boolean requiresFeishu(JsonNode order) {
-    return order != null && !JushuitanDocumentService.isSettlement(order)
-        && APPROVAL_TYPES.contains(order.path("type").asText());
+    return order != null && APPROVAL_TYPES.contains(order.path("type").asText());
   }
 
   private boolean onlyLegacyCustomerAssociationChanged(JsonNode next, JsonNode prior) {

@@ -333,13 +333,25 @@ class BusinessServiceTest {
     verify(db, never()).state(any(JsonNode.class)); verify(db, never()).receipt(any());
   }
 
-  @Test void settlementConfirmationStillUsesItsExistingPermissionRule() {
+  @Test void settlementCannotBeApprovedLocallyEvenByAnApprover() {
     order(stored).put("source", JushuitanDocumentService.SETTLEMENT_SOURCE).put("status", "审批中");
     order(stored).putObject("settlement").put("cycle", "month").put("periodStart", "2026-10-01").put("periodEnd", "2026-10-31");
     order(stored).putArray("items");
     var next = draft(); order(next).put("status", "已批准");
-    assertThrows(ApiException.class, () -> save(next, sales));
-    assertEquals("已批准", order(save(next, admin)).path("status").asText());
+    for (Actor actor : List.of(sales, admin))
+      assertTrue(assertThrows(ApiException.class, () -> save(next, actor)).getMessage().contains("飞书"));
+    verify(db, never()).state(any(JsonNode.class));
+  }
+
+  @Test void backupRestoreCannotBypassSettlementFeishuApproval() {
+    order(stored).put("source", JushuitanDocumentService.SETTLEMENT_SOURCE).put("status", "审批中");
+    order(stored).putObject("settlement").put("cycle", "month").put("periodStart", "2026-10-01").put("periodEnd", "2026-10-31");
+    order(stored).putArray("items");
+    var next = draft(); order(next).put("status", "已批准");
+    var backup = mapper.createObjectNode().put("version", 1);
+    backup.set("state", next); backup.putArray("receipts");
+    assertTrue(assertThrows(ApiException.class, () -> service.restore(backup, admin)).getMessage().contains("飞书"));
+    verify(db, never()).state(any(JsonNode.class)); verify(db, never()).receipt(any());
   }
 
   @Test void offlineCustomerMigrationCannotBeUsedToApproveAnOrdinaryOrder() {

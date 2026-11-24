@@ -47,6 +47,8 @@ public final class FeishuSalesApprovalForm {
 
   public static ArrayNode build(ObjectMapper mapper, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, String ownerOpenId) {
+    if (JushuitanDocumentService.isSettlement(order))
+      return buildSettlement(mapper, definition, order, ownerOpenId);
     boolean prepayment = "预收款订单".equals(order.path("type").asText());
     require(prepayment || Set.of("销售订单", "海外提货单").contains(order.path("type").asText()), "仅销售订单、海外提货单和预收款可发起飞书审批");
     if (prepayment && usesDedicatedPrepaymentForm(mapper, definition))
@@ -166,6 +168,69 @@ public final class FeishuSalesApprovalForm {
       }
     }
     return form;
+  }
+
+  /** A clearly labelled accounting summary, kept separate from CRM products and shipping instructions. */
+  private static ArrayNode buildSettlement(ObjectMapper mapper, JsonNode definition, JsonNode order, String ownerOpenId) {
+    require("销售订单".equals(order.path("type").asText()) && order.path("items").isArray()
+        && order.path("items").isEmpty(), "结算补录单格式无效");
+    var period = order.path("settlement");
+    String cycle = period.path("cycle").asText();
+    require(Set.of("day", "month").contains(cycle), "结算补录账期无效");
+    var start = JushuitanSettlementService.date(period.path("periodStart").asText());
+    var end = JushuitanSettlementService.date(period.path("periodEnd").asText());
+    require(!end.isBefore(start), "结算补录账期无效");
+    var sales = period.path("sales");
+    require(sales.isArray() && !sales.isEmpty() && sales.size() <= JushuitanDocumentService.MAX_SETTLEMENT_SALES,
+        "结算补录缺少已核验的聚水潭销售单快照，请核对关联单据后重新送审");
+    boolean hasNote = false;
+    for (var widget : widgets(mapper, definition)) hasNote |= "note".equals(FIELDS.get(widget.path("name").asText().strip()));
+    require(hasNote, "结算补录审批模板须包含备注，以展示账期、关联销售单及差额说明");
+    var total = decimal(order.path("total"), "结算金额", MAX_MONEY, 2);
+    require(total.signum() > 0, "结算金额须大于零");
+    var note = new StringBuilder("订单来源：聚水潭结算补录（已发货，无需再次发货）\n结算方式：")
+        .append(cycle.equals("day") ? "日结" : "月结").append("\n结算期间：").append(start).append(" 至 ").append(end)
+        .append("\n结算金额：").append(total.toPlainString()).append("\n聚水潭合计：")
+        .append(period.hasNonNull("erpAmount") ? period.path("erpAmount").asText() : "未知，以差额说明为准")
+        .append("\n差额说明：").append(period.path("adjustmentReason").asText().isBlank() ? "无" : period.path("adjustmentReason").asText())
+        .append("\n关联销售单共 ").append(sales.size()).append(" 张（商品仅展示原单摘要，审批商品栏为结算汇总）：");
+    int shown = 0;
+    String omittedItems = "；商品摘要已截断（其余商品已省略），完整明细请在 CRM 关联单据查看。";
+    for (var sale : sales) {
+      require(!sale.path("id").asText().isBlank() && !sale.path("shopId").asText().isBlank(), "结算销售单快照缺少单号或店铺");
+      var header = new StringBuilder("\n销售单 ").append(sale.path("id").asText()).append("；店铺 ").append(sale.path("shopId").asText())
+          .append("；线上单号 ").append(sale.path("soId").asText()).append("；金额 ")
+          .append(sale.hasNonNull("amount") ? sale.path("amount").asText() : "未知");
+      if (note.length() + header.length() + omittedItems.length() > 3900) break;
+      note.append(header);
+      shown++;
+      int itemBudget = Math.min(360, 3900 - note.length() - omittedItems.length());
+      var itemSummary = new StringBuilder();
+      int shownItems = 0;
+      for (var item : sale.path("items")) {
+        String text = "；" + item.path("name").asText() + " [" + item.path("sku").asText()
+            + "] × " + item.path("quantity").asText();
+        if (itemSummary.length() + text.length() > itemBudget) break;
+        itemSummary.append(text);
+        shownItems++;
+      }
+      note.append(itemSummary);
+      if (shownItems < sale.path("items").size()) note.append(omittedItems);
+    }
+    if (shown < sales.size()) note.append("\n以上展示 ").append(shown).append(" 张，其余 ").append(sales.size() - shown)
+        .append(" 张及完整商品明细请在 CRM 本单的关联单据中查看。");
+    if (!order.path("note").asText().isBlank()) note.append("\n补录备注：").append(order.path("note").asText());
+    ObjectNode summary = order.deepCopy();
+    summary.remove("source");
+    summary.put("note", note.toString());
+    summary.putArray("items").addObject().put("product", "settlement-summary").put("qty", 1).put("price", total);
+    var catalog = mapper.createArrayNode();
+    catalog.addObject().put("id", "settlement-summary").put("name", "聚水潭结算补录汇总（" + sales.size() + " 张已发货销售单）")
+        .put("jstSku", "不适用（结算汇总）").put("model", "结算汇总，非新增商品");
+    var details = mapper.createObjectNode();
+    for (String key : List.of("recipientName", "recipientPhone", "recipientAddress")) details.put(key, "不适用（聚水潭已发货结算）");
+    details.putArray("discounts").add(0);
+    return build(mapper, definition, summary, catalog, details, ownerOpenId);
   }
 
   static boolean requiresOwnerIdentity(ObjectMapper mapper, JsonNode definition) {
