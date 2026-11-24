@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import {orderNumber} from './orderNumber';
 import { SaleBatchInput, SettlementSalesTable, saleAmount, saleRef, salesAmountCents } from './JushuitanSettlement';
 
 const warehouseStatuses = { Archive: '已归档', Cancelled: '已取消', Delete: '已作废', OuterConfirming: '外部确认中' };
@@ -151,7 +152,7 @@ function DocumentDrawer({ order, api, canWrite, canSettle, Icon, onClose }) {
 
   function linkPurchase(event) {
     event.preventDefault();
-    if (window.confirm(`确认将采购单 ${poId} 关联到 CRM 订单 ${order.id}？`)) {
+    if (window.confirm(`确认将采购单 ${poId} 关联到 CRM 订单 ${orderNumber(order)}？`)) {
       update('purchases', { poId }, () => setPoId(''));
     }
   }
@@ -166,7 +167,7 @@ function DocumentDrawer({ order, api, canWrite, canSettle, Icon, onClose }) {
       <button type="button" aria-label="关闭关联单据" onClick={onClose}><Icon name="close" /></button>
     </div>
     <div className="modal-body jst-form jst-documents" aria-busy={busy}>
-      <div className="read-field">CRM 订单<p>{order.id}{order.customer && ` · ${order.customer}`}</p></div>
+      <div className="read-field">CRM 订单<p>{orderNumber(order)}{order.customer && ` · ${order.customer}`}</p></div>
       {error && <p role="alert">{error}</p>}
       {loading && <p className="form-hint" role="status">正在查询单据…</p>}
       {saving && <p className="form-hint" role="status">正在保存关联…</p>}

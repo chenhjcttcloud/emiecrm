@@ -1,5 +1,6 @@
 import{csvCell}from'./csv.js';
 import{moneyCents}from'./orderMoney.js';
+import{orderNumberForId}from'./orderNumber.js';
 
 export function salesOrderFinance(order,effective={}){
  const total=moneyCents(effective?.total??order.total),paid=moneyCents(effective?.paid??order.paid??0);
@@ -15,10 +16,10 @@ export function salesQuantity(value){
  return(match[1]||'')+BigInt(match[2]).toLocaleString('zh-CN')+(fraction?'.'+fraction:'');
 }
 
-export function salesItemsCsv(rows,includeCosts=false){
+export function salesItemsCsv(rows,includeCosts=false,orders=[]){
  const fields=[['商品名称','product'],['产品代码','code'],['规格型号','model'],['条码','barcode'],['上市时间','listedOn'],['客户名称','customer'],['签单人','owner'],['订单编号','orderId'],['归属日期','date'],['审批状态','status'],['数量','qty'],['销售单价','price'],['销售小计','amount']];
  if(includeCosts)fields.push(['历史成本单价','unitCost'],['历史成本小计','cost'],['历史毛利','profit']);
- return'\uFEFF'+[fields.map(([label])=>label),...rows.map(row=>fields.map(([,key])=>row[key]??''))].map(row=>row.map(csvCell).join(',')).join('\r\n');
+ return'\uFEFF'+[fields.map(([label])=>label),...rows.map(row=>fields.map(([,key])=>(key==='orderId'?row.orderNumber||orderNumberForId(row.orderId,orders):row[key])??''))].map(row=>row.map(csvCell).join(',')).join('\r\n');
 }
 
 export function salesTargetStatus(amount){

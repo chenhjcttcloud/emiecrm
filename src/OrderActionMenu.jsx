@@ -1,7 +1,7 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
 import './OrderActionMenu.css';
 
-export default function OrderActionMenu({orderId, actions, Icon, disabled}) {
+export default function OrderActionMenu({orderId, orderNumber = orderId, actions, Icon, disabled}) {
   const id = useId(), trigger = useRef(null), menu = useRef(null);
   const [open, setOpen] = useState(false);
   const supportsPopover = typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype;
@@ -34,7 +34,7 @@ export default function OrderActionMenu({orderId, actions, Icon, disabled}) {
   if (!actions.length) return '—';
   return <>
     <button ref={trigger} type="button" className="order-menu-trigger" disabled={disabled} popoverTarget={supportsPopover ? id : undefined}
-      aria-label={'订单 ' + orderId + ' 的操作'} aria-expanded={open} aria-controls={id} onClick={position}>
+      aria-label={'订单 ' + orderNumber + ' 的操作'} aria-expanded={open} aria-controls={id} onClick={position}>
       操作 <Icon name="chevron" size={14}/>
     </button>
     <div id={id} ref={menu} popover={supportsPopover ? 'auto' : undefined} hidden={!supportsPopover && !open}

@@ -154,7 +154,9 @@ public final class FeishuSalesApprovalForm {
             value(form, widget).putArray("open_ids").add(ownerOpenId);
           } else writeText(form, widget, order.path("owner").asText());
         }
-        case "note" -> writeText(form, widget, "CRM 订单：" + order.path("id").asText()
+        case "id" -> writeText(form, widget, OrderNumbers.display(order));
+        case "note" -> writeText(form, widget, "CRM 订单：" + OrderNumbers.display(order)
+            + (OrderNumbers.display(order).equals(order.path("id").asText()) ? "" : "\n内部记录ID：" + order.path("id").asText())
             + (warehouse.selected() ? "\n计划发货仓库：" + warehouse.name() + "（" + warehouse.id() + "）" : "")
             + (order.path("note").asText().isBlank() ? "" : "\n" + order.path("note").asText()));
         case "recipientName", "recipientPhone", "recipientAddress" -> {

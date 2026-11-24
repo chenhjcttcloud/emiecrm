@@ -122,6 +122,37 @@ class SalesServiceTest {
     assertTrue(financialOwners.contains("已取消签单人")); assertTrue(financialOwners.contains("已删除签单人"));
   }
 
+  @Test void businessNumberSearchAndReceiptExportKeepInternalOrderLinksIntact() {
+    var numbered = order("stable-internal-id", "20", "10").put("orderNumber", "2026-11-00000001");
+    line(numbered, "2", "10");
+    receipt("stable-receipt-id", "stable-internal-id", "10", "银行转账", "2026-11-03T01:00:00Z");
+    var original = state.deepCopy();
+    var byNumber = items(1, 20, "2026-11-00000001", "2026-11", "", "");
+    assertEquals(1, byNumber.path("total").asInt());
+    var row = byNumber.path("rows").get(0);
+    assertEquals("stable-internal-id:0", row.path("id").asText());
+    assertEquals("stable-internal-id", row.path("orderId").asText());
+    assertEquals("2026-11-00000001", row.path("orderNumber").asText());
+    assertEquals(1, items(1, 20, "stable-internal-id", "2026-11", "", "").path("total").asInt());
+    var financial = receiptList(1, 20, "2026-11-00000001", "2026-11", "", "", "");
+    assertEquals(1, financial.path("total").asInt());
+    var exported = mapper.valueToTree(service.exportReceipts("2026-11-00000001", "2026-11", "", "", "", reader));
+    var receiptRow = exported.path("rows").get(0);
+    assertEquals("stable-receipt-id", receiptRow.path("id").asText());
+    assertEquals("stable-internal-id", receiptRow.path("orderId").asText());
+    assertEquals("2026-11-00000001", receiptRow.path("orderNumber").asText());
+    assertEquals(original, state);
+  }
+
+  @Test void unnumberedAndOrphanReceiptsKeepTheirOriginalDisplayedReferences() {
+    line(order("legacy-order", "20", "10"), "2", "10");
+    receipt("legacy-receipt", "legacy-order", "10", "银行转账", "2026-11-03T01:00:00Z");
+    receipt("orphan-receipt", "missing-order", "5", "银行转账", "2026-11-04T01:00:00Z");
+    var rows = receiptList(1, 20, "", "2026-11", "", "", "").path("rows");
+    for (var row : rows) assertEquals(row.path("orderId").asText(), row.path("orderNumber").asText());
+    assertEquals("legacy-order", items().path("rows").get(0).path("orderNumber").asText());
+  }
+
   @Test void receiptProductsPreferRecordedSnapshotsAndLabelReadOnlyHistoricalFallbacks() {
     line(order("source", "20", "10"), "2", "10");
     var frozen = receipt("snapshot", "source", "2", "银行转账", "2026-11-01T01:00:00Z");

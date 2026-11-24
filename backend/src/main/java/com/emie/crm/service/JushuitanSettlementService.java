@@ -114,6 +114,7 @@ public class JushuitanSettlementService {
       order.putArray("items");
       order.set("settlement", period);
       next.withArray("orders").insert(0, order);
+      SettlementOrderNumbers.assignMissing(next);
       next.put("revision", state.path("revision").asLong() + 1);
       documents.saveSettlementSales(id, verified.sales(), actor);
       db.state(next);

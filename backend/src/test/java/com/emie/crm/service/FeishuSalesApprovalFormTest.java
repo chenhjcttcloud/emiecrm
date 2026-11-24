@@ -8,6 +8,19 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 class FeishuSalesApprovalFormTest {
+  @Test void businessNumberIsVisibleWhileTheInternalIdRemainsInTheApprovalNote() throws Exception {
+    var definition = FeishuApprovalFixtures.definition();
+    definition.withArray("form").addObject().put("id", "order-number").put("name", "订单编号").put("type", "input");
+    var order = FeishuApprovalFixtures.order().put("orderNumber", "2026-11-00000001");
+    var original = order.deepCopy();
+    var form = build(definition, order);
+    assertEquals("2026-11-00000001", field(form, "order-number").path("value").asText());
+    String note = field(form, "note").path("value").asText();
+    assertTrue(note.contains("CRM 订单：2026-11-00000001"));
+    assertTrue(note.contains("内部记录ID：o1"));
+    assertEquals(original, order);
+  }
+
   @Test void aVerifiedPlannedWarehouseIsVisibleInTheExistingApprovalNote() throws Exception {
     var order = FeishuApprovalFixtures.order();
     order.putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "华南发货仓");

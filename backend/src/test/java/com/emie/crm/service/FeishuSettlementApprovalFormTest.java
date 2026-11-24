@@ -10,6 +10,16 @@ import org.junit.jupiter.api.Test;
 
 /** Settlement summaries use the sales workflow without pretending to be a new shipment. */
 class FeishuSettlementApprovalFormTest {
+  @Test void settlementApprovalUsesItsBusinessNumberAndPreservesItsInternalReference() throws Exception {
+    var definition = FeishuDomesticApprovalTemplateTest.definition("sales");
+    var order = settlement().put("orderNumber", "2026-11-00000001");
+    var form = build(definition, order, FeishuApprovalFixtures.MAPPER.createObjectNode());
+    String note = field(form, definition, "备注").path("value").asText();
+    assertTrue(note.contains("CRM 订单：2026-11-00000001"));
+    assertTrue(note.contains("内部记录ID：JS-fixture-settlement"));
+    assertEquals("JS-fixture-settlement", order.path("id").asText());
+  }
+
   @Test void actualSalesTemplateShowsAnExplicitSettlementSummaryAndItsVerifiedReferences() throws Exception {
     var definition = FeishuDomesticApprovalTemplateTest.definition("sales");
     var order = settlement();

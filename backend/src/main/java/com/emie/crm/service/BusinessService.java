@@ -411,6 +411,7 @@ public class BusinessService {
     var input = body.path("data");
     validState(input);
     ObjectNode next = input.deepCopy();
+    SettlementOrderNumbers.protect(old, next, false);
     require(next.path("products").equals(old.path("products")) || (old.isNull() && next.path("products").isEmpty()),
         "商品资料由聚水潭管理，请使用同步商品，不能在CRM新增、编辑或删除");
     // Catalog ownership and synchronization metadata cannot be replaced through a state save.
@@ -636,6 +637,7 @@ public class BusinessService {
       ((ObjectNode) customer).put("balance", balance.setScale(2, RoundingMode.UNNECESSARY));
     }
     assets.externalize(next);
+    SettlementOrderNumbers.assignMissing(next);
     next.put("revision", old.path("revision").asLong(0) + 1);
     db.state(next);
     migratedReceipts.forEach(db::receipt);
@@ -800,6 +802,7 @@ public class BusinessService {
     var old = db.state(true);
     protectShipmentRestore(body);
     ObjectNode next = body.path("state").deepCopy();
+    SettlementOrderNumbers.protect(old, next, true);
     protectLegacyRestore(old, next, body.path("receipts"));
     var restoredOrders = index(next.path("orders"));
     protectCanceledOrders(index(old.path("orders")), restoredOrders, true);
@@ -910,6 +913,7 @@ public class BusinessService {
     JushuitanDocumentBackup.restoreLinks(db, body.path("jstDocumentLinks"), restoredOrders, shipmentsToImport, old);
     assets.restore(body.path("assets"));
     assets.externalize(next);
+    SettlementOrderNumbers.assignMissing(next);
     next.put("revision", old.path("revision").asLong() + 1);
     db.state(next);
     var receiptsBefore = db.object();

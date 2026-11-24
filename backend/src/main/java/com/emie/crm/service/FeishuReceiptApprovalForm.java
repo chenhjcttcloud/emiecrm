@@ -124,8 +124,11 @@ final class FeishuReceiptApprovalForm {
       var payment = number(allocation.path("amount"), "订单本次收款金额", MAX_MONEY, 2);
       if (payment.signum() <= 0) throw invalid("订单本次收款金额必须大于零");
       allocated = allocated.add(payment);
-      text.append("\n\n订单：").append(orderId).append(" | 本次收款：")
+      String orderNumber = OrderNumbers.display(allocation.path("orderSnapshot"));
+      if (orderNumber.isEmpty()) orderNumber = orderId;
+      text.append("\n\n订单：").append(orderNumber).append(" | 本次收款：")
           .append(payment.setScale(2).toPlainString()).append(" 元");
+      if (!orderNumber.equals(orderId)) text.append(" | 内部记录ID：").append(orderId);
       String owner = allocation.path("orderSnapshot").path("owner").asText().strip();
       if (!owner.isEmpty()) text.append(" | 签单人：").append(owner);
       appendProducts(text, allocation.path("items"));

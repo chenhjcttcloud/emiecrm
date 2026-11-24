@@ -4,6 +4,7 @@ import './ReceiptApprovals.css';
 import './OrderDetails.css';
 import './feishuApproval.css';
 import {approvalInstanceUrl,approvalTime} from './feishuApprovalModel';
+import {orderNumberForId} from './orderNumber';
 import {receiptApprovalActive,receiptApprovalLabels,receiptApprovalCompleted,receiptApprovalCompletionKey} from './receiptApprovalModel';
 export {receiptApprovalActive,receiptApprovalLabels} from './receiptApprovalModel';
 
@@ -178,7 +179,7 @@ function ReceiptApprovalFlow({api, record}) {
   </section>;
 }
 
-function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose}) {
+function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose, orders}) {
   const [error, setError] = useState('');
   const busy = Boolean(approvals.busy[record.id]);
   async function act(action) {
@@ -197,7 +198,7 @@ function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose}) {
         {(record.message || record.bookingError) && <p className="system-error" role="status">{record.bookingError || record.message}</p>}
         <dl className="receipt-detail-fields">{[['客户名称', record.customer], ['收款方式', record.method], ['收款发生日期', record.receiptDate], ['收款类别', record.receiptCategory], ['登记人', record.operator], ['提交时间', time(record.createdAt)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || '—'}</dd></div>)}</dl>
         {record.allocations?.map(allocation => <section className="receipt-approval-allocation" key={allocation.orderId}>
-          <div className="receipt-approval-allocation-heading"><h3>{allocation.orderId}</h3><span>本次分配 <strong>{money(allocation.amount)}</strong></span></div>
+          <div className="receipt-approval-allocation-heading"><h3>{allocation.orderNumber||orderNumberForId(allocation.orderId,orders)}</h3><span>本次分配 <strong>{money(allocation.amount)}</strong></span></div>
           <ReceiptProductDetails items={allocation.items || []} source="snapshot"/>
         </section>)}
         {record.note && <section><h3>备注</h3><p className="order-detail-note">{record.note}</p></section>}
@@ -215,7 +216,7 @@ function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose}) {
   </DialogLayer>;
 }
 
-export default function ReceiptApprovalPanel({approvals, api, DialogLayer, Icon}) {
+export default function ReceiptApprovalPanel({approvals, api, DialogLayer, Icon, orders=[]}) {
   const [viewingId, setViewingId] = useState(null);
   const viewing = approvals.rows.find(row => row.id === viewingId);
   if (!approvals.config?.enabled && !approvals.rows.length && !approvals.error && !approvals.loading) return null;
@@ -225,9 +226,9 @@ export default function ReceiptApprovalPanel({approvals, api, DialogLayer, Icon}
       <div className="receipt-approval-panel-heading"><div><h2>收款审批{active > 0 && <span>{active} 笔处理中</span>}</h2><p>审批通过后入账，审批中的金额不计入下方收款流水。</p></div><button type="button" className="secondary" onClick={approvals.retry} disabled={approvals.loading}>刷新</button></div>
       {approvals.error && <p className="system-error" role="alert">{approvals.error} <button type="button" className="link-btn" onClick={approvals.retry}>重新加载</button></p>}
       <div className="table-scroll"><table className="data-table"><thead><tr>{['客户名称', '本次收款', '关联订单', '收款日期', '审批状态', '登记人', '操作'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{approvals.rows.map(record => <tr key={record.id}>
-        <td><span className="badge badge-blue">{record.customer}</span></td><td>{money(record.amount)}</td><td><span className="receipt-approval-orders">{(record.allocations || []).map(row => row.orderId).join('、')}</span></td><td>{record.receiptDate || '—'}</td><td><Status record={record}/></td><td>{record.operator || '—'}</td><td><button type="button" className="link-btn" aria-label={'查看收款审批 ' + record.id} onClick={() => setViewingId(record.id)}>查看详情</button></td>
+        <td><span className="badge badge-blue">{record.customer}</span></td><td>{money(record.amount)}</td><td><span className="receipt-approval-orders">{(record.allocations || []).map(row => row.orderNumber||orderNumberForId(row.orderId,orders)).join('、')}</span></td><td>{record.receiptDate || '—'}</td><td><Status record={record}/></td><td>{record.operator || '—'}</td><td><button type="button" className="link-btn" aria-label={'查看收款审批 ' + record.id} onClick={() => setViewingId(record.id)}>查看详情</button></td>
       </tr>)}</tbody></table>{!approvals.rows.length && !approvals.error && <div className="empty" role="status">{approvals.loading ? '正在读取收款审批…' : '暂无收款审批申请'}</div>}</div>
     </section>
-    {viewing && <ApprovalDetails key={viewing.id} record={viewing} api={api} approvals={approvals} DialogLayer={DialogLayer} Icon={Icon} onClose={() => setViewingId(null)}/>}
+    {viewing && <ApprovalDetails key={viewing.id} record={viewing} api={api} approvals={approvals} orders={orders} DialogLayer={DialogLayer} Icon={Icon} onClose={() => setViewingId(null)}/>}
   </>;
 }

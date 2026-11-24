@@ -346,7 +346,7 @@ public class FeishuSalesApprovalService {
         .put("uuid", UUID.randomUUID().toString()).put("openId", openId).put("createdAt", CrmRepository.now());
     record.set("form", form);
     record.set("orderSnapshot", order.deepCopy());
-    db.audit(actor.name(), "发起飞书" + order.path("type").asText() + "审批：" + orderId);
+    db.audit(actor.name(), "发起飞书" + order.path("type").asText() + "审批：" + OrderNumbers.display(order));
     return record;
   }
 
@@ -677,7 +677,7 @@ public class FeishuSalesApprovalService {
       current.put("status", completed ? result : "PENDING");
       if (completed) current.remove(List.of("cancelRequestedBy", "cancelAttempt", "cancelLeaseUntil"));
       store(current);
-      if (completed) db.audit("飞书审批", approvalAudit(result, order.path("type").asText()) + "：" + orderId);
+      if (completed) db.audit("飞书审批", approvalAudit(result, order.path("type").asText()) + "：" + OrderNumbers.display(order));
       return current;
     });
   }

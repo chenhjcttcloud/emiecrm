@@ -151,7 +151,7 @@ public class DashboardService {
       var keys = identities.getOrDefault(id, Set.of());
       if (keys.stream().anyMatch(usedIdentities::contains)) {
         excludedIds.add(id);
-        warnings.add("存在重复关联的聚水潭销售单，已排除订单 " + id + "，请核对关联；未按比例分摊补录总额。");
+        warnings.add("存在重复关联的聚水潭销售单，已排除订单 " + OrderNumbers.display(order) + "，请核对关联；未按比例分摊补录总额。");
       } else usedIdentities.addAll(keys);
     }
 
@@ -164,6 +164,7 @@ public class DashboardService {
     for (var order : candidates) {
       String id = order.path("id").asText();
       if (excludedIds.contains(id)) continue;
+      String orderNumber = OrderNumbers.display(order);
       String cid = customerId(order, customers, uniqueNames), signer = order.path("owner").asText();
       if (!owner.isEmpty() && !owner.equals(signer) || !requestedCustomer.isEmpty() && !requestedCustomer.equals(cid)) continue;
       boolean settlement = "jushuitan-settlement".equals(order.path("source").asText());
@@ -172,17 +173,17 @@ public class DashboardService {
         var start = date(order.path("settlement").path("periodStart").asText());
         var end = date(order.path("settlement").path("periodEnd").asText());
         if (start == null || end == null || end.isBefore(start)) {
-          warnings.add("结算订单 " + id + " 的所属期间无效，暂未计入。"); continue;
+          warnings.add("结算订单 " + orderNumber + " 的所属期间无效，暂未计入。"); continue;
         }
         if (!YearMonth.from(start).equals(YearMonth.from(end))) {
           if (!start.isAfter(period.atEndOfMonth()) && !end.isBefore(period.atDay(1)))
-            warnings.add("跨月结算订单 " + id + " 暂未计入，请拆分或核对所属月份；系统不平均分摊金额。");
+            warnings.add("跨月结算订单 " + orderNumber + " 暂未计入，请拆分或核对所属月份；系统不平均分摊金额。");
           continue;
         }
         businessDate = end;
         if (YearMonth.from(end).equals(period)) warnings.add("结算补录按所属期间归月，每日图表集中展示在结算期末日。");
       } else businessDate = date(order.path("created").asText());
-      if (businessDate == null) { warnings.add("订单 " + id + " 缺少有效创建日期，暂未计入。"); continue; }
+      if (businessDate == null) { warnings.add("订单 " + orderNumber + " 缺少有效创建日期，暂未计入。"); continue; }
       if (!YearMonth.from(businessDate).equals(period)) continue;
       var shipment = shipments.get(id);
       var effective = shipment == null ? order : shipment.path("effectiveOrder");
@@ -193,19 +194,20 @@ public class DashboardService {
         total = amount(totalNode);
         paid = amount(effective.hasNonNull("paid") ? effective.path("paid") : order.path("paid"));
         if (total.signum() < 0 || paid.signum() < 0) throw new IllegalArgumentException();
-      } catch (IllegalArgumentException error) { warnings.add("订单 " + id + " 的金额异常，暂未计入。"); continue; }
+      } catch (IllegalArgumentException error) { warnings.add("订单 " + orderNumber + " 的金额异常，暂未计入。"); continue; }
       if (shipment != null && "CANCELLED".equals(shipment.path("status").asText()))
-        warnings.add("订单 " + id + " 的发货已取消，取消发货不等于退款；业绩仍按 CRM 已生效金额统计，请核对。");
+        warnings.add("订单 " + orderNumber + " 的发货已取消，取消发货不等于退款；业绩仍按 CRM 已生效金额统计，请核对。");
       var outstanding = total.subtract(paid).max(ZERO);
       boolean settled = total.signum() > 0 && paid.compareTo(total) >= 0;
       if (settled) settledCount++;
       if (outstanding.signum() > 0) pendingCount++;
-      if (paid.compareTo(total) > 0) warnings.add("订单 " + id + " 的累计结算额超过有效订单金额，请核对。");
+      if (paid.compareTo(total) > 0) warnings.add("订单 " + orderNumber + " 的累计结算额超过有效订单金额，请核对。");
       orderAmount = orderAmount.add(total); settledAmount = settledAmount.add(paid); outstandingAmount = outstandingAmount.add(outstanding);
       String day = businessDate.toString();
       dailyAmounts.put(day, dailyAmounts.get(day).add(total)); dailyCounts.merge(day, 1, Integer::sum);
       var row = new LinkedHashMap<String, Object>();
       row.put("id", id); row.put("date", day); row.put("owner", signer); row.put("customerId", cid);
+      row.put("orderNumber", orderNumber);
       row.put("customer", customerName(order, cid, customers)); row.put("total", decimalText(total)); row.put("paid", decimalText(paid));
       row.put("outstanding", decimalText(outstanding)); row.put("settled", settled); row.put("source", order.path("source").asText());
       orderRows.add(row);
@@ -234,6 +236,7 @@ public class DashboardService {
       var row = new LinkedHashMap<String, Object>();
       row.put("id", receipt.path("id").asText()); row.put("date", registered.toString());
       row.put("order", receipt.path("order").asText()); row.put("customer", customerName(receipt, cid, customers));
+      row.put("orderNumber", origin == null ? receipt.path("order").asText() : OrderNumbers.display(origin));
       row.put("owner", signer); row.put("amount", decimalText(received)); row.put("method", receipt.path("method").asText());
       advanceRows.add(row);
     }

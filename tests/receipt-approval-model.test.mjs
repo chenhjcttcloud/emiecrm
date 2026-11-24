@@ -14,6 +14,14 @@ test('receipt allocations conserve cents and never mutate orders before approval
   assert.deepEqual(data,before);assert.deepEqual(request.allocations,[{orderId:'o1',amount:20.01},{orderId:'o2',amount:9.99}]);
   assert.equal(request.amount,30);assert.equal(request.revision,5);assert.equal(request.requestId,'stable-request');
 });
+test('receipt allocations always submit internal IDs when settlement orders have business numbers',()=>{
+  const data=input();
+  data.selected[0]={...data.selected[0],source:'jushuitan-settlement',orderNumber:'2026-11-00000001'};
+  const request=buildReceiptApprovalRequest(data);
+  assert.deepEqual(request.allocations,[{orderId:'o1',amount:20.01},{orderId:'o2',amount:9.99}]);
+  assert.equal(reservedReceiptOrderIds([{status:'PENDING',allocations:request.allocations}]).has('o1'),true);
+  assert.equal(reservedReceiptOrderIds([{status:'PENDING',allocations:request.allocations}]).has('2026-11-00000001'),false);
+});
 test('receipt approval prevents incomplete and inconsistent financial input',()=>{
   for(const change of [{amount:'30.001'},{amount:'29.99'},{payments:{o1:'100',o2:'1'}},{receiptDate:'2026-02-30'},
     {receiptCategory:'其他类别'},{customerId:'other'},{selected:[{...orders[0],status:'审批中'}]},

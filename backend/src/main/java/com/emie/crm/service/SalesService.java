@@ -154,7 +154,7 @@ public class SalesService {
     var start = date(order.path("settlement").path("periodStart").asText());
     var end = date(order.path("settlement").path("periodEnd").asText());
     if (start == null || end == null || end.isBefore(start) || !YearMonth.from(start).equals(YearMonth.from(end))) {
-      warnings.add("结算订单 " + order.path("id").asText() + " 的期间无效或跨月，未推算所属日期。");
+      warnings.add("结算订单 " + OrderNumbers.display(order) + " 的期间无效或跨月，未推算所属日期。");
       return null;
     }
     return end;
@@ -172,14 +172,15 @@ public class SalesService {
     for (var order : snapshot.orders().values()) {
       if (!activeOrder(order) || !"销售订单".equals(order.path("type").asText())) continue;
       String id = order.path("id").asText(), signer = order.path("owner").asText(), cid = customerId(order, snapshot);
+      String orderNumber = OrderNumbers.display(order);
       if (!owner.isEmpty() && !owner.equals(signer) || !selectedCustomer.isEmpty() && !selectedCustomer.equals(cid)) continue;
       var day = orderDate(order, warnings);
-      if (day == null) warnings.add("订单 " + id + " 缺少有效所属日期，未推算月份。");
+      if (day == null) warnings.add("订单 " + orderNumber + " 缺少有效所属日期，未推算月份。");
       if (period != null && (day == null || !YearMonth.from(day).equals(period))) continue;
       var effective = snapshot.effective().getOrDefault(id, order);
       var lines = effective.has("items") ? effective.path("items") : order.path("items");
       if (!lines.isArray() || lines.isEmpty()) {
-        warnings.add("订单 " + id + " 未记录逐商品成交明细，未虚构商品数量及单价。");
+        warnings.add("订单 " + orderNumber + " 未记录逐商品成交明细，未虚构商品数量及单价。");
         continue;
       }
       var rows = new ArrayList<Map<String, Object>>();
@@ -197,6 +198,7 @@ public class SalesService {
           var product = snapshot.products().get(productId);
           var row = new LinkedHashMap<String, Object>();
           row.put("id", id + ":" + position++); row.put("orderId", id); row.put("customerId", cid);
+          row.put("orderNumber", orderNumber);
           row.put("customer", customerName(order, cid, snapshot)); row.put("owner", signer);
           row.put("status", order.path("status").asText()); row.put("date", day == null ? null : day.toString());
           row.put("productId", productId);
@@ -213,7 +215,7 @@ public class SalesService {
         }
         var difference = total.subtract(sum);
         if (difference.abs().compareTo(new BigDecimal(rows.size()).movePointLeft(2)) > 0)
-          warnings.add("订单 " + id + " 的商品计算合计与执行总额存在差额，已从末行起分配，请核对折扣或费用。");
+          warnings.add("订单 " + orderNumber + " 的商品计算合计与执行总额存在差额，已从末行起分配，请核对折扣或费用。");
         // Apply rounding/discount residuals from the last line without ever creating negative line amounts.
         for (int index = rows.size() - 1; index >= 0 && difference.signum() != 0; index--) {
           var row = rows.get(index); var current = (BigDecimal) row.get("amount");
@@ -221,12 +223,12 @@ public class SalesService {
           row.put("amount", current.add(applied)); difference = difference.subtract(applied);
         }
         if (difference.signum() != 0) throw new IllegalArgumentException();
-      } catch (IllegalArgumentException error) { warnings.add("订单 " + id + " 商品数量、单价或执行金额异常，暂未展开。"); continue; }
+      } catch (IllegalArgumentException error) { warnings.add("订单 " + orderNumber + " 商品数量、单价或执行金额异常，暂未展开。"); continue; }
       for (var row : rows) {
         var lineAmount = (BigDecimal) row.get("amount");
         row.put("amount", money(lineAmount));
         row.put("profit", row.get("cost") == null ? null : money(lineAmount.subtract(new BigDecimal(row.get("cost").toString()))));
-        if (matches(query, row.get("orderId"), row.get("customer"), row.get("owner"), row.get("product"), row.get("productId"), row.get("code"), row.get("model"), row.get("barcode"), row.get("status"))) matched.add(row);
+        if (matches(query, row.get("orderId"), row.get("orderNumber"), row.get("customer"), row.get("owner"), row.get("product"), row.get("productId"), row.get("code"), row.get("model"), row.get("barcode"), row.get("status"))) matched.add(row);
       }
     }
     matched.sort(Comparator.<Map<String, Object>, String>comparing(row -> Objects.toString(row.get("date"), "")).reversed()
@@ -287,6 +289,7 @@ public class SalesService {
       String orderId = receipt.path("order").asText(), paymentMethod = receipt.path("method").asText();
       if (!paymentMethod.isBlank()) methods.add(paymentMethod);
       var origin = snapshot.orders().get(orderId);
+      String orderNumber = origin == null ? orderId : OrderNumbers.display(origin);
       String signer = origin == null ? "" : origin.path("owner").asText();
       // Historical cash and write-offs remain visible even when their source order is inactive.
       if (!signer.isBlank()) owners.add(signer);
@@ -314,7 +317,7 @@ public class SalesService {
       var groupedDate = date(receivedOn == null ? time : receivedOn);
       if (groupedDate == null) warnings.add("收款流水 " + receipt.path("id").asText() + " 的日期无效，未推算到账日期。");
       if (period != null && (groupedDate == null || !period.equals(YearMonth.from(groupedDate)))) continue;
-      if (!matches(query, receipt.path("id").asText(), orderId, customer, signer, receipt.path("operator").asText(), paymentMethod)) continue;
+      if (!matches(query, receipt.path("id").asText(), orderId, orderNumber, customer, signer, receipt.path("operator").asText(), paymentMethod)) continue;
       BigDecimal amount;
       try { amount = decimal(receipt.path("amount"), 2, true); }
       catch (IllegalArgumentException error) { warnings.add("收款流水 " + receipt.path("id").asText() + " 金额异常，暂未计入。"); continue; }
@@ -327,7 +330,7 @@ public class SalesService {
           var paid = paidNode.isMissingNode() || paidNode.isNull() ? ZERO : decimal(paidNode, 2, false);
           status = orderTotal.signum() > 0 && paid.compareTo(orderTotal) >= 0 ? "已回款" : paid.signum() > 0 ? "部分回款" : "待回款";
         } catch (IllegalArgumentException error) {
-          status = "待核对"; warnings.add("订单 " + orderId + " 的当前执行金额异常，回款状态待核对。");
+          status = "待核对"; warnings.add("订单 " + orderNumber + " 的当前执行金额异常，回款状态待核对。");
         }
       }
       BigDecimal tax = null;
@@ -341,6 +344,7 @@ public class SalesService {
       }
       var row = new LinkedHashMap<String, Object>();
       row.put("id", receipt.path("id").asText()); row.put("orderId", orderId); row.put("customerId", cid);
+      row.put("orderNumber", orderNumber);
       row.put("customer", customer); row.put("owner", signer); row.put("type", receipt.path("type").asText());
       row.put("amount", money(amount)); row.put("method", paymentMethod); row.put("receivedOn", receivedOn); row.put("time", time);
       row.put("operator", receipt.path("operator").asText());

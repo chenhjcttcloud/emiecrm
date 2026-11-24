@@ -1,14 +1,15 @@
 import React,{useEffect,useRef,useState} from 'react';
 import Pagination from './Pagination';
 import {dashboardMoney,dashboardTime} from './dashboardModel';
-import {csvCell} from './csv';
 import {ReceiptDetailDrawer} from './ReceiptProductDetails';
-import {productSummary,productDetailsText,productSourceLabel} from './receiptProductModel';
+import {productSummary} from './receiptProductModel';
+import {orderNumberForId} from './orderNumber';
+import {receiptLedgerCsv} from './receiptLedgerExport';
 import './sales.css';
 import './salesReceipts.css';
 
 const emptyFilters={month:'',owner:'',customerId:'',method:''};
-export default function ReceiptLedger({api,Icon,DialogLayer,revision,onOpenOrder}){
+export default function ReceiptLedger({api,Icon,DialogLayer,revision,onOpenOrder,orders=[]}){
  const[filters,setFilters]=useState(emptyFilters),[query,setQuery]=useState(''),[search,setSearch]=useState(''),[page,setPage]=useState(1),[pageSize,setPageSize]=useState(20),[reload,setReload]=useState(0);
  const[state,setState]=useState({key:'',loading:true,data:null,error:''}),[options,setOptions]=useState({owners:[],customers:[],methods:[]});
  const generation=useRef(0);
@@ -35,8 +36,7 @@ export default function ReceiptLedger({api,Icon,DialogLayer,revision,onOpenOrder
  function reset(){setQuery('');setPage(1);setFilters({...emptyFilters})}
  const filtered=Boolean(query||Object.values(filters).some(Boolean));
  function downloadRows(rows,suffix){
-  const table=[['订单编号','客户名称','签单人','订单当前回款状态','流水类型','收款方式','收款金额','税率（原始记录）','税额','订单日期','实际到账日期','登记时间','操作人','产品资料来源','产品明细'],...rows.map(row=>[row.orderId,row.customer,row.owner,row.status,row.type,row.method,row.amount,row.taxRate??'',row.tax??'',row.orderDate??'',row.receivedOn??'',dashboardTime(row.time),row.operator,productSourceLabel(row.itemsSource),productDetailsText(row.items)])];
-  const content='\uFEFF'+table.map(row=>row.map(csvCell).join(',')).join('\r\n');
+  const content=receiptLedgerCsv(rows,orders);
   const url=URL.createObjectURL(new Blob([content],{type:'text/csv;charset=utf-8'}));
   const link=document.createElement('a');link.href=url;link.download='收款流水-'+(filters.month||'全部月份')+'-'+suffix+'.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
  }
@@ -56,7 +56,7 @@ export default function ReceiptLedger({api,Icon,DialogLayer,revision,onOpenOrder
  }
  const exportError=exportState.key===exportKey?exportState.error:'';
  return <div className="receipt-ledger sales-page sales-receipts">
-  <ReceiptDetailDrawer receipt={detail} DialogLayer={DialogLayer} Icon={Icon} onClose={()=>setDetail(null)}/>
+  <ReceiptDetailDrawer receipt={detail} orders={orders} DialogLayer={DialogLayer} Icon={Icon} onClose={()=>setDetail(null)}/>
   <section className="sales-toolbar" aria-label="收款明细筛选"><div className="sales-toolbar-controls">
    <label className="sales-search-control"><Icon name="search" size={16}/><input aria-label="搜索收款流水" maxLength={200} value={query} onChange={e=>{setQuery(e.target.value);setPage(1)}} placeholder="搜索订单、客户、签单人或操作人"/></label>
    <label className="sales-inline-control sales-month-filter"><span>收款月</span><input aria-label="收款明细月份" type="month" min="2000-01" max="9999-12" value={filters.month} onChange={e=>{if(!e.target.value||/^\d{4}-(0[1-9]|1[0-2])$/.test(e.target.value))change('month',e.target.value)}}/>{filters.month&&<button type="button" className="sales-clear-control" aria-label="清除收款月份" onClick={()=>change('month','')}><Icon name="close" size={12}/></button>}</label>
@@ -68,7 +68,7 @@ export default function ReceiptLedger({api,Icon,DialogLayer,revision,onOpenOrder
   <section className="panel sales-list-panel" aria-label="收款流水"><div className="sales-list-heading"><span>收款流水 <small>汇总覆盖全部匹配结果，审批中的申请不计入</small></span><div className="receipt-ledger-export-actions"><button type="button" className="sales-quiet-button" disabled={loading||exportState.busy||Boolean(error)||!data?.rows.length} onClick={exportPage}><Icon name="export" size={15}/>导出本页</button><button type="button" className="sales-quiet-button" disabled={loading||exportState.busy||Boolean(error)||!data?.total} onClick={exportAll}><Icon name="export" size={15}/>{exportState.busy?'正在导出…':'导出全部匹配'}</button></div></div>
    {exportError&&<div className="sales-list-state is-error" role="alert">{exportError}</div>}
    <div className="table-scroll"><table className="sales-receipts-table"><thead><tr>{['订单编号','客户名称','签单人','订单当前回款状态','流水类型','收款方式','收款金额','税率（原记录）','税额','订单日期','实际到账日期','登记时间','操作人','产品明细','操作'].map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{data?.rows.map(row=><tr key={row.id}>
-    <td>{row.orderId&&row.status!=='未关联订单'&&onOpenOrder?<button type="button" className="sales-order-link" onClick={()=>onOpenOrder(row.orderId)}>{row.orderId}</button>:row.orderId||'—'}</td><td>{row.customer||'—'}</td><td>{row.owner||'—'}</td>
+    <td>{row.orderId&&row.status!=='未关联订单'&&onOpenOrder?<button type="button" className="sales-order-link" onClick={()=>onOpenOrder(row.orderId)}>{row.orderNumber||orderNumberForId(row.orderId,orders)}</button>:row.orderNumber||orderNumberForId(row.orderId||row.order,orders)||'—'}</td><td>{row.customer||'—'}</td><td>{row.owner||'—'}</td>
     <td><span className={'sales-status '+(row.status==='已回款'?'is-approved':'')}>{row.status||'待核对'}</span></td><td>{row.type==='预收款订单'?'预收款':row.type||'—'}</td><td>{row.method||'—'}</td><td className={'sales-number sales-total'+(Number(row.amount)<0?' sales-refund':'')}>{dashboardMoney(row.amount)}</td><td>{row.taxRate??'—'}</td><td className="sales-number">{dashboardMoney(row.tax)}</td><td>{row.orderDate||'—'}</td><td>{row.receivedOn||'—'}</td><td>{dashboardTime(row.time)}</td><td>{row.operator||'—'}</td><td><span className="receipt-products-summary">{productSummary(row.items)}</span></td><td><button type="button" className="sales-order-link" aria-label={'查看收款详情 '+row.id} onClick={()=>setDetail(row)}>查看详情</button></td>
    </tr>)}</tbody></table></div>
    {(loading||error||!data?.rows.length)&&<div className={'sales-list-state'+(error?' is-error':'')} role={error?'alert':'status'}>{loading?'正在加载收款流水…':error||'暂无符合条件的收款记录'}{error&&<button type="button" className="sales-quiet-button" onClick={()=>setReload(value=>value+1)}>重新加载</button>}</div>}

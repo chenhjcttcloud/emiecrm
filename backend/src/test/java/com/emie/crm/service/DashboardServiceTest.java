@@ -114,6 +114,31 @@ class DashboardServiceTest {
     money("0", report.path("daily").get(0).path("amount"));
   }
 
+  @Test void businessNumbersAreDisplayedWithoutChangingDashboardOrderOrReceiptLinks() {
+    order("stable-id", "2026-11-02", "30", "0").put("orderNumber", "2026-11-00000001");
+    order("advance-id", "2026-11-02", "20", "0").put("type", "预收款订单").put("orderNumber", "2026-11-00000002");
+    receipt("cash-id", "advance-id", "预收款订单", "12", "银行转账", "2026-11-03T01:00:00Z");
+    var original = state.deepCopy();
+    var report = sales();
+    var row = report.path("orders").get(0);
+    assertEquals("stable-id", row.path("id").asText());
+    assertEquals("2026-11-00000001", row.path("orderNumber").asText());
+    var receipt = report.path("advanceReceipts").get(0);
+    assertEquals("cash-id", receipt.path("id").asText());
+    assertEquals("advance-id", receipt.path("order").asText());
+    assertEquals("2026-11-00000002", receipt.path("orderNumber").asText());
+    assertEquals(original, state);
+  }
+
+  @Test void invalidSettlementWarningsIdentifyTheBusinessNumber() {
+    var settlement = order("hidden-internal-id", "2026-11-02", "30", "0")
+        .put("source", "jushuitan-settlement").put("orderNumber", "2026-11-00000001");
+    settlement.putObject("settlement").put("periodStart", "invalid").put("periodEnd", "2026-11-02");
+    String warnings = sales().path("warnings").toString();
+    assertTrue(warnings.contains("2026-11-00000001"));
+    assertFalse(warnings.contains("hidden-internal-id"));
+  }
+
   @Test void inactiveOrdersDoNotContributeSalesButHistoricalAdvanceCashIsPreserved() {
     order("active", "2026-11-02", "30", "0");
     order("canceled", "2026-11-02", "90", "0").put("status", "已取消").put("owner", "已取消无流水");

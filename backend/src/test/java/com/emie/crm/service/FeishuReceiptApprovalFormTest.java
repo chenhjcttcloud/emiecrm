@@ -73,6 +73,16 @@ class FeishuReceiptApprovalFormTest {
     assertFalse(form.toString().contains("cost"));
   }
 
+  @Test void receiptProjectUsesTheFrozenBusinessNumberWithoutChangingItsAllocationId() {
+    ((ObjectNode) allocation(0).path("orderSnapshot")).put("id", "order-1").put("orderNumber", "2026-11-00000001");
+    var original = batch.deepCopy();
+    String project = field(build(), "project").path("value").asText();
+    assertTrue(project.contains("订单：2026-11-00000001 | 本次收款：200.00"));
+    assertTrue(project.contains("内部记录ID：order-1"));
+    assertTrue(project.contains("订单：order-2 | 本次收款：100.00"));
+    assertEquals(original, batch);
+  }
+
   @Test void usesTheBoundReceiptOperatorAndNeverUsesANominatedContactFromTheBatch() {
     batch.put("ownerOpenId", "ou_forged");
     var form = build();

@@ -2,6 +2,7 @@ import JushuitanExternalDifference from './JushuitanExternalDifference';
 import JushuitanAuthorization from './JushuitanAuthorization';
 import React,{useState,useEffect} from 'react';
 import {orderTotal} from './orderMoney';
+import {orderNumber} from './orderNumber';
 import {shippingWarehouseId} from './feishuApprovalModel';
 
 const labels={SUBMITTING:'提交中',UNKNOWN:'待核对',FAILED:'提交失败',ACCEPTED:'待发货',PARTIAL:'部分发货',SHIPPED:'已发货',EXCEPTION:'聚水潭异常',CANCELLED:'已取消'};
@@ -82,7 +83,7 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
    setBusy(false);
   }
  }
- async function exportExternal(){if(busy)return;setBusy(true);setError('');try{const history=await api('jst/orders/'+encodeURIComponent(order.id)+'/external/history');const url=URL.createObjectURL(new Blob([JSON.stringify(history,null,2)],{type:'application/json;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download=order.id.replace(/[^a-zA-Z0-9_-]/g,'_')+'-聚水潭变更记录.json';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){setError(e.message)}finally{setBusy(false)}}
+ async function exportExternal(){if(busy)return;setBusy(true);setError('');try{const history=await api('jst/orders/'+encodeURIComponent(order.id)+'/external/history');const url=URL.createObjectURL(new Blob([JSON.stringify(history,null,2)],{type:'application/json;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download=orderNumber(order).replace(/[^a-zA-Z0-9_-]/g,'_')+'-聚水潭变更记录.json';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){setError(e.message)}finally{setBusy(false)}}
  async function confirmExternal(body){if(busy)return;setBusy(true);setError('');try{onUpdate(await api('jst/orders/'+encodeURIComponent(order.id)+'/external/confirm',body))}catch(e){setError(e.message);try{onUpdate(await api('jst/orders/'+encodeURIComponent(order.id)+'/sync',{}))}catch{}}finally{setBusy(false)}}
  async function continueAmend(abandon=false){if(busy)return;setBusy(true);setError('');try{onUpdate(await api('jst/orders/'+encodeURIComponent(order.id)+'/amend/continue',{...settlement,abandon}));setSettlement({amount:'',method:'',reference:''})}catch(e){setError(e.message)}finally{setBusy(false)}}
  async function change(e){e.preventDefault();if(busy)return;if(changeKind==='CANCEL'&&!window.confirm('确认取消聚水潭发货订单？取消后不会自动退款，也不会自动创建新发货单。'))return;setBusy(true);setError('');try{const r=await api('jst/orders/'+encodeURIComponent(order.id)+'/change',{kind:changeKind,version:changeVersion,reason,remark,recipient:form.recipient});onUpdate(r);setChangeKind('');if(r.change?.status!=='CONFIRMED')setError(r.change?.message||'变更待核对')}catch(e){setError(e.message)}finally{setBusy(false)}}
@@ -92,10 +93,10 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
  return <DialogLayer open={!!order} onClose={()=>{if(!busy)onClose()}} kind="drawer" label="提交发货与物流进度"><form className="drawer" onClick={e=>e.stopPropagation()} onSubmit={replacing?amend:changeKind?change:submit}><div className="modal-title"><h2>发货与物流进度</h2><button type="button" disabled={busy} onClick={onClose} aria-label="关闭">×</button></div><div className="modal-body jst-form">
  <p className="jst-environment">{config?.environment==='production'?'正式环境 · 提交后将进入聚水潭仓库流程':'测试环境 · 仅用于联调，禁止实际投递'}</p>
  <JushuitanAuthorization authorization={config?.authorization}/>
- <JushuitanExternalDifference record={record} busy={busy} canWrite={canWrite} canSettle={canSettle} paymentMethods={paymentMethods} onConfirm={confirmExternal} onExport={exportExternal}/>
+ <JushuitanExternalDifference order={order} record={record} busy={busy} canWrite={canWrite} canSettle={canSettle} paymentMethods={paymentMethods} onConfirm={confirmExternal} onExport={exportExternal}/>
  {config?.configured&&!config?.uploadsEnabled&&<p role="status">当前为只读连接，订单推送尚未开启。</p>}
  {!config?.configured&&<p role="alert">尚未配置云端服务，请联系管理员。</p>}
- <div className="read-field">CRM订单<p>{order.id} · {order.customer}</p><small>原订单金额 ¥ {Number(order.total).toFixed(2)} · 原单已收 ¥ {Number(order.paid||0).toFixed(2)}{record?.effectiveOrder&&<> · 当前执行金额 ¥ {Number(shippingOrder.total).toFixed(2)}</>}</small></div>
+ <div className="read-field">CRM订单<p>{orderNumber(order)} · {order.customer}</p><small>原订单金额 ¥ {Number(order.total).toFixed(2)} · 原单已收 ¥ {Number(order.paid||0).toFixed(2)}{record?.effectiveOrder&&<> · 当前执行金额 ¥ {Number(shippingOrder.total).toFixed(2)}</>}</small></div>
  <p>批准且全额收款的销售订单可提交。提交后可在此变更收件信息、发货备注或取消发货。商品、数量和金额通过关联变更单处理；原订单及收款记录保留。账期发货暂未支持。</p>
  {record&&<section className="jst-progress"><strong>{shipmentLabel(record)}</strong><p>{record.message}</p>{record.syncError&&<p role="alert">{record.syncError}（保留上次状态）</p>}<small>聚水潭订单号：{record.soId}<br/>内部单号：{record.oId||'待回传'}<br/>最后同步：{record.lastSyncedAt?new Date(record.lastSyncedAt).toLocaleString():'尚未同步'}</small></section>}
  {record?.change&&<section className="jst-progress" role="status"><strong>订单变更 · {{PENDING:'待核对',UNKNOWN:'结果待核对',CONFIRMED:'已生效',REJECTED:'已拒绝'}[record.change.status]||record.change.status}</strong><p>{record.change.message}</p><small>操作人：{record.change.operator} · 原因：{record.change.reason}</small></section>}

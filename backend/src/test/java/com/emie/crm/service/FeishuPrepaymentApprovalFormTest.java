@@ -70,6 +70,15 @@ class FeishuPrepaymentApprovalFormTest {
     assertTrue(field(form, "note").path("value").asText().contains("不代表已登记实际收款"));
   }
 
+  @Test void businessNumberOnlyChangesTheVisibleProjectReference() {
+    order.put("orderNumber", "2026-11-00000001");
+    var original = order.deepCopy();
+    String project = field(build(), "project").path("value").asText();
+    assertTrue(project.contains("CRM 订单：2026-11-00000001"));
+    assertTrue(project.contains("内部记录ID：deposit-1"));
+    assertEquals(original, order);
+  }
+
   @Test void ignoresClientSuppliedMoneyCustomerAndOwnerInFavorOfSavedOrderAndBinding() {
     input.put("total", 999).put("customer", "伪造客户").put("ownerOpenId", "ou_forged");
     var form = build();

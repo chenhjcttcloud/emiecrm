@@ -99,6 +99,8 @@ class FeishuSettlementApprovalDatabaseTest {
     assertEquals("QUEUED", response.path("approval").path("status").asText());
     assertEquals("审批中", currentOrder().path("status").asText());
     assertEquals("jushuitan-settlement", currentOrder().path("source").asText());
+    assertTrue(currentOrder().path("orderNumber").asText().matches("[0-9]{4}-[0-9]{2}-00000001"));
+    assertEquals(orderId, currentOrder().path("id").asText());
     assertTrue(currentOrder().path("items").isEmpty());
     assertEquals(1, count("jst_document_sales"));
     assertEquals(1, count("feishu_order_approvals"));
@@ -148,6 +150,7 @@ class FeishuSettlementApprovalDatabaseTest {
     var second = settlements.create(input.deepCopy(), writer);
     assertEquals(id, second.path("approval").path("orderId").asText());
     assertEquals(uuid, record(id).path("uuid").asText());
+    assertEquals(first.path("state").path("orders").get(0).path("orderNumber"), second.path("state").path("orders").get(0).path("orderNumber"));
     assertEquals(frozenState, db.state(false));
     assertEquals(1, db.state(false).path("orders").size());
     assertEquals(1, count("jst_document_sales"));
@@ -197,6 +200,140 @@ class FeishuSettlementApprovalDatabaseTest {
     assertThrows(ApiException.class, () -> new TransactionTemplate(manager).executeWithoutResult(tx -> business.save(input, writer)));
     assertEquals(before, db.state(false));
     assertEquals(0, count("feishu_order_approvals"));
+  }
+
+  @Test void backfillIsIdempotentAndDoesNotRewriteApprovalOrErpReferences() throws Exception {
+    seedLegacy("审批中");
+    String id=currentOrder().path("id").asText();
+    approvals.submit(id,mapper.createObjectNode(),writer);
+    var approval=record(id).deepCopy();
+    var original=currentOrder().deepCopy();
+    String links=jdbc.queryForObject("SELECT sale_metadata FROM jst_document_sales WHERE order_id=?",String.class,id);
+    long revision=db.state(false).path("revision").asLong();
+    var migration=new SettlementOrderNumberMigration(db,manager);
+    migration.run(null);
+    String number=currentOrder().path("orderNumber").asText();
+    assertTrue(number.matches("[0-9]{4}-[0-9]{2}-00000001"));
+    var migrated=currentOrder().deepCopy();migrated.remove("orderNumber");
+    assertEquals(original,migrated);
+    assertEquals(approval,record(id));
+    assertEquals(links,jdbc.queryForObject("SELECT sale_metadata FROM jst_document_sales WHERE order_id=?",String.class,id));
+    assertEquals(revision+1,db.state(false).path("revision").asLong());
+    var saved=db.state(false).deepCopy();int audits=count("audit");
+    migration.run(null);
+    assertEquals(saved,db.state(false));assertEquals(audits,count("audit"));
+    var next=request();next.withArray("sales").removeAll().addObject().put("shopId","7").put("oId","12");
+    var response=settlements.create(next,writer);
+    assertTrue(response.path("state").path("orders").get(0).path("orderNumber").asText().endsWith("00000002"));
+    assertEquals(id,response.path("state").path("orders").get(1).path("id").asText());
+  }
+
+  @Test void numberedSettlementCannotBeRenumberedByAnOrdinaryStateSave() throws Exception {
+    settlements.create(request(),writer);
+    var before=db.state(false).deepCopy();
+    for(boolean remove:new boolean[]{false,true}) {
+      var body=stateBody();var order=(ObjectNode)body.path("data").path("orders").get(0);
+      if(remove) order.remove("orderNumber");else order.put("orderNumber","2026-11-99999999");
+      assertThrows(ApiException.class,()->new TransactionTemplate(manager).executeWithoutResult(tx->business.save(body,writer)));
+      assertEquals(before,db.state(false));
+    }
+    var body=stateBody();((ObjectNode)body.path("data").path("orders").get(0)).put("note","补充说明");
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(body,writer));
+    assertEquals(before.path("orders").get(0).path("orderNumber"),currentOrder().path("orderNumber"));
+  }
+
+  @Test void restoringABackupWithoutTheNewFieldRetainsThePersistedBusinessNumber() throws Exception {
+    seedLegacy("审批中");
+    new SettlementOrderNumberMigration(db,manager).run(null);
+    var assets=mock(AssetService.class);when(assets.backup(any())).thenReturn(java.util.Map.of());
+    var withAssets=new BusinessService(db,assets);
+    ObjectNode backup=mapper.valueToTree(withAssets.backup());
+    String id=currentOrder().path("id").asText(),number=currentOrder().path("orderNumber").asText();
+    ((ObjectNode)backup.path("state").path("orders").get(0)).remove("orderNumber");
+    new TransactionTemplate(manager).executeWithoutResult(tx->withAssets.restore(backup,writer));
+    assertEquals(id,currentOrder().path("id").asText());assertEquals(number,currentOrder().path("orderNumber").asText());
+    assertEquals(1,count("jst_document_sales"));
+  }
+
+  @Test void concurrentDistinctRequestsHaveUniqueConsecutiveBusinessNumbers() throws Exception {
+    var first=request();var second=request().put("approvalRequestId","c663f2ed-a039-46f3-9bd6-556a5b5a3bb8");
+    second.withArray("sales").removeAll().addObject().put("shopId","7").put("oId","12");
+    try(var pool=java.util.concurrent.Executors.newFixedThreadPool(2)) {
+      var start=new java.util.concurrent.CountDownLatch(1);
+      var a=pool.submit(()->{start.await();return settlements.create(first,writer);});
+      var b=pool.submit(()->{start.await();return settlements.create(second,writer);});
+      start.countDown();a.get(20,java.util.concurrent.TimeUnit.SECONDS);b.get(20,java.util.concurrent.TimeUnit.SECONDS);
+    }
+    var numbers=new java.util.HashSet<String>();
+    for(var order:db.state(false).path("orders")) numbers.add(order.path("orderNumber").asText());
+    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
+    assertEquals(Set.of(prefix+"00000001",prefix+"00000002"),numbers);
+    assertEquals(2,count("feishu_order_approvals"));assertEquals(2,count("jst_document_sales"));
+  }
+
+  @Test void ordinaryOrdersAndSupplementsUseOneSharedNumberSequence() throws Exception {
+    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000006"),writer));
+    var first=settlements.create(request(),writer);
+    assertEquals(prefix+"00000007",first.path("state").path("orders").get(0).path("orderNumber").asText());
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000008"),writer));
+    var second=request().put("approvalRequestId","42144215-6dfe-4987-8e9b-fc90da4fb346");
+    second.withArray("sales").removeAll().addObject().put("shopId","7").put("oId","12");
+    settlements.create(second,writer);
+    var numbers=new java.util.HashSet<String>();
+    for(var order:db.state(false).path("orders")) numbers.add(OrderNumbers.display(order));
+    assertEquals(Set.of(prefix+"00000006",prefix+"00000007",prefix+"00000008",prefix+"00000009"),numbers);
+  }
+
+  @Test void anOrdinaryOrderCannotUseAnAlreadyAssignedSupplementNumber() throws Exception {
+    settlements.create(request(),writer);
+    String number=currentOrder().path("orderNumber").asText();var before=db.state(false).deepCopy();
+    assertEquals(409,assertThrows(ApiException.class,()->new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(number),writer))).status());
+    assertEquals(before,db.state(false));
+  }
+
+  @Test void concurrentOrdinaryAndSupplementCreationCannotCommitTheSameNumber() throws Exception {
+    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000006"),writer));
+    var ordinary=ordinaryBody(prefix+"00000007");
+    int ordinaryStatus;
+    try(var pool=Executors.newFixedThreadPool(2)) {
+      var start=new CountDownLatch(1);
+      var a=pool.submit(()->{
+        start.await();
+        try {new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinary,writer));return 200;}
+        catch(ApiException error) {return error.status();}
+      });
+      var b=pool.submit(()->{start.await();return settlements.create(request(),writer);});
+      start.countDown();ordinaryStatus=a.get(20,TimeUnit.SECONDS);b.get(20,TimeUnit.SECONDS);
+    }
+    assertTrue(ordinaryStatus==200||ordinaryStatus==409);
+    if(ordinaryStatus==409) new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000008"),writer));
+    var numbers=new java.util.HashSet<String>();
+    for(var order:db.state(false).path("orders")) assertTrue(numbers.add(OrderNumbers.display(order)));
+    assertEquals(Set.of(prefix+"00000006",prefix+"00000007",prefix+"00000008"),numbers);
+  }
+
+  @Test void obsoleteSeparateNumbersMigrateWithoutRewritingAnExistingExternalApproval() throws Exception {
+    seedLegacy("审批中");
+    var state=(ObjectNode)db.state(false);((ObjectNode)state.path("orders").get(0)).put("orderNumber","JS-2026-11-00000001");
+    state.withArray("orders").add(FeishuApprovalFixtures.order().put("id","2026-11-00000006").put("status","草稿"));db.state(state);
+    approvals.submit("JS-legacy",mapper.createObjectNode(),writer);
+    var snapshot=record("JS-legacy").deepCopy();
+    new SettlementOrderNumberMigration(db,manager).run(null);
+    assertEquals("2026-11-00000007",currentOrder().path("orderNumber").asText());
+    assertEquals(snapshot,record("JS-legacy"));
+    assertEquals("JS-legacy",currentOrder().path("id").asText());
+  }
+
+  private ObjectNode ordinaryBody(String id) {
+    var body=stateBody();
+    var order=mapper.createObjectNode().put("id",id).put("type","销售订单").put("status","草稿")
+        .put("customerId","c1").put("customer","隔离测试客户").put("owner","销售员").put("total",24).put("paid",0)
+        .put("created",CrmRepository.now());
+    order.putArray("items").addObject().put("product","p1").put("qty",2).put("price",12);
+    ((ObjectNode)body.path("data")).withArray("orders").add(order);
+    return body;
   }
 
   @ParameterizedTest @ValueSource(strings={"APPROVED", "REJECTED", "CANCELED", "DELETED"})

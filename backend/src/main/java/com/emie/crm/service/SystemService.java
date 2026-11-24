@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@org.springframework.core.annotation.Order(0)
 public class SystemService implements ApplicationRunner {
   public static final Map<String, String> PERMISSIONS;
 

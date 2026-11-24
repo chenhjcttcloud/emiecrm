@@ -5,6 +5,7 @@ import {customerOptions} from './customerOptions';
 import {moneyCents} from './orderMoney';
 import {recordId} from './recordId';
 import {orderExecutionView} from './feishuApprovalModel';
+import {orderNumber} from './orderNumber';
 import ReceiptApprovalPanel from './ReceiptApprovals';
 import {buildDirectReceiptChange,buildReceiptApprovalRequest,receiptApprovalLabels,receiptApprovalProblem,receiptPaymentMethods,reservedReceiptOrderIds} from './receiptApprovalModel';
 import ReceiptProductDetails from './ReceiptProductDetails';
@@ -95,11 +96,11 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
       <div className="field"><span>客户 <em>*</em></span><PaymentMethodPicker label="客户" options={customerOptions(db.customers)} value={customer} disabled={formLocked} onChange={value=>{setCustomer(value);setPayments({});setReceived('');setExpandedOrder(null);setFormError('')}}/></div>
       <p className="form-hint">勾选已批准且未结清的订单，填写每笔订单本次付款金额。已有未完成收款审批的订单暂不能重复申请。</p>
       <div className="table-scroll"><table className="receipt-selection"><thead><tr>{['选择','订单编号','产品明细','订单总金额','已付金额','未收金额','本次付款'].map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{customerOrders.map(order=><React.Fragment key={order.id}><tr className={reserved.has(order.id)?'receipt-reserved-order':''}>
-        <td><input type="checkbox" aria-label={'选择订单 '+order.id} disabled={formLocked||reserved.has(order.id)} checked={Object.hasOwn(payments,order.id)} onChange={event=>setPayments(previous=>{const next={...previous};if(event.target.checked)next[order.id]='';else delete next[order.id];return next})}/></td>
-        <td>{order.id}<small>{order.type}</small>{reserved.has(order.id)&&<small className="receipt-reserved-label">已有未完成的收款审批</small>}</td>
-        <td><span className="receipt-products-summary">{productSummary(itemsFromOrder(order,db.products))}</span><button type="button" className="link-btn receipt-order-products-toggle" aria-label={'查看订单产品 '+order.id} aria-expanded={expandedOrder===order.id} aria-controls={'receipt-products-'+encodeURIComponent(order.id)} onClick={()=>setExpandedOrder(previous=>previous===order.id?null:order.id)}>{expandedOrder===order.id?'收起产品明细':'查看产品明细'}</button></td>
+        <td><input type="checkbox" aria-label={'选择订单 '+orderNumber(order)} disabled={formLocked||reserved.has(order.id)} checked={Object.hasOwn(payments,order.id)} onChange={event=>setPayments(previous=>{const next={...previous};if(event.target.checked)next[order.id]='';else delete next[order.id];return next})}/></td>
+        <td>{orderNumber(order)}<small>{order.type}</small>{reserved.has(order.id)&&<small className="receipt-reserved-label">已有未完成的收款审批</small>}</td>
+        <td><span className="receipt-products-summary">{productSummary(itemsFromOrder(order,db.products))}</span><button type="button" className="link-btn receipt-order-products-toggle" aria-label={'查看订单产品 '+orderNumber(order)} aria-expanded={expandedOrder===order.id} aria-controls={'receipt-products-'+encodeURIComponent(order.id)} onClick={()=>setExpandedOrder(previous=>previous===order.id?null:order.id)}>{expandedOrder===order.id?'收起产品明细':'查看产品明细'}</button></td>
         <td>{money(order.total)}</td><td>{money(order.paid)}</td><td>{money((cents(order.total)-cents(order.paid))/100)}</td>
-        <td><input aria-label={order.id+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(order.total)-cents(order.paid))/100).toFixed(2)} required disabled={formLocked||reserved.has(order.id)||!Object.hasOwn(payments,order.id)} placeholder="请输入金额" value={payments[order.id]??''} onChange={event=>setPayments(previous=>({...previous,[order.id]:event.target.value}))}/></td>
+        <td><input aria-label={orderNumber(order)+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(order.total)-cents(order.paid))/100).toFixed(2)} required disabled={formLocked||reserved.has(order.id)||!Object.hasOwn(payments,order.id)} placeholder="请输入金额" value={payments[order.id]??''} onChange={event=>setPayments(previous=>({...previous,[order.id]:event.target.value}))}/></td>
       </tr>{expandedOrder===order.id&&<tr className="receipt-order-product-row"><td colSpan={7}><div id={'receipt-products-'+encodeURIComponent(order.id)}><ReceiptProductDetails items={itemsFromOrder(order,db.products)}/></div></td></tr>}</React.Fragment>)}</tbody></table>{!customerOrders.length&&<div className="empty">{customer?'该客户暂无已批准且未结清的订单':'请先选择客户'}</div>}</div>
       <div className="receipt-totals">{[['所选订单总金额',totals.total],['已付金额',totals.paid],['未收金额',totals.unpaid],['本次付款合计',totals.payment]].map(([label,value])=><div key={label}><span>{label}</span><strong>{money(value/100)}</strong></div>)}</div>
       <div className="receipt-payment-row"><div className="field"><span>收款方式 <em>*</em></span><PaymentMethodPicker options={methods} value={payMethod} onChange={setPayMethod} disabled={formLocked}/></div><label className="field"><span>{payMethod==='预收款核销'?'本次核销金额':'实际收款金额'} <em>*</em></span><input aria-label="实际收款金额" type="number" min="0.01" step="0.01" required disabled={formLocked} placeholder="请输入金额" value={received} onChange={event=>{setReceived(event.target.value);setFormError('')}}/></label></div>
@@ -117,8 +118,8 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
   return <>
     <div className="page-heading"><div><div className="breadcrumb">业务管理 <span>/</span> 收款管理 <span>/</span> 收款</div><h1>收款</h1><p>统一登记收款、跟踪审批，筛选并核对已入账流水。</p></div><button type="button" className="primary" disabled={!canRegister||(!submission.current&&Boolean(problem))} title={problem||undefined} onClick={openEntry}><Icon name="plus" size={17}/>{submission.current?'继续核对收款申请':'新建收款'}</button></div>
     {feedback&&<p className="receipt-approval-feedback" role="status">{feedback}</p>}
-    <ReceiptApprovalPanel approvals={approvals} api={api} DialogLayer={DialogLayer} Icon={Icon}/>
+    <ReceiptApprovalPanel approvals={approvals} api={api} orders={db.orders} DialogLayer={DialogLayer} Icon={Icon}/>
     {receiptForm}
-    <ReceiptLedger api={api} Icon={Icon} DialogLayer={DialogLayer} revision={db.revision} onOpenOrder={onOpenOrder}/>
+    <ReceiptLedger api={api} orders={db.orders} Icon={Icon} DialogLayer={DialogLayer} revision={db.revision} onOpenOrder={onOpenOrder}/>
   </>;
 }

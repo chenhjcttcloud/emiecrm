@@ -105,8 +105,11 @@ final class FeishuPrepaymentApprovalForm {
   }
 
   private static String project(JsonNode order, JsonNode products, BigDecimal total) {
+    String id = text(order.path("id"), "订单编号", 191);
     var text = new StringBuilder("预收款申请\nCRM 订单：")
-        .append(text(order.path("id"), "订单编号", 191)).append("\n签单人：")
+        .append(OrderNumbers.display(order));
+    if (!OrderNumbers.display(order).equals(id)) text.append("\n内部记录ID：").append(id);
+    text.append("\n签单人：")
         .append(text(order.path("owner"), "签单人", 100)).append("\n预收款金额：")
         .append(total.setScale(2).toPlainString()).append(" 元（独立于商品合计）");
     var lines = order.path("items");

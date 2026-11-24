@@ -4,6 +4,7 @@ import OrderChangeLog from './OrderChangeLog';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
 import {shipmentLabel} from './JushuitanOrders';
 import {orderTotal} from './orderMoney';
+import {orderNumber} from './orderNumber';
 import {canSubmitApproval,isLegacyApprovedSettlement,isSettlementApprovalOrder,orderExecutionView,plannedOrderWarehouse,submissionProblem} from './feishuApprovalModel';
 import './OrderDetails.css';
 
@@ -52,7 +53,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
         <button type="button" disabled={busy} aria-label="关闭订单详情" onClick={close}><Icon name="close" size={18}/></button>
       </div>
       <div className="modal-body">
-        <div className="order-detail-heading"><strong>{order.id}</strong>
+        <div className="order-detail-heading"><strong>{orderNumber(order)}</strong>
           <ApprovalStatus order={order} record={approvals.records[order.id]} config={approvals.config} error={approvals.error} Badge={Badge}/>
         </div>
         {canceled && <p className="order-detail-source">订单已取消，不再计入待回款金额。</p>}
@@ -92,7 +93,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
         <ApprovalFlow order={order} approvals={approvals} api={api} Badge={Badge}/>
         {problem && <p className="system-error" role="alert">{problem}</p>}
         {submitError && <p className="system-error" role="alert">{submitError}</p>}
-        <section><OrderChangeLog key={order.id} orderId={order.id} api={api}/></section>
+        <section><OrderChangeLog key={order.id} orderId={order.id} orderNumber={orderNumber(order)} api={api}/></section>
       </div>
       <div className="modal-footer"><button type="button" className="secondary" disabled={busy} onClick={close}>关闭</button>
         {canSubmit && <button type="button" className="primary" disabled={busy || Boolean(problem)} onClick={submitApproval}>{busy ? '正在提交…' : record ? '重新发起飞书审批' : '发起飞书审批'}</button>}
