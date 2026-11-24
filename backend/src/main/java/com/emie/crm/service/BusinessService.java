@@ -717,6 +717,8 @@ public class BusinessService {
         db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "feishuReceiptApprovals",
         db.rows("SELECT payload FROM feishu_receipt_approvals ORDER BY id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
+        "jstCreditPushes",
+        db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id").stream().map(r -> db.parse(r.get("payload").toString())).toList(),
         "exported",
         CrmRepository.now());
   }
@@ -818,6 +820,7 @@ public class BusinessService {
     var priorApprovalOrders = index(approvalBaseline.path("orders"));
     protectFeishuOrders(priorApprovalOrders, restoredOrders, "", false);
     protectApprovalRestore(body, restoredOrders);
+    protectCreditPushRestore(body, restoredOrders);
     protectReceiptApprovalOrders(priorApprovalOrders, restoredOrders, "");
     protectReceiptRestore(body, old);
     protectSubmittedOrders(restoredOrders);
@@ -855,7 +858,9 @@ public class BusinessService {
             && shipment.path("soId").equals(shipment.path("request").path("so_id"))
             && List.of("sandbox", "production").contains(shipment.path("environment").asText())
             && !coreChanged(order, shipment.path("snapshot"))
-            && same(order.path("status"), shipment.path("snapshot").path("status")), "发货备份与订单不匹配");
+            && (shipment.path("creditFulfillment").asBoolean()
+                ? creditContentsSame(order, shipment.path("snapshot"))
+                : same(order.path("status"), shipment.path("snapshot").path("status"))), "发货备份与订单不匹配");
         ObjectNode record = shipment.deepCopy();
         record.put("busy", false);
         if (record.path("status").asText().equals("SUBMITTING")) record.put("status", "UNKNOWN");
@@ -976,8 +981,9 @@ public class BusinessService {
     return !db.rows("""
         SELECT order_id FROM jst_shipments WHERE order_id=?
         UNION ALL SELECT order_id FROM jst_document_sales WHERE order_id=?
-        UNION ALL SELECT order_id FROM jst_document_purchases WHERE order_id=? LIMIT 1
-        """, id, id, id).isEmpty();
+        UNION ALL SELECT order_id FROM jst_document_purchases WHERE order_id=?
+        UNION ALL SELECT order_id FROM jst_credit_pushes WHERE order_id=? LIMIT 1
+        """, id, id, id, id).isEmpty();
   }
 
   static boolean canStopFinancially(CrmRepository db, JsonNode order) {
@@ -1138,13 +1144,44 @@ public class BusinessService {
   }
 
   private void protectSubmittedOrders(Map<String, JsonNode> orders) {
+    for (var row : db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id")) {
+      var task = db.parse(row.get("payload").toString());
+      var order = orders.get(task.path("orderId").asText());
+      require(order != null && creditContentsSame(order, task.path("orderSnapshot")),
+          "订单已正式提交聚水潭执行，不能修改客户、签单人、商品、金额、仓库及收件资料；请核对原单");
+    }
     for (var row : db.rows("SELECT payload FROM jst_shipments")) {
       var shipment = db.parse(row.get("payload").toString());
       var order = orders.get(shipment.path("orderId").asText());
       var snapshot = shipment.path("snapshot");
       require(order != null && !coreChanged(order, snapshot)
-          && same(order.path("status"), snapshot.path("status")),
+          && (shipment.path("creditFulfillment").asBoolean() ? creditContentsSame(order, snapshot)
+              : same(order.path("status"), snapshot.path("status"))),
           "订单已提交聚水潭，不能修改客户、商品、金额和审批状态；请通过发货详情变更收件信息或备注；商品金额变更尚未开放");
     }
+  }
+
+  private boolean creditContentsSame(JsonNode order, JsonNode snapshot) {
+    if (!snapshot.isObject()) return false;
+    for (String field : List.of("type", "customerId", "owner", "items", "total", "approvalDraft"))
+      if (!same(order.path(field), snapshot.path(field))) return false;
+    return true;
+  }
+
+  private void protectCreditPushRestore(JsonNode backup, Map<String, JsonNode> orders) {
+    require(!backup.has("jstCreditPushes") || backup.path("jstCreditPushes").isArray(), "账期推送任务备份格式无效");
+    var saved = new HashMap<String, JsonNode>();
+    for (var record : backup.path("jstCreditPushes")) {
+      String id = record.path("orderId").asText();
+      require(!id.isBlank() && saved.putIfAbsent(id, record) == null, "备份账期推送任务无效或重复");
+    }
+    var currentIds = new HashSet<String>();
+    for (var row : db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id")) {
+      var current = db.parse(row.get("payload").toString());
+      String id = current.path("orderId").asText(); currentIds.add(id);
+      require(orders.containsKey(id) && current.equals(saved.get(id)) && creditContentsSame(orders.get(id), current.path("orderSnapshot")),
+          "备份缺少现有账期推送任务或早于最新执行状态，不能回退；请使用最新备份");
+    }
+    require(currentIds.equals(saved.keySet()), "不能从备份导入未经核对的聚水潭账期推送任务");
   }
 }

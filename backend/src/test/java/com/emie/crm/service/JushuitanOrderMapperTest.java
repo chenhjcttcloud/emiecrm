@@ -111,6 +111,28 @@ class JushuitanOrderMapperTest {
     }
   }
 
+  @Test void submittedCreditUsesIndependentAuthorizationWithoutClaimingFeishuApproval() throws Exception {
+    for (String status : new String[]{"审批中", "草稿", "已批准"}) {
+      var o = order().put("status",status).put("paid",0);
+      o.putObject("approvalDraft").put("creditFulfillment",true);
+      var before=o.deepCopy();var request=input();
+      var result=JushuitanOrderMapper.buildSubmittedCredit(m,o,products(),request,"CRM-submitted",true);
+      assertEquals(0,result.path("pay").path("amount").decimalValue().compareTo(o.path("total").decimalValue()));
+      assertEquals("账期挂账（非实收）",result.path("pay").path("payment").asText());
+      assertEquals("WAIT_SELLER_SEND_GOODS",result.path("shop_status").asText());
+      assertTrue(result.path("remark").asText().contains("财务须在聚水潭审核"));
+      assertEquals(before,o);
+      if (!"已批准".equals(status)) assertThrows(ApiException.class,
+          ()->JushuitanOrderMapper.buildCredit(m,o,products(),request,"CRM-legacy",true));
+    }
+    for (String status : new String[]{"已取消","","驳回"}) {
+      var o=order().put("status",status).put("paid",0);o.putObject("approvalDraft").put("creditFulfillment",true);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildSubmittedCredit(m,o,products(),input(),"CRM-id",true));
+    }
+    var noIntent=order().put("status","审批中");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildSubmittedCredit(m,noIntent,products(),input(),"CRM-id",true));
+  }
+
   @Test void requestFlagsCannotAuthorizeCreditOrOverrideAuthoritativePayment() throws Exception {
     var o = order().put("paid", 0);
     var request = input().put("creditFulfillment",true).put("credit",true).put("paid",19.98);

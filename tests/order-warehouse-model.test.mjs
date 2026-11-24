@@ -148,7 +148,7 @@ test('credit push states show unknown and native waiting-payment honestly withou
  assert.match(creditPushView(sale,{creditPush:{status:'BLOCKED',message:'请补店铺'}}).message,/请补店铺/);
  assert.match(creditPushView(sale,{creditPush:{status:'UNKNOWN'}}).label,/结果待核对/);
  const accepted=creditPushView(sale,{creditPush:{status:'ACCEPTED',soId:'CRM-credit',oId:20}});
- assert.equal(accepted.label,'聚水潭已接单');
+ assert.equal(accepted.label,'聚水潭已接单 / 待核对审核进度');
  assert.equal(accepted.oId,20);
  assert.equal(accepted.soId,'CRM-credit');
  const native=creditPushView(sale,{creditPush:{status:'ACCEPTED'}},{creditFulfillment:true,status:'ACCEPTED',nativeStatus:'WaitPay',oId:20});
@@ -158,6 +158,33 @@ test('credit push states show unknown and native waiting-payment honestly withou
  assert.equal(creditPushView({...sale,status:'已取消'},{creditPush:{status:'QUEUED'}}),null);
  assert.equal(creditPushView({...sale,deletedAt:'2026-11-24'},{creditPush:{status:'QUEUED'}}),null);
  assert.deepEqual(sale,original);
+});
+
+test('formal submission tracks ERP independently of Feishu outcome and retains the original ERP identity',()=>{
+ const sale={...order,status:'审批中',total:12200,paid:0,approvalDraft:{creditFulfillment:true}};
+ const shipment={creditFulfillment:true,status:'ACCEPTED',nativeStatus:'WaitConfirm',soId:'CRM-original',oId:25};
+ const queued=creditPushView(sale,{status:'SUBMITTING',creditPush:{status:'QUEUED',trigger:'ORDER_SUBMISSION',orderSubmissionId:'submit-1'}});
+ assert.equal(queued.label,'待自动推送');assert.equal(queued.trigger,'ORDER_SUBMISSION');assert.equal(queued.orderSubmissionId,'submit-1');
+ assert.doesNotMatch(queued.message,/审批通过后/);
+ const waiting=creditPushView(sale,{status:'PENDING'},shipment);assert.equal(waiting.label,'聚水潭待审核');assert.match(waiting.message,/财务直接在聚水潭审核/);assert.equal(waiting.approvalWarning,'');
+ assert.equal(creditPushView(sale,{status:'PENDING'},{...shipment,nativeStatus:'WaitFConfirm'}).label,'聚水潭待财务审核');
+ for(const status of ['FAILED','REJECTED','CANCELED','DELETED']){
+  const result=creditPushView({...sale,status:'草稿'},{status},shipment);
+  assert.equal(result.label,'聚水潭待审核');assert.match(result.approvalWarning,/飞书审批异常，请核对聚水潭原单/);
+  assert.match(result.approvalWarning,/不会自动取消/);assert.match(result.approvalWarning,/继续沿用原单/);assert.equal(result.soId,'CRM-original');
+ }
+ const pendingShipped=creditPushView(sale,{status:'PENDING'},{...shipment,status:'SHIPPED',nativeStatus:'Sent'});
+ assert.match(pendingShipped.approvalWarning,/并行处理中/);assert.doesNotMatch(pendingShipped.approvalWarning,/审批异常/);
+ assert.equal(pendingShipped.approvalAttentionLabel,'飞书审批并行处理中');
+ const uncertain=creditPushView(sale,{status:'UNKNOWN'},shipment);assert.match(uncertain.approvalWarning,/飞书结果待核对/);
+ assert.doesNotMatch(uncertain.approvalWarning,/审批异常/);
+ const rejectedShipped=creditPushView({...sale,status:'草稿'},{status:'REJECTED'},{...shipment,status:'SHIPPED',nativeStatus:'Sent'});
+ assert.equal(rejectedShipped.label,'聚水潭已发货');assert.match(rejectedShipped.approvalWarning,/飞书审批异常/);
+ assert.equal(creditPushView({...sale,status:'已取消'},{status:'CANCELED'},shipment).soId,'CRM-original');
+ assert.equal(orderExecutionView({...sale,status:'已取消'},shipment).unpaid,12200);
+ assert.equal(creditPushView({...sale,status:'草稿'},null).label,'草稿未推送');
+ assert.match(creditPushView({...sale,status:'草稿'},null).message,/保存草稿不会推送/);
+ assert.equal(creditPushView({...sale,status:'草稿'},{status:'REJECTED'},{...shipment,status:'CANCELLED',nativeStatus:'Cancelled'}).approvalWarning,'');
 });
 
 test('credit fulfillment always displays actual CRM collections instead of ERP settlement tender',()=>{

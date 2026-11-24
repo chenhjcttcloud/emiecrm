@@ -54,12 +54,12 @@ export function approvalStatus(order, record, config, error = '') {
 }
 
 export function canCancelOrder(order, record, shipment) {
-  if (!isApprovalOrder(order) || isSettlementApprovalOrder(order) || order.deletedAt || shipment || !['草稿', '审批中'].includes(order.status) || moneyCents(order.paid ?? 0) !== 0) return false;
+  if (!isApprovalOrder(order) || isSettlementApprovalOrder(order) || order.deletedAt || shipment || record?.creditPush || !['草稿', '审批中'].includes(order.status) || moneyCents(order.paid ?? 0) !== 0) return false;
   return record ? record.canCancel === true : true;
 }
 
 export function canDeleteOrder(order, record, shipment) {
-  if (!isSalesApprovalOrder(order) || order.deletedAt || shipment || moneyCents(order.paid ?? 0) !== 0) return false;
+  if (!isSalesApprovalOrder(order) || order.deletedAt || shipment || record?.creditPush || moneyCents(order.paid ?? 0) !== 0) return false;
   return record ? record.canDelete === true : ['草稿', '已取消'].includes(order.status);
 }
 
@@ -70,10 +70,11 @@ export function orderExecutionView(order, shipment) {
   const effective = shipment?.effectiveOrder;
   const total = effective?.total ?? order.total;
   const paid = shipment?.creditFulfillment === true ? order.paid ?? 0 : effective?.paid ?? order.paid ?? 0;
+  const creditExecuted = shipment?.creditFulfillment === true && (['ACCEPTED', 'PARTIAL', 'SHIPPED', 'EXCEPTION'].includes(shipment.status) || Boolean(shipment.oId));
   const totalCents = moneyCents(total), paidCents = moneyCents(paid);
   return {total, paid, effective: Boolean(effective), executionItems: Array.isArray(effective?.items),
     items: Array.isArray(effective?.items) ? effective.items : Array.isArray(order.items) ? order.items : [],
-    unpaid: order.status === '已取消' ? 0 : totalCents === null || paidCents === null ? null : Math.max(0, totalCents - paidCents) / 100};
+    unpaid: order.status === '已取消' && !creditExecuted ? 0 : totalCents === null || paidCents === null ? null : Math.max(0, totalCents - paidCents) / 100};
 }
 
 export function approvalInstanceUrl(instanceCode) {
@@ -153,30 +154,48 @@ export function suggestedCreditShop(shops, owner) {
   return matches.length === 1 ? {id: warehouseIdentifier(matches[0].id), name} : null;
 }
 
+export function jstNativeStatusLabel(status) {
+  return {WaitPay: '聚水潭待付款 / 账期待处理', WaitConfirm: '聚水潭待审核',
+    WaitFConfirm: '聚水潭待财务审核', Delivering: '聚水潭发货中', WaitOuterSent: '等待外仓发货',
+    Sent: '聚水潭已发货', Cancelled: '聚水潭已取消', Question: '聚水潭订单异常'}[status] || '';
+}
+
 export function creditPushView(order, approval, shipment) {
-  if (!isCreditSalesOrder(order) || order.deletedAt || order.status === '已取消') return null;
+  if (!isCreditSalesOrder(order)) return null;
   const push = approval?.creditPush;
   if (!push && shipment?.creditFulfillment !== true && order.approvalDraft?.creditFulfillment !== true) return null;
   const nativeStatus = shipment?.nativeStatus || push?.nativeStatus || '';
   const actual = shipment?.creditFulfillment ? shipment.status : '';
-  if (actual === 'SHIPPED' || actual === 'PARTIAL') return {
-    label: actual === 'SHIPPED' ? '聚水潭已发货' : '聚水潭部分发货', tone: 'success',
-    message: shipment.message || '', nativeStatus, soId: shipment.soId, oId: shipment.oId,
-  };
-  const nativeLabels = {WaitPay: '聚水潭待付款 / 账期待处理', WaitConfirm: '聚水潭待审核',
-    WaitFConfirm: '聚水潭待财审', Delivering: '聚水潭发货中', WaitOuterSent: '等待外仓发货',
-    Sent: '聚水潭已发货', Cancelled: '聚水潭已取消'};
+  const accepted = ['ACCEPTED', 'PARTIAL', 'SHIPPED', 'EXCEPTION'].includes(actual)
+    || ['ACCEPTED', 'PARTIAL', 'SHIPPED', 'EXCEPTION'].includes(push?.status)
+    || Boolean(shipment?.oId || push?.oId);
+  if ((order.deletedAt || order.status === '已取消') && !accepted && !shipment) return null;
   const statuses = {QUEUED: ['待自动推送', 'info'], BLOCKED: ['自动推送需补充资料', 'warning'],
     SUBMITTING: ['正在推送聚水潭', 'info'], UNKNOWN: ['聚水潭推送结果待核对', 'warning'],
-    FAILED: ['聚水潭推送失败', 'error'], ACCEPTED: ['聚水潭已接单', 'success']};
+    FAILED: ['聚水潭推送失败', 'error'], ACCEPTED: ['聚水潭已接单 / 待核对审核进度', 'info'],
+    PARTIAL: ['聚水潭部分发货', 'success'], SHIPPED: ['聚水潭已发货', 'success']};
   statuses.EXCEPTION = ['聚水潭订单异常', 'error'];
   statuses.CANCELLED = ['聚水潭订单已取消', 'warning'];
-  const status = push?.status || (actual === 'ACCEPTED' ? 'ACCEPTED' : actual);
-  const [label, tone] = statuses[status] || [order.status === '已批准' ? '待自动推送' : '审批通过后自动推送', 'info'];
-  return {label: nativeLabels[nativeStatus] || label, tone: nativeStatus === 'WaitPay' ? 'warning' : tone,
-    message: nativeStatus === 'WaitPay' ? '聚水潭返回待付款状态，需核对账期处理进度。'
-      : shipment?.message || push?.message || (order.status === '已批准' ? '订单将按账期策略推送，收款按实际到账记录。' : '飞书审批通过后自动推送聚水潭。'),
-    nativeStatus, soId: shipment?.soId || push?.soId, oId: shipment?.oId || push?.oId};
+  const status = ['ACCEPTED', 'PARTIAL', 'SHIPPED', 'EXCEPTION', 'CANCELLED'].includes(actual) ? actual : push?.status || actual;
+  const draftOnly = !push && !shipment && order.status === '草稿';
+  const [label, tone] = statuses[status] || [draftOnly ? '草稿未推送' : '正式提交后推送', 'info'];
+  const nativeMessage = {WaitPay: '聚水潭返回待付款状态，请核对账期挂账资料；CRM实收按实际入账记录。',
+    WaitConfirm: '聚水潭原单待审核，财务直接在聚水潭审核；审核和发货进度以聚水潭回传为准。',
+    WaitFConfirm: '聚水潭原单等待财务审核，审核后继续发货流程。'}[nativeStatus];
+  const issue = accepted && !['CANCELLED'].includes(actual) && nativeStatus !== 'Cancelled'
+    && (['FAILED', 'REJECTED', 'CANCELED', 'DELETED', 'UNKNOWN'].includes(approval?.status) || order.status === '已取消' || order.deletedAt);
+  const shippedWhilePending = accepted && (['PARTIAL', 'SHIPPED'].includes(actual) || nativeStatus === 'Sent')
+    && (['PENDING', 'QUEUED', 'SUBMITTING'].includes(approval?.status) || (!approval?.status && order.status === '审批中'));
+  const approvalAttentionLabel = issue ? approval?.status === 'UNKNOWN' ? '飞书结果待核对' : '飞书审批异常'
+    : shippedWhilePending ? '飞书审批并行处理中' : '';
+  const actualLabel = ['PARTIAL', 'SHIPPED'].includes(actual) ? label : jstNativeStatusLabel(nativeStatus) || label;
+  return {label: actualLabel, tone: nativeStatus === 'WaitPay' ? 'warning' : ['WaitConfirm', 'WaitFConfirm'].includes(nativeStatus) ? 'info' : tone,
+    message: nativeMessage || shipment?.message || push?.message || (draftOnly ? '保存草稿不会推送聚水潭。' : '正式提交即并行发起飞书审批并推送聚水潭，财务在聚水潭审核。'),
+    approvalWarning: issue ? approvalAttentionLabel + '，请核对聚水潭原单。驳回或撤回不会自动取消聚水潭订单；重新发起飞书审批继续沿用原单。'
+      : shippedWhilePending ? '飞书审批并行处理中，聚水潭已发货或部分发货，请核对原单。' : '',
+    approvalAttentionLabel,
+    nativeStatus, soId: shipment?.soId || push?.soId, oId: shipment?.oId || push?.oId,
+    trigger: push?.trigger, orderSubmissionId: push?.submissionId || push?.orderSubmissionId};
 }
 
 export function shippingWarehouseId(order, record) {
@@ -223,8 +242,8 @@ export function approvalDetails(config, order, fields) {
       if (fields?.get?.('creditShippingChoiceValid') === 'false')
         throw Error('所选聚水潭店铺或仓库当前不可用，请重新选择后提交；可先保存草稿。');
       const shopId = warehouseIdentifier(input.shopId);
-      if (!shopId) throw Error('请选择有效的聚水潭店铺，审批通过后将自动推送。');
-      if (!result.warehouseId) throw Error('请选择发货仓库，审批通过后将自动推送。');
+      if (!shopId) throw Error('请选择有效的聚水潭店铺，正式提交后将推送原单。');
+      if (!result.warehouseId) throw Error('请选择发货仓库，正式提交后将推送原单。');
       const shopName = String(input.shopName ?? '').trim();
       if (shopName.length > 191 || /[\u0000-\u001f\u007f-\u009f]/.test(shopName)) throw Error('聚水潭店铺名称无效，最多191字');
       result.creditFulfillment = true;
@@ -248,7 +267,7 @@ export function approvalDetails(config, order, fields) {
         result[key] = value;
       }
     }
-    if (config?.salesDiscountRequired) result.discounts = (order.items ?? []).map((item, index) => approvalDiscount(fields?.get('approvalDiscount-' + index)));
+    if (config?.salesDiscountRequired) result.discounts = (order.items ?? []).map((item, index) => approvalDiscount(fields?.get('approvalDiscount-' + index) ?? (credit ? item.approvalDiscount : undefined)));
     return result;
   }
   if (order.type !== '预收款订单' || !config?.prepaymentReceiptForm) return {};

@@ -30,13 +30,14 @@ class JushuitanCreditPushServiceTest {
   final Actor operator = new Actor("approver", "审批人", Set.of("business.read","business.write","order.approve"));
   final Actor reader = new Actor("reader", "只读", Set.of("business.read"));
   JushuitanCreditPushService service;
-  ObjectNode approval, state;
+  ObjectNode approval, state, task;
 
   @BeforeEach void setup() throws Exception {
     var fixture = new JushuitanCreditPushPolicyTest();
     var order = fixture.order();
     approval = fixture.approval(order);
     JushuitanCreditPushPolicy.enqueue(approval,order);
+    task=approval.path("creditPush").deepCopy();
     state=mapper.createObjectNode().put("revision",1);
     state.putArray("orders").add(order);
     state.set("products",fixture.products());
@@ -48,13 +49,19 @@ class JushuitanCreditPushServiceTest {
     when(db.encode(any())).thenAnswer(call->mapper.writeValueAsString(call.getArgument(0,Object.class)));
     when(db.rows(startsWith("SELECT payload FROM feishu_order_approvals WHERE order_id="),eq("o1")))
         .thenAnswer(call->List.of(Map.of("payload",approval.toString())));
+    when(db.rows(startsWith("SELECT payload FROM jst_credit_pushes WHERE order_id="),eq("o1")))
+        .thenAnswer(call->task==null?List.of():List.of(Map.of("payload",task.toString())));
+    when(jdbc.update(startsWith("UPDATE jst_credit_pushes SET payload="),anyString(),eq("o1")))
+        .thenAnswer(call->{task=(ObjectNode)mapper.readTree(call.getArgument(1,String.class));return 1;});
+    when(jdbc.update(startsWith("INSERT INTO jst_credit_pushes(order_id,payload) VALUES"),eq("o1"),anyString()))
+        .thenAnswer(call->{task=(ObjectNode)mapper.readTree(call.getArgument(2,String.class));return 1;});
     when(jdbc.update(startsWith("UPDATE feishu_order_approvals SET payload="),anyString(),eq("o1"),eq("instance")))
         .thenAnswer(call->{approval=(ObjectNode)mapper.readTree(call.getArgument(1,String.class));return 1;});
     when(provider.getIfAvailable()).thenReturn(transport);
     when(transport.unavailableMessage()).thenReturn("账期接口尚未启用");
     service=new JushuitanCreditPushService(db,manager,provider,"sandbox");
   }
-  ObjectNode push(){return (ObjectNode)approval.path("creditPush");}
+  ObjectNode push(){return task;}
   ObjectNode response(JushuitanCreditPushService.Submission submission,String status){
     return mapper.createObjectNode().put("orderId",submission.orderId()).put("soId",submission.soId()).put("oId",123)
         .put("status",status).put("message","隔离接口结果").put("upstreamAttempted",true);
@@ -138,6 +145,7 @@ class JushuitanCreditPushServiceTest {
 
   @Test void historicalApprovalRequiresOneExplicitAuthorizedModeConfirmation() throws Exception {
     approval.remove(List.of("creditPush","creditPushPolicyVersion","creditPushProducts","creditPushEnvironment","creditPushAccountingMode"));
+    task=null;
     ((ObjectNode)approval.path("orderSnapshot").path("approvalDraft")).remove("creditFulfillment");
     ((ObjectNode)state.path("orders").get(0).path("approvalDraft")).remove("creditFulfillment");
     service.process("o1");verify(transport,never()).push(any());
@@ -198,6 +206,7 @@ class JushuitanCreditPushServiceTest {
         .put("approval_code","sales-template").put("open_id","native-initiator");
   }
   void historicalBootstrap() {
+    task=null;
     approval.remove(List.of("creditPush","creditPushPolicyVersion","creditPushProducts","creditPushEnvironment","creditPushAccountingMode"));
     approval.put("approvalCode","sales-template").put("openId","native-initiator");
     ((ObjectNode)approval.path("orderSnapshot").path("approvalDraft")).remove(List.of("creditFulfillment","shopId","shopName"));
@@ -292,5 +301,54 @@ class JushuitanCreditPushServiceTest {
     historicalBootstrap();
     assertThrows(ApiException.class,()->service.bootstrap(shippingAuthorization(),nativeApproved()));assertFalse(approval.has("creditPush"));
     verify(db,never()).audit(anyString(),anyString(),any(JsonNode.class));
+  }
+
+  void parallelTask() {
+    var current=(ObjectNode)state.path("orders").get(0);current.put("status","审批中");
+    approval.put("status","QUEUED").put("instanceCode","");
+    task=JushuitanCreditPushPolicy.intentForSubmission(approval,current,state.path("products"),"sandbox");
+  }
+
+  @Test void parallelSubmissionPushesWithNoNativeInstanceAndSurvivesFeishuFailureRejectionAndWithdrawal() throws Exception {
+    for(String status:List.of("QUEUED","FAILED","UNKNOWN","REJECTED","CANCELED")) {
+      setup();parallelTask();approval.put("status",status).put("uuid","later-approval-generation");
+      if(!status.equals("QUEUED"))((ObjectNode)state.path("orders").get(0)).put("status","草稿");
+      when(transport.ready()).thenReturn(true);
+      doAnswer(call->{
+        var submission=call.getArgument(0,JushuitanCreditPushService.Submission.class);
+        assertEquals(2,submission.policyVersion());assertEquals("ORDER_SUBMISSION",submission.trigger());
+        assertFalse(submission.submissionId().isBlank());assertEquals("",submission.instanceCode());
+        assertEquals("审批中",submission.orderSnapshot().path("status").asText());assertTrue(service.renew(submission));
+        return response(submission,"ACCEPTED");
+      }).when(transport).push(any());
+      service.process("o1");assertEquals("ACCEPTED",push().path("status").asText(),status);
+      assertEquals(0,state.path("orders").get(0).path("paid").asInt());
+    }
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void parallelTasksAreStableAcrossResubmissionsAndRejectAnyFrozenContentChange() {
+    parallelTask();var original=task.deepCopy();var nextApproval=approval.deepCopy().put("uuid","new-uuid").put("instanceCode","new-instance");
+    var current=(ObjectNode)state.path("orders").get(0);
+    JushuitanCreditPushService.registerSubmission(db,nextApproval,current,state.path("products"),"sandbox");assertEquals(original,task);
+    current.put("paid",2).put("note","后续备注");
+    JushuitanCreditPushService.registerSubmission(db,nextApproval,current,state.path("products"),"sandbox");assertEquals(original,task);
+    current.put("total",11);
+    assertThrows(ApiException.class,()->JushuitanCreditPushService.registerSubmission(db,nextApproval,current,state.path("products"),"sandbox"));
+    assertEquals(original,task);
+    verify(jdbc,never()).update(startsWith("INSERT INTO jst_credit_pushes"),anyString(),anyString());
+  }
+
+  @Test void parallelTaskStopsAtTheFinalWriteBoundaryForCanceledDeletedOrChangedCoreOrders() throws Exception {
+    for(String changed:List.of("cancelled","deleted","recipient")) {
+      setup();parallelTask();when(transport.ready()).thenReturn(true);
+      doAnswer(call->{
+        var submission=call.getArgument(0,JushuitanCreditPushService.Submission.class);var current=(ObjectNode)state.path("orders").get(0);
+        if(changed.equals("cancelled"))current.put("status","已取消");
+        if(changed.equals("deleted"))current.put("deletedAt","2026-11-24T00:00:00Z");
+        if(changed.equals("recipient"))((ObjectNode)current.path("approvalDraft")).put("recipientDistrict","福田区");
+        assertFalse(service.renew(submission),changed);throw new JushuitanCreditPushService.Blocked("isolated no-write boundary");
+      }).when(transport).push(any());service.process("o1");
+    }
   }
 }

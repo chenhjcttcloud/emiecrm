@@ -95,6 +95,36 @@ class DashboardServiceTest {
     assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(actual.asText())), actual.toString());
   }
 
+  @Test void unapprovedFulfillmentIsVisibleSeparatelyWithoutInflatingApprovedSalesOrCash() {
+    order("approved", "2026-11-02", "50", "0");
+    order("rejected", "2026-11-03", "12200", "0").put("status","草稿");
+    order("pending", "2026-11-04", "80", "20").put("status","审批中");
+    order("normal-parallel", "2026-11-04", "500", "0").put("status","审批中");
+    order("cancelled", "2026-11-05", "90", "0").put("status","已取消");
+    order("wrong-environment", "2026-11-06", "999", "0").put("status","草稿");
+    for(String id:List.of("rejected","pending","cancelled"))shipments.add(Map.of("order_id",id,"payload",
+        "{\"environment\":\"sandbox\",\"status\":\"SHIPPED\",\"oId\":123,\"nativeStatus\":\"Sent\",\"creditFulfillment\":true,\"effectiveOrder\":{\"paid\":12200}}"));
+    shipments.add(Map.of("order_id","wrong-environment","payload","{\"environment\":\"production\",\"status\":\"SHIPPED\",\"oId\":456}"));
+    shipments.add(Map.of("order_id","normal-parallel","payload","{\"environment\":\"sandbox\",\"status\":\"ACCEPTED\",\"nativeStatus\":\"WaitConfirm\",\"oId\":789,\"creditFulfillment\":true}"));
+    when(db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id")).thenReturn(List.of(
+        Map.of("payload","{\"orderId\":\"rejected\",\"status\":\"REJECTED\"}"),
+        Map.of("payload","{\"orderId\":\"pending\",\"status\":\"PENDING\"}"),
+        Map.of("payload","{\"orderId\":\"normal-parallel\",\"status\":\"PENDING\"}"),
+        Map.of("payload","{\"orderId\":\"cancelled\",\"status\":\"CANCELED\"}")));
+    var result=sales();
+    assertEquals(1,result.path("summary").path("orderCount").asInt());money("50",result.path("summary").path("orderAmount"));
+    money("0",result.path("summary").path("settledAmount")); assertEquals(3,result.path("fulfillmentExceptions").path("count").asInt());
+    var byId=new HashMap<String,JsonNode>();result.path("fulfillmentExceptions").path("rows").forEach(row->byId.put(row.path("orderId").asText(),row));
+    assertFalse(byId.containsKey("wrong-environment")); assertFalse(byId.containsKey("normal-parallel"));
+    money("0",byId.get("rejected").path("paid"));money("12200",byId.get("rejected").path("outstanding"));
+    money("20",byId.get("pending").path("paid"));money("60",byId.get("pending").path("outstanding"));
+    assertEquals("REJECTED",byId.get("rejected").path("approvalStatus").asText());assertTrue(byId.get("rejected").path("fulfillmentWarning").asText().contains("已驳回"));
+    assertTrue(byId.get("pending").path("fulfillmentWarning").asText().contains("并行处理中"));
+    assertTrue(byId.get("pending").path("fulfillmentWarning").asText().contains("待核对"));
+    money("90",byId.get("cancelled").path("outstanding"));assertEquals("Sent",byId.get("cancelled").path("nativeStatus").asText());
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+
   @Test void onlyApprovedSalesEnterTheOrderCohortAndPartialPaymentsRemainPending() {
     order("paid", "2026-11-02 09:00:00", "100.01", "100.01");
     order("partial", "2026-11-03 09:00:00", "200.02", "50.01");

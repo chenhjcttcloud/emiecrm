@@ -23,11 +23,12 @@ class JushuitanExternalChangeDatabaseTest {
  @BeforeEach void setup()throws Exception{
   var source=new DriverManagerDataSource("jdbc:mysql://emiecrm-external-fixture:3306/emiecrm_external_diff_test?allowPublicKeyRetrieval=true&useSSL=false&characterEncoding=UTF-8","root","fixture-only");
   jdbc=new JdbcTemplate(source);manager=new DataSourceTransactionManager(source);
-  for(String table:List.of("state","receipts","audit","audit_archives","jst_shipments","payment_methods","feishu_order_approvals","feishu_receipt_approvals"))jdbc.execute("DROP TABLE IF EXISTS "+table);
+  for(String table:List.of("state","receipts","audit","audit_archives","jst_shipments","jst_credit_pushes","payment_methods","feishu_order_approvals","feishu_receipt_approvals"))jdbc.execute("DROP TABLE IF EXISTS "+table);
   jdbc.execute("CREATE TABLE state(id INT PRIMARY KEY,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE receipts(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(191) UNIQUE,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE audit(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(191) UNIQUE,payload LONGTEXT)");
   jdbc.execute("CREATE TABLE jst_shipments(order_id VARCHAR(191) PRIMARY KEY,payload LONGTEXT,updated_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
+  jdbc.execute("CREATE TABLE jst_credit_pushes(order_id VARCHAR(191) PRIMARY KEY,payload LONGTEXT,updated_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
   jdbc.execute("CREATE TABLE payment_methods(id VARCHAR(191) PRIMARY KEY,name VARCHAR(191),status VARCHAR(20))");
   // BusinessService.save checks both approval locks even when this fixture has no approval history.
   jdbc.execute("CREATE TABLE feishu_order_approvals(order_id VARCHAR(191) PRIMARY KEY,status VARCHAR(16) NOT NULL,payload LONGTEXT NOT NULL)");

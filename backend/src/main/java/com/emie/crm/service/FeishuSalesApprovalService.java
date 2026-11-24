@@ -315,6 +315,7 @@ public class FeishuSalesApprovalService {
         ((ObjectNode) state).put("revision", state.path("revision").asLong() + 1);
         db.state(state);
       }
+      if ("草稿".equals(order.path("status").asText())) updateOrderStatus(state, order, "审批中");
       var next = newSubmission(openId, selectedCode, definition, order, state.path("products"),
           OrderWarehouse.approval(input, selectedWarehouse), actor);
       preserveHistory(record, next);
@@ -347,6 +348,7 @@ public class FeishuSalesApprovalService {
     record.set("form", form);
     record.set("orderSnapshot", order.deepCopy());
     JushuitanCreditPushPolicy.markSubmission(record, order, products, jstEnvironment);
+    JushuitanCreditPushService.registerSubmission(db, record, order, products, jstEnvironment);
     db.audit(actor.name(), "发起飞书" + order.path("type").asText() + "审批：" + OrderNumbers.display(order));
     return record;
   }
@@ -678,6 +680,7 @@ public class FeishuSalesApprovalService {
       current.put("status", completed ? result : "PENDING");
       if (completed) current.remove(List.of("cancelRequestedBy", "cancelAttempt", "cancelLeaseUntil"));
       if ("APPROVED".equals(result)) JushuitanCreditPushPolicy.enqueue(current, order);
+      JushuitanCreditPushService.registerLegacy(db, current);
       store(current);
       if (completed) db.audit("飞书审批", approvalAudit(result, order.path("type").asText()) + "：" + OrderNumbers.display(order));
       return current;
@@ -766,7 +769,9 @@ public class FeishuSalesApprovalService {
     var result = db.object().put("orderId", record.path("orderId").asText()).put("status", status);
     for (var field : List.of("instanceCode", "message", "createdAt", "updatedAt", "history"))
       if (record.hasNonNull(field)) result.set(field, record.path(field));
-    if (record.path("creditPush").isObject()) result.set("creditPush", JushuitanCreditPushPolicy.summary(record.path("creditPush")));
+    var latestPush = JushuitanCreditPushService.summary(db, record.path("orderId").asText());
+    if (latestPush != null) result.set("creditPush", latestPush);
+    else if (record.path("creditPush").isObject()) result.set("creditPush", JushuitanCreditPushPolicy.summary(record.path("creditPush")));
     if (record.hasNonNull("cancelRequestedBy")) result.put("cancelPending", true);
     if (RESUBMITTABLE.contains(status) && !record.path("uuid").asText().isBlank())
       result.put("retryVersion", record.path("uuid").asText());

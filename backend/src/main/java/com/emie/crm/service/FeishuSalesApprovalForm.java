@@ -163,7 +163,7 @@ public final class FeishuSalesApprovalForm {
             + (warehouse.selected() ? "\n计划发货仓库：" + warehouse.name() + "（" + warehouse.id() + "）" : "")
             + (credit ? "\n聚水潭推送店铺：" + order.path("approvalDraft").path("shopName").asText("未选择")
                 + "（" + order.path("approvalDraft").path("shopId").asText("待补齐") + "）"
-                + "\n发货方式：按账期发货；飞书审批通过后自动推送聚水潭。"
+                + "\n发货方式：按账期发货；正式提交即推送聚水潭，飞书审批并行；财务直接在聚水潭审核，ERP审核后发货。"
                 + "\n收货人：" + order.path("approvalDraft").path("recipientName").asText().strip()
                 + "；收货电话：" + order.path("approvalDraft").path("recipientPhone").asText().strip()
                 + "\n收货地址：" + JushuitanCreditPushPolicy.fullAddress(order.path("approvalDraft"))

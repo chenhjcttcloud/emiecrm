@@ -4,7 +4,7 @@ import {RecipientAddressFields} from './FeishuOrderApproval';
 import {approvalDetails,isCreditSalesOrder} from './feishuApprovalModel';
 import './orderWarehousePicker.css';
 
-const activePushes=new Set(['QUEUED','SUBMITTING','UNKNOWN','ACCEPTED']);
+const activePushes=new Set(['QUEUED','SUBMITTING','UNKNOWN','ACCEPTED','PARTIAL','SHIPPED','EXCEPTION','CANCELLED']);
 
 export default function CreditOrderPush({order,approval,shipment,api,canWrite=false,onPush}){
  const[open,setOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[saved,setSaved]=useState(false);

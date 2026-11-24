@@ -3,10 +3,10 @@ import JushuitanAuthorization from './JushuitanAuthorization';
 import React,{useState,useEffect} from 'react';
 import {orderTotal} from './orderMoney';
 import {orderNumber} from './orderNumber';
-import {shippingWarehouseId} from './feishuApprovalModel';
+import {jstNativeStatusLabel,shippingWarehouseId} from './feishuApprovalModel';
 
 const labels={SUBMITTING:'提交中',UNKNOWN:'待核对',FAILED:'提交失败',ACCEPTED:'待发货',PARTIAL:'部分发货',SHIPPED:'已发货',EXCEPTION:'聚水潭异常',CANCELLED:'已取消'};
-export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':record?.nativeStatus==='WaitPay'?'聚水潭待付款 / 账期待处理':record?labels[record.status]||'待核对':'未提交';
+export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':jstNativeStatusLabel(record?.nativeStatus)||(record?(record.creditFulfillment&&record.status==='ACCEPTED'?'聚水潭已接单 / 待核对审核进度':labels[record.status]||'待核对'):'未提交');
 export function useJushuitan(api,revision){
  const[records,setRecords]=useState({});const[config,setConfig]=useState(null);const[error,setError]=useState('');
  useEffect(()=>{if(revision==null)return;let active=true;const load=()=>Promise.all([api('jst/config'),api('jst/shipments')]).then(([c,rows])=>{if(active){setConfig(c);setRecords(Object.fromEntries(rows.map(r=>[r.orderId,r])));setError('')}}).catch(e=>{if(active)setError(e.message)});load();const timer=setInterval(load,60000);return()=>{active=false;clearInterval(timer)}},[revision]);

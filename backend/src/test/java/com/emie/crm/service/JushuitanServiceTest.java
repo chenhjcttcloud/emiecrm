@@ -28,7 +28,8 @@ class JushuitanServiceTest {
    {"products":[{"id":"p1","name":"甲","source":"jushuitan","enabled":true,"jstEnvironment":"sandbox","jstSku":"A"}],"orders":[{"id":"o1","customerId":"c1","type":"销售订单","status":"已批准","paid":10,"total":10,"items":[{"product":"p1","qty":1,"price":10}]}]}
    """));
   when(db.state(false)).thenAnswer(i->db.state(true));
-  when(db.rows(anyString(),eq("o1"))).thenAnswer(i->persisted==null?List.of():List.of(Map.of("payload",persisted)));
+  when(db.rows(anyString(),eq("o1"))).thenAnswer(i->i.getArgument(0,String.class).contains("FROM jst_credit_pushes")
+      || persisted==null?List.of():List.of(Map.of("payload",persisted)));
   when(jdbc.update(anyString(),any(Object[].class))).thenAnswer(i->{
    String sql=i.getArgument(0);Object[] args=(Object[])i.getRawArguments()[1];
    if(sql.startsWith("INSERT INTO jst_shipments"))persisted=(String)args[1];
@@ -121,6 +122,12 @@ class JushuitanServiceTest {
   assertThrows(ApiException.class,()->service.amend("o1",input(),admin));
   assertThrows(ApiException.class,()->service.continueAmendment("o1",input(),admin));
   verify(client,never()).upload(any());verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+ @Test void queuedSubmissionCannotRaceWithAnotherLegacyShipment()throws Exception{
+  when(db.rows("SELECT order_id FROM jst_credit_pushes WHERE order_id=?","o1"))
+      .thenReturn(List.of(Map.of("order_id","o1")));
+  assertThrows(ApiException.class,()->service.submit("o1",input(),admin));
+  assertNull(persisted);verify(client,never()).upload(any());
  }
  @Test void missingCreditOrderRemainsUnknownAndCannotEnableBlindResend()throws Exception{
   acceptedOrder();var record=(ObjectNode)m.readTree(persisted);

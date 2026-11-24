@@ -18,6 +18,8 @@ import java.util.UUID;
 /** Persisted intent only: approval recognition never makes an ERP request or fabricates a receipt. */
 final class JushuitanCreditPushPolicy {
   static final int VERSION = 1;
+  static final int SUBMISSION_VERSION = 2;
+  static final String SUBMISSION_TRIGGER = "ORDER_SUBMISSION";
   static final String ACCOUNTING_MODE = "ON_ACCOUNT_TENDER";
   static final String FIELD = "creditPush";
   private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
@@ -41,7 +43,7 @@ final class JushuitanCreditPushPolicy {
   static void markSubmission(ObjectNode approval, JsonNode order, JsonNode products, String environment) {
     if (!optedIn(order)) return;
     validateSubmission(order);
-    approval.put("creditPushPolicyVersion", VERSION).put("creditPushEnvironment", environment)
+    approval.put("creditPushPolicyVersion", SUBMISSION_VERSION).put("creditPushEnvironment", environment)
         .put("creditPushAccountingMode", ACCOUNTING_MODE);
     approval.set("creditPushProducts", products(order, products));
   }
@@ -133,14 +135,29 @@ final class JushuitanCreditPushPolicy {
   }
 
   static ObjectNode intent(JsonNode approval, JsonNode snapshot, JsonNode products, String environment) {
+    return intent(approval, snapshot, products, environment, false);
+  }
+
+  static ObjectNode intentForSubmission(JsonNode approval, JsonNode snapshot, JsonNode products, String environment) {
+    return intent(approval, snapshot, products, environment, true);
+  }
+
+  static boolean isParallelJob(JsonNode task) {
+    return task.path("policyVersion").asInt() == SUBMISSION_VERSION
+        && SUBMISSION_TRIGGER.equals(task.path("trigger").asText())
+        && task.path("submissionId").asText().matches("[a-f0-9-]{36}");
+  }
+
+  private static ObjectNode intent(JsonNode approval, JsonNode snapshot, JsonNode products, String environment, boolean parallel) {
     ObjectNode order = snapshot.deepCopy();
-    order.put("status", "已批准");
-    var push = JSON.objectNode().put("policyVersion", VERSION).put("orderId", approval.path("orderId").asText())
+    if (!parallel) order.put("status", "已批准");
+    var push = JSON.objectNode().put("policyVersion", parallel ? SUBMISSION_VERSION : VERSION).put("orderId", approval.path("orderId").asText())
         .put("soId", "CRM-" + UUID.randomUUID().toString().replace("-", ""))
         .put("approvalUuid", approval.path("uuid").asText()).put("instanceCode", approval.path("instanceCode").asText())
         .put("accountingMode", approval.path("creditPushAccountingMode").asText())
         .put("environment", environment).put("status", "QUEUED").put("attempts", 0).put("attempted", false)
         .put("createdAt", CrmRepository.now()).put("updatedAt", CrmRepository.now());
+    if (parallel) push.put("trigger", SUBMISSION_TRIGGER).put("submissionId", UUID.randomUUID().toString());
     push.set("orderSnapshot", order);
     push.set("products", products.isArray() ? products.deepCopy() : JSON.arrayNode());
     push.set("input", input(order, push.path("products")));
@@ -163,7 +180,9 @@ final class JushuitanCreditPushPolicy {
     if (!phone.matches("[0-9+() -]{7,30}")) missing.add("有效收货电话");
     if (!CreditShippingAddress.valid(recipient)) missing.add("完整收货地址（省、市、区县及详细地址）");
     if (!Set.of("sandbox", "production").contains(push.path("environment").asText())) missing.add("有效聚水潭环境");
-    if (push.path("approvalUuid").asText().isBlank() || push.path("instanceCode").asText().isBlank()) missing.add("有效审批实例");
+    if (push.path("policyVersion").asInt() == SUBMISSION_VERSION) {
+      if (!isParallelJob(push)) missing.add("有效订单提交身份");
+    } else if (push.path("approvalUuid").asText().isBlank() || push.path("instanceCode").asText().isBlank()) missing.add("有效审批实例");
     if (!push.path("orderSnapshot").path("items").isArray() || push.path("orderSnapshot").path("items").isEmpty()
         || !input.path("items").isArray() || input.path("items").isEmpty()
         || input.path("items").findValuesAsText("skuId").stream().anyMatch(String::isBlank)) missing.add("可用商品SKU");
@@ -172,7 +191,8 @@ final class JushuitanCreditPushPolicy {
       var rows = push.putArray("missingFields"); missing.forEach(rows::add);
       block(push, "账期订单待补齐：" + String.join("、", missing));
     } else {
-      push.put("status", "QUEUED").put("message", "审批已通过，等待自动推送聚水潭账期订单");
+      push.put("status", "QUEUED").put("message", isParallelJob(push)
+          ? "订单已提交，等待推送聚水潭供财务审核；飞书审批独立进行" : "审批已通过，等待自动推送聚水潭账期订单");
     }
   }
 
@@ -238,7 +258,7 @@ final class JushuitanCreditPushPolicy {
 
   static ObjectNode summary(JsonNode push) {
     var result = JSON.objectNode();
-    for (String field : List.of("status", "message", "soId", "oId", "environment", "accountingMode", "createdAt", "updatedAt", "attempts", "missingFields"))
+    for (String field : List.of("status", "message", "soId", "oId", "environment", "accountingMode", "policyVersion", "trigger", "submissionId", "createdAt", "updatedAt", "attempts", "missingFields"))
       if (push.has(field)) result.set(field, push.path(field).deepCopy());
     result.put("orderId", push.path("orderId").asText());
     result.put("retryable", Set.of("BLOCKED", "FAILED", "UNKNOWN").contains(push.path("status").asText()));

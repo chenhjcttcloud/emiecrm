@@ -42,6 +42,9 @@ class FeishuSalesApprovalFormTest {
     String note=field(form,"note").path("value").asText();
     assertTrue(note.contains("聚水潭推送店铺：国内线下店铺（15）"));
     assertTrue(note.contains("账期挂账（非实收）"));assertTrue(note.contains("ERP付款状态显示已付"));
+    assertTrue(note.contains("正式提交即推送聚水潭，飞书审批并行"));
+    assertTrue(note.contains("财务直接在聚水潭审核，ERP审核后发货"));
+    assertFalse(note.contains("飞书审批通过后自动推送"));
     assertTrue(note.contains("CRM实收与应收按真实收款独立记录"));assertTrue(note.contains("挂账不计入实收"));
     assertTrue(note.contains("真实收货人"));assertTrue(note.contains("13800000000"));assertTrue(note.contains("广东省深圳市龙岗区万科星火online10栋"));
     assertEquals("广东省深圳市龙岗区万科星火online10栋",field(form,"shipping-address").path("value").asText());

@@ -241,6 +241,8 @@ public class JushuitanService {
           "该 CRM 订单已手工关联聚水潭销售单，请核对后再提交");
       var prior = load(orderId, true);
       require(prior == null || !prior.path("creditFulfillment").asBoolean(), "账期订单请通过自动推送记录核对或重试，不能另行提交发货");
+      require(db.rows("SELECT order_id FROM jst_credit_pushes WHERE order_id=?", orderId).isEmpty(),
+          "该订单已登记自动账期推送，请在订单详情核对原单进度");
       for (var approval : db.rows("SELECT payload FROM feishu_order_approvals WHERE order_id=?", orderId))
         require(!db.parse(approval.get("payload").toString()).path("creditPush").isObject(), "该订单已登记自动账期推送，请在订单详情核对进度");
       if (prior != null) {

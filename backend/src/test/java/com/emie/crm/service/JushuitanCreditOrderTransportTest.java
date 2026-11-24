@@ -82,6 +82,33 @@ class JushuitanCreditOrderTransportTest {
   private JsonNode upload(boolean success,String id,String so) throws Exception {
     return json("{\"code\":0,\"data\":{\"datas\":[{\"so_id\":\""+so+"\",\"o_id\":"+id+",\"issuccess\":"+success+"}]}}");
   }
+
+  private JushuitanCreditPushService.Submission submitted(String approvalUuid,String instanceCode,String identity) throws Exception {
+    var original=submission();var order=(ObjectNode)original.orderSnapshot().deepCopy();
+    order.put("status","审批中");order.putObject("approvalDraft").put("creditFulfillment",true);
+    return new JushuitanCreditPushService.Submission(original.orderId(),original.soId(),approvalUuid,instanceCode,
+        original.environment(),order,original.products(),original.input(),original.attemptId(),2,"ORDER_SUBMISSION",identity);
+  }
+
+  @Test void formalSubmissionPushesBeforeFeishuInstanceExistsAndDoesNotBookCash() throws Exception {
+    var submitted=submitted("initial-approval","","submission-stable");var before=submitted.orderSnapshot().deepCopy();
+    assertEquals("ACCEPTED",transport.push(submitted).path("status").asText());
+    assertEquals("审批中",saved().path("snapshot").path("status").asText());
+    assertEquals("ORDER_SUBMISSION",saved().path("trigger").asText());
+    assertEquals("submission-stable",saved().path("submissionId").asText());
+    assertEquals(0,saved().path("snapshot").path("paid").asInt());
+    assertTrue(saved().path("request").path("remark").asText().contains("财务须在聚水潭审核"));
+    assertEquals(before,submitted.orderSnapshot());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void feishuResubmissionKeepsTheOriginalErpIdentityAndCannotUploadTwice() throws Exception {
+    transport.push(submitted("first-approval","","submission-stable"));
+    assertEquals("ACCEPTED",transport.push(submitted("replacement-approval","new-instance","submission-stable")).path("status").asText());
+    verify(client,times(1)).upload(any());
+    assertThrows(JushuitanCreditPushService.Blocked.class,
+        ()->transport.push(submitted("replacement-approval","new-instance","different-submission")));
+    verify(client,times(1)).upload(any());
+  }
   private JsonNode queried(String status,long id,String so) throws Exception {
     return json("{\"code\":0,\"data\":{\"orders\":[{\"shop_id\":1,\"so_id\":\""+so+"\",\"o_id\":"+id+",\"status\":\""+status+"\"}]}}");
   }

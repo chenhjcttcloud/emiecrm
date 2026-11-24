@@ -29,7 +29,7 @@
 | 基础API | 店铺查询 | `/open/shops/query` | 选择店铺、校验店铺是否存在及是否支持订单上传 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=1&docId=1) |
 | 商品API | 普通商品资料查询（按sku查询） | `/open/sku/query` | 确认SKU存在、启用，并取得款式编码；有库存记录不等于商品资料有效 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=2&docId=14) |
 | 库存API | 商品库存查询 | `/open/inventory/query` | 查询实物库存、订单占用、仓库待发等；提交前检查库存记录 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=3&docId=15) |
-| 订单API | 订单上传（商家自有商城、跨境线下） | `/open/jushuitan/orders/upload` | 上传已批准且全额收款订单，取得聚水潭内部单号 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=4&docId=18) |
+| 订单API | 订单上传（商家自有商城、跨境线下） | `/open/jushuitan/orders/upload` | 上传已正式提交的账期单（财务在ERP审核）或既有已批准全款单，取得内部单号 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=4&docId=18) |
 | 订单API | 订单查询 | `/open/orders/single/query` | 推送结果核对、待审核/异常/取消等状态查询、超时查单 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=4&docId=22) |
 | 出库API | 销售出库查询 | `/open/orders/out/simple/query` | 获取实际出库明细、物流公司和运单号，汇总拆单/分批发货数量 | 成功 | 待核对 | [文档](https://openweb.jushuitan.com/dev-doc?docType=8&docId=34) |
 

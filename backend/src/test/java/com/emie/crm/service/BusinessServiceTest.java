@@ -262,6 +262,65 @@ class BusinessServiceTest {
     shipment.put("creditFulfillment",false);
     assertEquals(0,BusinessService.receiptExecutionView(db,order(stored)).path("paid").asInt());
   }
+
+  @Test void parallelCreditShipmentAllowsActualApprovalLifecycleWithoutUnlockingSubmittedContents() throws Exception {
+    var snapshot=order(stored).deepCopy(); snapshot.put("status","审批中");
+    var shipment=mapper.createObjectNode().put("orderId","o1").put("creditFulfillment",true); shipment.set("snapshot",snapshot);
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    for(String status:List.of("审批中","草稿","已批准")) {
+      order(stored).put("status",status);
+      var permitted=draft(); order(permitted).put("note","真实审批结果后的补充说明");
+      assertEquals(status,order(save(permitted,admin)).path("status").asText());
+    }
+    var changed=draft();order(changed).put("total",101);((ObjectNode)order(changed).path("items").get(0)).put("price",101);
+    assertThrows(ApiException.class,()->save(changed,admin)); assertTrue(history.isEmpty());
+    shipment.put("creditFulfillment",false);
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    assertThrows(ApiException.class,()->save(draft(),admin));
+  }
+
+  @Test void durableTaskLocksSubmissionBeforeAnyShipmentExistsAndDoesNotLockCashOrApprovalStatus() throws Exception {
+    order(stored).put("status","草稿").put("owner","销售甲");
+    order(stored).putObject("approvalDraft").put("warehouseId","5").put("warehouseName","仓库")
+        .put("recipientProvince","广东省").put("recipientCity","深圳市").put("recipientDistrict","龙岗区")
+        .put("recipientName","收货人").put("recipientPhone","13800000000").put("recipientAddress","万科星火online10栋");
+    var task=mapper.createObjectNode().put("orderId","o1").put("policyVersion",2).put("trigger","ORDER_SUBMISSION");
+    task.set("orderSnapshot",order(stored).deepCopy().put("status","审批中"));
+    when(db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id")).thenReturn(List.of(Map.of("payload",task.toString())));
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    var permitted=draft();order(permitted).put("note","审批创建失败后保留的说明"); save(permitted,admin);
+    for(String field:List.of("owner","recipientProvince","recipientCity","recipientDistrict","recipientName","recipientPhone","recipientAddress","warehouseName")) {
+      var changed=draft();
+      if(field.equals("owner"))order(changed).put(field,"销售乙"); else ((ObjectNode)order(changed).path("approvalDraft")).put(field,"另一份资料");
+      assertThrows(ApiException.class,()->save(changed,admin),field);
+    }
+    assertEquals(0,order(stored).path("paid").asInt()); assertTrue(history.isEmpty());
+    when(db.rows(contains("FROM jst_credit_pushes"),eq("o1"),eq("o1"),eq("o1"),eq("o1")))
+        .thenReturn(List.of(Map.of("order_id","o1")));
+    assertFalse(BusinessService.canStopFinancially(db,order(stored)));
+  }
+
+  @Test void backupIncludesDurableCreditTasksAndRestoreCannotEraseRewindOrInventThem() throws Exception {
+    var task=mapper.createObjectNode().put("orderId","o1").put("policyVersion",2).put("trigger","ORDER_SUBMISSION")
+        .put("status","UNKNOWN").put("soId","CRM-"+"a".repeat(32)).put("submissionId","submission-1");
+    task.set("orderSnapshot",order(stored).deepCopy().put("status","审批中"));
+    when(db.rows("SELECT payload FROM jst_credit_pushes ORDER BY order_id")).thenReturn(List.of(Map.of("payload",task.toString())));
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    var assets=mock(AssetService.class);when(assets.backup(any())).thenReturn(Map.of());service=new BusinessService(db,assets);
+    var backup=(ObjectNode)mapper.valueToTree(service.backup());
+    assertEquals(task,backup.path("jstCreditPushes").get(0));
+    var missing=backup.deepCopy();missing.remove("jstCreditPushes");
+    assertThrows(ApiException.class,()->service.restore(missing,admin));
+    var old=backup.deepCopy();((ObjectNode)old.path("jstCreditPushes").get(0)).put("status","QUEUED");
+    assertThrows(ApiException.class,()->service.restore(old,admin));
+    var injected=backup.deepCopy();injected.withArray("jstCreditPushes").add(task.deepCopy().put("orderId","fake"));
+    assertThrows(ApiException.class,()->service.restore(injected,admin));
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+    service.restore(backup,admin);
+    verify(db).state(any(JsonNode.class));
+    verify(db.jdbc(),never()).update(startsWith("INSERT INTO jst_credit_pushes"),any(Object[].class));
+  }
   @Test void restoreCannotEraseCreditModeOrAlterTheApprovedCreditSnapshot() throws Exception {
     var shipment=mapper.createObjectNode().put("orderId","o1").put("soId","CRM-"+"a".repeat(32)).put("creditFulfillment",true);
     shipment.set("snapshot",order(stored).deepCopy());

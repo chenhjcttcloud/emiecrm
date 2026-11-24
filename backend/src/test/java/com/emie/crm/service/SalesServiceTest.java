@@ -91,6 +91,21 @@ class SalesServiceTest {
   private JsonNode receiptList(int page, int pageSize, String q, String month, String owner, String customer, String method) {
     return mapper.valueToTree(service.receipts(page, pageSize, q, month, owner, customer, method, reader));
   }
+
+  @Test void shippedRejectedOrCancelledOrdersRemainVisibleAndHistoricalCashStaysActual() {
+    var order=order("rejected","100","25").put("status","已取消");line(order,"1","100");
+    shipments.add(Map.of("order_id","rejected","payload","{\"environment\":\"sandbox\",\"status\":\"SHIPPED\",\"nativeStatus\":\"Sent\",\"oId\":123,\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":100,\"paid\":100}}"));
+    when(db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id"))
+        .thenReturn(List.of(Map.of("payload","{\"orderId\":\"rejected\",\"status\":\"REJECTED\"}")));
+    var items=items();assertEquals(1,items.path("rows").size());var row=items.path("rows").get(0);
+    assertEquals("已取消",row.path("status").asText());assertEquals("REJECTED",row.path("approvalStatus").asText());
+    assertTrue(row.path("fulfillmentException").asBoolean());assertEquals("SHIPPED",row.path("erpStatus").asText());
+    assertTrue(row.path("fulfillmentWarning").asText().contains("已驳回"));
+    receipt("real-receipt","rejected","25","银行转账","2026-11-03");
+    var cash=receiptList(1,20,"","2026-11","","","");money("25",cash.path("summary").path("amount"));
+    assertEquals("部分回款",cash.path("rows").get(0).path("status").asText());assertTrue(cash.path("rows").get(0).path("fulfillmentException").asBoolean());
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
   private void money(String expected, JsonNode actual) {
     assertFalse(actual.isMissingNode(), "Missing decimal field");
     assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(actual.asText())), actual.toString());

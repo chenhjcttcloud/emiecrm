@@ -72,6 +72,7 @@ class FeishuSalesApprovalServiceTest {
     state.set("products", fixture.products());
     record.set("orderSnapshot", order.deepCopy());
     JushuitanCreditPushPolicy.markSubmission(record, order, state.path("products"), "sandbox");
+    record.put("creditPushPolicyVersion",JushuitanCreditPushPolicy.VERSION);
     when(client.instance("instance")).thenReturn(instance("APPROVED"));
     var first = service.sync("o1", reader);
     assertEquals("APPROVED", first.path("status").asText());
@@ -283,7 +284,7 @@ class FeishuSalesApprovalServiceTest {
   @Test void aNewExternalLinkDuringWithdrawalDoesNotCancelTheLinkedOrder() {
     when(client.instance("instance")).thenReturn(instance("PENDING"), instance("CANCELED"));
     doAnswer(call -> {
-      when(db.rows(startsWith("SELECT order_id FROM jst_shipments"), eq("o1"), eq("o1"), eq("o1")))
+      when(db.rows(startsWith("SELECT order_id FROM jst_shipments"), eq("o1"), eq("o1"), eq("o1"), eq("o1")))
           .thenReturn(List.of(Map.of("order_id", "o1")));
       return null;
     }).when(client).cancel(any(), any(), any());

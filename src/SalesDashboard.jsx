@@ -2,6 +2,7 @@ import React,{useEffect,useMemo,useRef,useState} from 'react';
 import Pagination from './Pagination';
 import {orderNumber,orderNumberForId} from './orderNumber';
 import{DASHBOARD_FILTER_KEY,currentDashboardMonth,shiftDashboardMonth,normalizeDashboardFilters,targetProgress,dashboardMoney,dashboardTime,dashboardDetailRows,sumDashboardMoney}from'./dashboardModel';
+import {approvalLabels,jstNativeStatusLabel} from './feishuApprovalModel';
 import './dashboard.css';
 
 const loadFilters=()=>{try{return normalizeDashboardFilters(JSON.parse(localStorage.getItem(DASHBOARD_FILTER_KEY)))}catch{return normalizeDashboardFilters(null)}};
@@ -38,6 +39,8 @@ export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=fa
  const selectedCustomer=options.customers.find(customer=>customer.id===filters.customerId)?.name;
  const context=[filters.month,filters.owner||'全部签单人',selectedCustomer||(filters.customerId?'所选客户':'全部客户')].join(' · ');
  const count=value=>value!==null&&value!==undefined&&Number.isFinite(Number(value))?Number(value).toLocaleString('zh-CN'):'—';
+ const fulfillmentRows=Array.isArray(data?.fulfillmentExceptions?.rows)?data.fulfillmentExceptions.rows:[];
+ const fulfillmentCount=data?.fulfillmentExceptions?.count??data?.summary?.fulfillmentExceptionCount??fulfillmentRows.length;
  return <div className="sales-dashboard">
   <div className="page-heading"><div><div className="breadcrumb">经营看板 <span>/</span> 销售看板</div><h1>销售看板</h1><p>目标、销售与回款进度，一屏掌握。</p></div><div className="dashboard-heading-actions">{canManageTargets&&<button type="button" className="secondary" onClick={onManageTargets}><Icon name="settings" size={16}/>业绩目标</button>}</div></div>
   <section className="dashboard-filters" aria-label="销售看板筛选">
@@ -62,6 +65,16 @@ export default function SalesDashboard({api,Icon,DialogLayer,canManageTargets=fa
   {error&&<div className="dashboard-state dashboard-error" role="alert"><Icon name="clock" size={25}/><strong>看板加载失败</strong><p>{error}</p><button type="button" className="secondary" onClick={()=>setRefresh(value=>value+1)}>重新加载</button></div>}
   {loading&&<div className="dashboard-state" role="status" aria-live="polite"><span className="dashboard-loading-mark"/><strong>正在汇总销售数据…</strong><p>读取订单、回款与预收款记录</p></div>}
   {!loading&&!error&&data&&<>
+   {Number(fulfillmentCount)>0&&<details className="dashboard-fulfillment-exceptions" aria-label="聚水潭执行与飞书审批异常">
+    <summary>聚水潭已有执行、飞书审批待核对（{count(fulfillmentCount)} 笔）</summary>
+    <p>以下订单保留聚水潭原单和真实应收，单独列示；正常已批准销售绩效保持原口径。</p>
+    <div className="table-scroll"><table className="dashboard-detail-table"><thead><tr>{['订单 / 客户','飞书审批','聚水潭进度','实际已收','待收金额','核对提示'].map(label=><th key={label}>{label}</th>)}</tr></thead>
+     <tbody>{fulfillmentRows.map(row=><tr key={row.orderId}><td>{row.orderNumber||row.orderId}<small>{row.customer}</small></td>
+      <td>{approvalLabels[row.approvalStatus]||row.approvalStatus||row.crmStatus||'待核对'}</td>
+      <td>{jstNativeStatusLabel(row.nativeStatus)||({SHIPPED:'聚水潭已发货',PARTIAL:'聚水潭部分发货',ACCEPTED:'聚水潭已接单',EXCEPTION:'聚水潭订单异常',CANCELLED:'聚水潭已取消'}[row.erpStatus])||'聚水潭原单待核对'}<small>{row.soId}</small></td>
+      <td>{dashboardMoney(row.paid)}</td><td>{dashboardMoney(row.outstanding)}</td><td>{row.fulfillmentWarning||'飞书审批异常，请核对聚水潭原单。'}</td></tr>)}</tbody>
+    </table></div>
+   </details>}
    <div className="dashboard-canvas">
     <div className="dashboard-top-grid">
      <section className="dashboard-goal-card" aria-label="公司月度业绩目标"><div className="dashboard-card-heading"><h2>业绩目标</h2><span>{selectedTargetScope?'参与部门目标汇总':automaticTarget?'销售目标自动汇总':'公司月度目标'}</span></div>

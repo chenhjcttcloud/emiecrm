@@ -70,7 +70,8 @@ public class SalesService {
   }
 
   private record Snapshot(JsonNode state, Map<String, JsonNode> orders, Map<String, JsonNode> customers,
-                          Map<String, String> names, Map<String, JsonNode> products, Map<String, JsonNode> effective) {}
+                          Map<String, String> names, Map<String, JsonNode> products, Map<String, JsonNode> effective,
+                          Map<String, JsonNode> shipments, Map<String, JsonNode> approvals) {}
 
   private static Map<String, JsonNode> index(JsonNode nodes) {
     var result = new LinkedHashMap<String, JsonNode>();
@@ -90,8 +91,10 @@ public class SalesService {
     ambiguous.forEach(names::remove);
     var orders = index(state.path("orders"));
     var effective = new HashMap<String, JsonNode>();
+    var shipments = new HashMap<String, JsonNode>();
     for (var row : db.rows("SELECT order_id,payload FROM jst_shipments")) {
       var shipment = db.parse(row.get("payload").toString());
+      if (environment.equals(shipment.path("environment").asText())) shipments.put(row.get("order_id").toString(), shipment);
       if (environment.equals(shipment.path("environment").asText()) && shipment.path("effectiveOrder").isObject()) {
         String id = row.get("order_id").toString();
         var view = (com.fasterxml.jackson.databind.node.ObjectNode) shipment.path("effectiveOrder").deepCopy();
@@ -104,7 +107,11 @@ public class SalesService {
         effective.put(id, view);
       }
     }
-    return new Snapshot(state, orders, customers, names, index(state.path("products")), effective);
+    var approvals = new HashMap<String, JsonNode>();
+    for (var row : db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id")) {
+      var approval = db.parse(row.get("payload").toString()); approvals.put(approval.path("orderId").asText(), approval);
+    }
+    return new Snapshot(state, orders, customers, names, index(state.path("products")), effective, shipments, approvals);
   }
 
   private static String customerId(JsonNode record, Snapshot snapshot) {
@@ -120,7 +127,8 @@ public class SalesService {
   private static Map<String, Object> options(Snapshot snapshot) {
     var owners = new TreeSet<String>();
     for (var order : snapshot.orders().values())
-      if (activeOrder(order) && !order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
+      if ((activeOrder(order) || CreditFulfillmentView.exception(order, snapshot.shipments().get(order.path("id").asText())))
+          && !order.path("owner").asText().isBlank()) owners.add(order.path("owner").asText());
     return new LinkedHashMap<>(Map.of("owners", owners, "customers", snapshot.customers().values().stream()
         .map(c -> Map.of("id", c.path("id").asText(), "name", c.path("name").asText())).toList()));
   }
@@ -180,13 +188,17 @@ public class SalesService {
     var warnings = new LinkedHashSet<String>();
     var matched = new ArrayList<Map<String, Object>>();
     for (var order : snapshot.orders().values()) {
-      if (!activeOrder(order) || !"销售订单".equals(order.path("type").asText())) continue;
+      var shipment = snapshot.shipments().get(order.path("id").asText());
+      if ((!activeOrder(order) && !CreditFulfillmentView.exception(order, shipment)) || !"销售订单".equals(order.path("type").asText())) continue;
       String id = order.path("id").asText(), signer = order.path("owner").asText(), cid = customerId(order, snapshot);
       String orderNumber = OrderNumbers.display(order);
       if (!owner.isEmpty() && !owner.equals(signer) || !selectedCustomer.isEmpty() && !selectedCustomer.equals(cid)) continue;
       var day = orderDate(order, warnings);
       if (day == null) warnings.add("订单 " + orderNumber + " 缺少有效所属日期，未推算月份。");
       if (period != null && (day == null || !YearMonth.from(day).equals(period))) continue;
+      var approval = snapshot.approvals().get(id);
+      String fulfillmentWarning = CreditFulfillmentView.message(order, shipment, approval);
+      if (!fulfillmentWarning.isEmpty()) warnings.add("订单 " + orderNumber + "：" + fulfillmentWarning);
       var effective = snapshot.effective().getOrDefault(id, order);
       var lines = effective.has("items") ? effective.path("items") : order.path("items");
       if (!lines.isArray() || lines.isEmpty()) {
@@ -211,6 +223,7 @@ public class SalesService {
           row.put("orderNumber", orderNumber);
           row.put("customer", customerName(order, cid, snapshot)); row.put("owner", signer);
           row.put("status", order.path("status").asText()); row.put("date", day == null ? null : day.toString());
+          row.putAll(CreditFulfillmentView.fields(order, shipment, approval));
           row.put("productId", productId);
           row.put("product", product == null ? Optional.ofNullable(text(line, "name")).orElse(productId) : product.path("name").asText(productId));
           row.put("code", product == null ? null : text(product, "code"));
@@ -355,6 +368,12 @@ public class SalesService {
       var row = new LinkedHashMap<String, Object>();
       row.put("id", receipt.path("id").asText()); row.put("orderId", orderId); row.put("customerId", cid);
       row.put("orderNumber", orderNumber);
+      if (origin != null) {
+        var shipment = snapshot.shipments().get(orderId); var approval = snapshot.approvals().get(orderId);
+        row.putAll(CreditFulfillmentView.fields(origin, shipment, approval));
+        String warning = CreditFulfillmentView.message(origin, shipment, approval);
+        if (!warning.isEmpty()) warnings.add("订单 " + orderNumber + "：" + warning);
+      }
       row.put("customer", customer); row.put("owner", signer); row.put("type", receipt.path("type").asText());
       row.put("amount", money(amount)); row.put("method", paymentMethod); row.put("receivedOn", receivedOn); row.put("time", time);
       row.put("operator", receipt.path("operator").asText());

@@ -30,6 +30,8 @@ class JushuitanCreditPushPolicyTest {
         .put("instanceCode","instance");
     approval.set("orderSnapshot",order.deepCopy());
     JushuitanCreditPushPolicy.markSubmission(approval,order,products(),"sandbox");
+    // This shared fixture represents the retained approval-triggered v1 contract.
+    if (approval.has("creditPushPolicyVersion")) approval.put("creditPushPolicyVersion",JushuitanCreditPushPolicy.VERSION);
     return approval;
   }
 
@@ -62,6 +64,18 @@ class JushuitanCreditPushPolicyTest {
     assertEquals(0,order.path("paid").asInt());
     JushuitanCreditPushPolicy.enqueue(approval,order);
     assertEquals(push,approval.path("creditPush"));
+  }
+
+  @Test void newFormalSubmissionCreatesAnIndependentPendingApprovalIntentWithoutInventingApproval() throws Exception {
+    var order=order().put("status","审批中");var approval=approval(order).put("status","QUEUED").put("instanceCode","");
+    JushuitanCreditPushPolicy.markSubmission(approval,order,products(),"sandbox");
+    assertEquals(2,approval.path("creditPushPolicyVersion").asInt());
+    var task=JushuitanCreditPushPolicy.intentForSubmission(approval,order,products(),"sandbox");
+    assertTrue(JushuitanCreditPushPolicy.isParallelJob(task));assertEquals("QUEUED",task.path("status").asText());
+    assertEquals("ORDER_SUBMISSION",task.path("trigger").asText());assertFalse(task.path("submissionId").asText().isBlank());
+    assertEquals("审批中",task.path("orderSnapshot").path("status").asText());assertEquals(0,task.path("orderSnapshot").path("paid").asInt());
+    assertEquals("",task.path("instanceCode").asText());assertFalse(task.path("input").has("pay"));
+    JushuitanCreditPushPolicy.enqueue(approval,order);assertFalse(approval.has("creditPush"));
   }
 
   @Test void missingShippingInformationBlocksTheIntentInsteadOfThrowingAwayApproval() throws Exception {

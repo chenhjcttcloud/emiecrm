@@ -140,11 +140,18 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
 
   private void authorize(JushuitanCreditPushService.Submission submission) {
     if (!ready()) throw new JushuitanCreditPushService.Blocked(unavailableMessage());
+    boolean submitted = onSubmission(submission);
     if (!environment.equals(submission.environment()) || !MODE.equals(submission.input().path("accountingMode").asText())
         || submission.orderId().isBlank() || !submission.orderId().equals(submission.orderSnapshot().path("id").asText())
-        || !submission.soId().matches("CRM-[a-f0-9]{32}") || submission.approvalUuid().isBlank()
-        || submission.instanceCode().isBlank() || submission.attemptId().isBlank())
-      throw new JushuitanCreditPushService.Blocked("审批、账期挂账授权或聚水潭环境不一致，未发送订单");
+        || !submission.soId().matches("CRM-[a-f0-9]{32}") || submission.attemptId().isBlank()
+        || (submitted ? submission.submissionId().isBlank() : submission.policyVersion() != 1
+            || !"APPROVAL_RESULT".equals(submission.trigger())
+            || submission.approvalUuid().isBlank() || submission.instanceCode().isBlank()))
+      throw new JushuitanCreditPushService.Blocked("提交任务、账期挂账授权或聚水潭环境不一致，未发送订单");
+  }
+
+  private static boolean onSubmission(JushuitanCreditPushService.Submission submission) {
+    return submission.policyVersion() == 2 && "ORDER_SUBMISSION".equals(submission.trigger());
   }
 
   private Prepared prepare(JushuitanCreditPushService.Submission submission) {
@@ -163,25 +170,32 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
       if (!db.rows("SELECT order_id FROM jst_document_sales WHERE order_id=?", submission.orderId()).isEmpty())
         throw new JushuitanCreditPushService.Blocked("订单已有聚水潭销售单关联，不能重复推送");
       var request = frozen ? (ObjectNode)record.path("request").deepCopy()
-          : canonicalRequest(JushuitanOrderMapper.buildCredit(mapper, submission.orderSnapshot(), submission.products(),
-              submission.input(), submission.soId(), environment.equals("sandbox")));
+          : canonicalRequest(onSubmission(submission)
+              ? JushuitanOrderMapper.buildSubmittedCredit(mapper, submission.orderSnapshot(), submission.products(),
+                  submission.input(), submission.soId(), environment.equals("sandbox"))
+              : JushuitanOrderMapper.buildCredit(mapper, submission.orderSnapshot(), submission.products(),
+                  submission.input(), submission.soId(), environment.equals("sandbox")));
       boolean fresh = record == null;
       if (fresh) record = mapper.createObjectNode().put("orderId", submission.orderId()).put("soId", submission.soId())
           .put("environment", environment).put("approvalUuid", submission.approvalUuid()).put("instanceCode", submission.instanceCode())
           .put("creditFulfillment", true).put("accountingMode", MODE).put("createdAt", CrmRepository.now())
-          .put("operator", "飞书审批自动推单");
+          .put("operator", onSubmission(submission) ? "订单提交自动推单" : "飞书审批自动推单");
+      if (onSubmission(submission)) record.put("policyVersion", 2).put("trigger", "ORDER_SUBMISSION")
+          .put("submissionId", submission.submissionId());
       record.put("attemptId", submission.attemptId()).put("transportVersion", UUID.randomUUID().toString())
           .put("status", "SUBMITTING").put("busy", true)
           .put("startedAt", Instant.now().toEpochMilli()).put("updatedAt", CrmRepository.now()).put("upstreamAttempted", frozen);
       record.set("request", request);
       if (!frozen) record.set("snapshot", submission.orderSnapshot().deepCopy());
       record.remove("effectiveOrder");
-      event(record, "已登记飞书审批账期挂账请求，正在校验店铺、仓库及商品");
+      event(record, onSubmission(submission) ? "已登记提交订单账期推送，正在校验店铺、仓库及商品；财务在聚水潭审核"
+          : "已登记飞书审批账期挂账请求，正在校验店铺、仓库及商品");
       if (fresh) {
         db.jdbc().update("INSERT INTO jst_shipments(order_id,payload) VALUES(?,?)", submission.orderId(), db.encode(record));
         var details = mapper.createObjectNode().put("soId", submission.soId()).put("approvalUuid", submission.approvalUuid())
             .put("instanceCode", submission.instanceCode()).put("accountingMode", MODE).put("noncash", true);
-        db.audit("SYSTEM", "飞书审批自动账期推送：" + submission.orderId(), details);
+        if (onSubmission(submission)) details.put("trigger", "ORDER_SUBMISSION").put("submissionId", submission.submissionId());
+        db.audit("SYSTEM", (onSubmission(submission) ? "订单提交自动账期推送：" : "飞书审批自动账期推送：") + submission.orderId(), details);
       } else db.jdbc().update("UPDATE jst_shipments SET payload=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?", db.encode(record), submission.orderId());
       return new Prepared(record, true, frozen);
     });
@@ -189,8 +203,11 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
 
   private void requireIdentity(JsonNode record, JushuitanCreditPushService.Submission submission) {
     if (!submission.orderId().equals(record.path("orderId").asText()) || !submission.soId().equals(record.path("soId").asText())
-        || !submission.approvalUuid().equals(record.path("approvalUuid").asText())
-        || !submission.instanceCode().equals(record.path("instanceCode").asText())
+        || (onSubmission(submission)
+            ? record.path("policyVersion").asInt() != 2 || !"ORDER_SUBMISSION".equals(record.path("trigger").asText())
+                || !submission.submissionId().equals(record.path("submissionId").asText())
+            : record.path("policyVersion").asInt(1) != 1 || !submission.approvalUuid().equals(record.path("approvalUuid").asText())
+                || !submission.instanceCode().equals(record.path("instanceCode").asText()))
         || !environment.equals(record.path("environment").asText()) || !record.path("creditFulfillment").asBoolean()
         || !MODE.equals(record.path("accountingMode").asText())
         || !submission.soId().equals(record.path("request").path("so_id").asText()))

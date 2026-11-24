@@ -19,11 +19,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** A durable approval-owned outbox; the transport owns ERP request persistence and reconciliation. */
+/** A durable order-owned outbox; Feishu approval and ERP execution keep independent lifecycles. */
 @Service
 public class JushuitanCreditPushService {
   public record Submission(String orderId, String soId, String approvalUuid, String instanceCode,
-      String environment, JsonNode orderSnapshot, JsonNode products, JsonNode input, String attemptId) {}
+      String environment, JsonNode orderSnapshot, JsonNode products, JsonNode input, String attemptId,
+      int policyVersion, String trigger, String submissionId) {
+    public Submission(String orderId, String soId, String approvalUuid, String instanceCode,
+        String environment, JsonNode orderSnapshot, JsonNode products, JsonNode input, String attemptId) {
+      this(orderId, soId, approvalUuid, instanceCode, environment, orderSnapshot, products, input, attemptId,
+          JushuitanCreditPushPolicy.VERSION, "APPROVAL_RESULT", "");
+    }
+  }
 
   public interface Transport {
     /** Explicit capability gate: an unconfirmed credit-order contract must remain disabled. */
@@ -42,7 +49,8 @@ public class JushuitanCreditPushService {
   private static final Logger LOG = LoggerFactory.getLogger(JushuitanCreditPushService.class);
   private static final long LEASE_MS = 120000;
   private static final long RECHECK_MS = 60000;
-  private static final String SELECT = "SELECT payload FROM feishu_order_approvals WHERE order_id=?";
+  private static final String SELECT = "SELECT payload FROM jst_credit_pushes WHERE order_id=?";
+  private static final String APPROVAL_SELECT = "SELECT payload FROM feishu_order_approvals WHERE order_id=?";
   private static final Set<String> ACCEPTED = Set.of("ACCEPTED", "PARTIAL", "SHIPPED", "EXCEPTION", "CANCELLED");
   private final CrmRepository db;
   private final TransactionTemplate tx;
@@ -59,8 +67,40 @@ public class JushuitanCreditPushService {
 
   public List<ObjectNode> list(Actor actor) {
     actor.require("business.read");
-    return db.rows("SELECT payload FROM feishu_order_approvals WHERE JSON_EXTRACT(payload,'$.creditPush') IS NOT NULL ORDER BY updated_at DESC,order_id")
-        .stream().map(row -> JushuitanCreditPushPolicy.summary(db.parse(row.get("payload").toString()).path("creditPush"))).toList();
+    return db.rows("SELECT payload FROM jst_credit_pushes ORDER BY updated_at DESC,order_id")
+        .stream().map(row -> JushuitanCreditPushPolicy.summary(db.parse(row.get("payload").toString()))).toList();
+  }
+
+  /** Called while the enclosing CRM/Feishu submission transaction holds the state lock. */
+  static void registerSubmission(CrmRepository db, JsonNode approval, JsonNode order, JsonNode products, String environment) {
+    if (!JushuitanCreditPushPolicy.optedIn(order)) return;
+    require("审批中".equals(order.path("status").asText()), "请正式提交销售订单后推送聚水潭，草稿不会推送");
+    var rows = db.rows(SELECT + " FOR UPDATE", order.path("id").asText());
+    if (!rows.isEmpty()) {
+      var existing = db.parse(rows.getFirst().get("payload").toString());
+      require(environment.equals(existing.path("environment").asText())
+          && JushuitanCreditPushPolicy.sameApprovedContents(existing.path("orderSnapshot"), order),
+          "该订单已有聚水潭推送任务，客户、商品、金额及发货资料不能重提修改；请核对原ERP单");
+      return;
+    }
+    require(db.rows("SELECT order_id FROM jst_shipments WHERE order_id=?", order.path("id").asText()).isEmpty()
+        && db.rows("SELECT order_id FROM jst_document_sales WHERE order_id=?", order.path("id").asText()).isEmpty(),
+        "该订单已有聚水潭记录，不能因重新提交审批另建ERP单");
+    var task = JushuitanCreditPushPolicy.intentForSubmission(approval, order,
+        JushuitanCreditPushPolicy.products(order, products), environment);
+    db.jdbc().update("INSERT INTO jst_credit_pushes(order_id,payload) VALUES(?,?)", task.path("orderId").asText(), db.encode(task));
+  }
+
+  /** Legacy approval recognition copies only its existing v1 intent, never upgrades its trigger. */
+  static void registerLegacy(CrmRepository db, JsonNode approval) {
+    var task = approval.path("creditPush");
+    if (task.isObject() && task.path("policyVersion").asInt() == JushuitanCreditPushPolicy.VERSION)
+      db.jdbc().update("INSERT IGNORE INTO jst_credit_pushes(order_id,payload) VALUES(?,?)", approval.path("orderId").asText(), db.encode(task));
+  }
+
+  static ObjectNode summary(CrmRepository db, String orderId) {
+    var rows = db.rows(SELECT, orderId);
+    return rows.isEmpty() ? null : JushuitanCreditPushPolicy.summary(db.parse(rows.getFirst().get("payload").toString()));
   }
 
   /** Internal, single-config authorization path. It does not impersonate a CRM user or bypass HTTP authentication. */
@@ -71,6 +111,10 @@ public class JushuitanCreditPushService {
       require(rows.size() == 1 && "APPROVED".equals(rows.getFirst().get("status"))
           && authorization.instanceCode().equals(rows.getFirst().get("instance_code")), "单次授权对应的审批记录尚未真实批准");
       var approval = (ObjectNode) db.parse(rows.getFirst().get("payload").toString());
+      var existingTask = load(authorization.orderId(), true);
+      require(existingTask == null || existingTask.path("policyVersion").asInt() == JushuitanCreditPushPolicy.VERSION,
+          "订单已绑定并行提交任务，不能通过旧审批补推授权修改");
+      if (existingTask != null) approval.set("creditPush", existingTask);
       var order = order(state, authorization.orderId());
       requireApproved(approval, order);
       require(authorization.orderId().equals(approval.path("orderId").asText())
@@ -135,7 +179,7 @@ public class JushuitanCreditPushService {
       }
       push.put("authorizationId", authorization.authorizationId()).put("authorizationSource", "EXPLICIT_USER_ONE_ORDER")
           .put("authorizedAt", CrmRepository.now()).put("nextAttemptAt", 0);
-      approval.set("creditPush", push); store(approval);
+      approval.set("creditPush", push); storeLegacy(approval);
       var audit = db.object().put("type", "JST_CREDIT_ONE_ORDER_AUTHORIZED").put("authorizationId", authorization.authorizationId())
           .put("orderId", authorization.orderId()).put("approvalUuid", authorization.approvalUuid())
           .put("instanceCode", authorization.instanceCode()).put("shopId", authorization.shopId())
@@ -161,9 +205,20 @@ public class JushuitanCreditPushService {
     require(JushuitanCreditPushPolicy.ACCOUNTING_MODE.equals(details.path("accountingMode").asText()), "请明确确认ERP按账期挂账（非实收）放行，CRM实收保持真实");
     var result = tx.execute(transaction -> {
       var state = db.state(true);
-      var approval = load(orderId, true);
+      var task = load(orderId, true);
       var order = order(state, orderId);
+      if (task != null && JushuitanCreditPushPolicy.isParallelJob(task)) {
+        require(eligible(task, order), "订单提交资料已变化，请核对原聚水潭任务");
+        if (task.path("attempted").asBoolean() || ACCEPTED.contains(task.path("status").asText())
+            || "SUBMITTING".equals(task.path("status").asText())) return JushuitanCreditPushPolicy.summary(task);
+        JushuitanCreditPushPolicy.supplement(task, details);
+        task.put("updatedAt", CrmRepository.now()).put("nextAttemptAt", 0); store(task);
+        db.audit(actor.name(), "补齐原订单推单资料：" + OrderNumbers.display(order));
+        return JushuitanCreditPushPolicy.summary(task);
+      }
+      var approval = loadApproval(orderId, true);
       requireApproved(approval, order);
+      if (task != null) approval.set("creditPush", task);
       var old = approval.path("creditPush");
       if (old.isObject() && (old.path("attempted").asBoolean()
           || ACCEPTED.contains(old.path("status").asText()) || "SUBMITTING".equals(old.path("status").asText())))
@@ -182,7 +237,7 @@ public class JushuitanCreditPushService {
       }
       JushuitanCreditPushPolicy.supplement(push, details);
       push.put("updatedAt", CrmRepository.now()).put("nextAttemptAt", 0);
-      approval.set("creditPush", push); store(approval);
+      approval.set("creditPush", push); storeLegacy(approval);
       db.audit(actor.name(), "补齐账期推单资料：" + OrderNumbers.display(order));
       return JushuitanCreditPushPolicy.summary(push);
     });
@@ -193,10 +248,9 @@ public class JushuitanCreditPushService {
     actor.require("business.read"); actor.require("business.write"); actor.require("order.approve");
     return tx.execute(transaction -> {
       var state = db.state(true);
-      var approval = load(orderId, true);
-      requireApproved(approval, order(state, orderId));
-      require(approval.path("creditPush").isObject(), "该订单没有账期推单意图，请先确认补推资料");
-      var push = (ObjectNode) approval.path("creditPush");
+      var push = load(orderId, true);
+      require(push != null, "该订单没有账期推单意图，请先确认补推资料");
+      require(eligible(push, order(state, orderId)), "原订单推单资料或授权已变化，请先核对原任务");
       String status = push.path("status").asText();
       if (ACCEPTED.contains(status) || ("SUBMITTING".equals(status) && push.path("leaseUntil").asLong() > System.currentTimeMillis()))
         return JushuitanCreditPushPolicy.summary(push);
@@ -208,7 +262,7 @@ public class JushuitanCreditPushService {
       }
       push.put("nextAttemptAt", 0).put("updatedAt", CrmRepository.now());
       push.remove(List.of("attemptId", "leaseUntil"));
-      store(approval);
+      store(push);
       return JushuitanCreditPushPolicy.summary(push);
     });
   }
@@ -217,12 +271,12 @@ public class JushuitanCreditPushService {
   public boolean renew(Submission submission) {
     return Boolean.TRUE.equals(tx.execute(transaction -> {
       var state = db.state(true);
-      var approval = load(submission.orderId(), true);
-      if (!matches(approval, submission) || !approved(approval, order(state, submission.orderId()))
+      var task = load(submission.orderId(), true);
+      if (!matches(task, submission) || !eligible(task, order(state, submission.orderId()))
           || !environment.equals(submission.environment())
-          || !environment.equals(approval.path("creditPush").path("environment").asText())) return false;
-      ((ObjectNode) approval.path("creditPush")).put("leaseUntil", System.currentTimeMillis() + LEASE_MS);
-      store(approval);
+          || !environment.equals(task.path("environment").asText())) return false;
+      task.put("leaseUntil", System.currentTimeMillis() + LEASE_MS);
+      store(task);
       return true;
     }));
   }
@@ -230,9 +284,9 @@ public class JushuitanCreditPushService {
   @Scheduled(initialDelay = 35000, fixedDelayString = "${CRM_JST_CREDIT_PUSH_POLL_MS:15000}")
   void poll() {
     for (var row : db.rows("""
-        SELECT order_id FROM feishu_order_approvals WHERE status='APPROVED'
-          AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.creditPush.status')) IN ('QUEUED','BLOCKED','FAILED','UNKNOWN','SUBMITTING')
-          AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.creditPush.nextAttemptAt')) AS UNSIGNED),0)<=?
+        SELECT order_id FROM jst_credit_pushes
+        WHERE JSON_UNQUOTE(JSON_EXTRACT(payload,'$.status')) IN ('QUEUED','BLOCKED','FAILED','UNKNOWN','SUBMITTING')
+          AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.nextAttemptAt')) AS UNSIGNED),0)<=?
         ORDER BY updated_at,order_id LIMIT 10
         """, System.currentTimeMillis())) {
       try { process(row.get("order_id").toString()); }
@@ -256,17 +310,16 @@ public class JushuitanCreditPushService {
     final String unavailable = unavailableMessage;
     var claim = tx.execute(transaction -> {
       var state = db.state(true);
-      var approval = load(orderId, true);
-      if (approval == null || !approval.path("creditPush").isObject()) return null;
-      var push = (ObjectNode) approval.path("creditPush");
-      if (!approved(approval, order(state, orderId)) || !environment.equals(push.path("environment").asText())) {
+      var push = load(orderId, true);
+      if (push == null) return null;
+      if (!eligible(push, order(state, orderId)) || !environment.equals(push.path("environment").asText())) {
         JushuitanCreditPushPolicy.block(push, "订单审批或环境已变化，账期推送已停止，请人工核对");
-        push.put("nextAttemptAt", Long.MAX_VALUE); store(approval); return null;
+        push.put("nextAttemptAt", Long.MAX_VALUE); store(push); return null;
       }
       var linked = db.rows("SELECT payload FROM jst_shipments WHERE order_id=?", orderId);
       if (!linked.isEmpty() && !push.path("soId").asText().equals(db.parse(linked.getFirst().get("payload").toString()).path("soId").asText())) {
         JushuitanCreditPushPolicy.block(push, "该订单已有其他聚水潭提交记录，请核对现有发货详情，不能另建订单");
-        push.put("nextAttemptAt", Long.MAX_VALUE); store(approval); return null;
+        push.put("nextAttemptAt", Long.MAX_VALUE); store(push); return null;
       }
       String status = push.path("status").asText();
       if (ACCEPTED.contains(status) || push.path("nextAttemptAt").asLong() > System.currentTimeMillis()
@@ -275,19 +328,19 @@ public class JushuitanCreditPushService {
       if (!ready) {
         if (!reconcile) JushuitanCreditPushPolicy.block(push, safe(unavailable));
         else push.put("status", "UNKNOWN").put("message", "原推单结果待核对；账期接口暂不可用，不会另建订单");
-        push.put("nextAttemptAt", System.currentTimeMillis() + RECHECK_MS); store(approval); return null;
+        push.put("nextAttemptAt", System.currentTimeMillis() + RECHECK_MS); store(push); return null;
       }
       if (!reconcile) {
         JushuitanCreditPushPolicy.validateIntent(push);
         if ("BLOCKED".equals(push.path("status").asText())) {
-          push.put("nextAttemptAt", System.currentTimeMillis() + RECHECK_MS); store(approval); return null;
+          push.put("nextAttemptAt", System.currentTimeMillis() + RECHECK_MS); store(push); return null;
         }
       }
       String attempt = UUID.randomUUID().toString();
       push.put("status", "SUBMITTING").put("attemptId", attempt).put("leaseUntil", System.currentTimeMillis() + LEASE_MS)
           .put("attempts", push.path("attempts").asInt() + 1).put("updatedAt", CrmRepository.now());
       if (!reconcile) push.put("attempted", true);
-      store(approval);
+      store(push);
       return new Claim(submission(push, attempt), reconcile);
     });
     if (claim == null) return;
@@ -305,9 +358,8 @@ public class JushuitanCreditPushService {
   private void finish(Submission submission, JsonNode result, RuntimeException failure) {
     tx.executeWithoutResult(transaction -> {
       db.state(true);
-      var approval = load(submission.orderId(), true);
-      if (!matches(approval, submission)) return;
-      var push = (ObjectNode) approval.path("creditPush");
+      var push = load(submission.orderId(), true);
+      if (!matches(push, submission)) return;
       String status = result == null ? "UNKNOWN" : result.path("status").asText("UNKNOWN");
       boolean identity = result == null || ((!result.hasNonNull("soId") || submission.soId().equals(result.path("soId").asText()))
           && (!result.hasNonNull("orderId") || submission.orderId().equals(result.path("orderId").asText())));
@@ -332,38 +384,51 @@ public class JushuitanCreditPushService {
       push.remove(List.of("attemptId", "leaseUntil"));
       // A definite failure requires an explicit retry; UNKNOWN is reconciled, never resent blindly.
       if ("FAILED".equals(status)) push.put("nextAttemptAt", Long.MAX_VALUE);
-      store(approval);
+      store(push);
     });
   }
 
   private Submission submission(JsonNode push, String attempt) {
     return new Submission(push.path("orderId").asText(), push.path("soId").asText(), push.path("approvalUuid").asText(),
         push.path("instanceCode").asText(), push.path("environment").asText(), push.path("orderSnapshot").deepCopy(),
-        push.path("products").deepCopy(), push.path("input").deepCopy(), attempt);
+        push.path("products").deepCopy(), push.path("input").deepCopy(), attempt, push.path("policyVersion").asInt(),
+        push.path("trigger").asText("APPROVAL_RESULT"), push.path("submissionId").asText());
   }
 
-  private boolean matches(JsonNode approval, Submission submission) {
-    return approval != null && "APPROVED".equals(approval.path("status").asText())
+  private boolean matches(JsonNode task, Submission submission) {
+    if (task == null || task.path("policyVersion").asInt() != submission.policyVersion()
+        || !submission.orderId().equals(task.path("orderId").asText())
+        || !submission.environment().equals(task.path("environment").asText())
+        || !submission.attemptId().equals(task.path("attemptId").asText())
+        || !submission.soId().equals(task.path("soId").asText())
+        || !"SUBMITTING".equals(task.path("status").asText())) return false;
+    if (JushuitanCreditPushPolicy.isParallelJob(task))
+      return JushuitanCreditPushPolicy.SUBMISSION_TRIGGER.equals(submission.trigger())
+          && submission.submissionId().equals(task.path("submissionId").asText());
+    var approval = loadApproval(submission.orderId(), true);
+    return task.path("policyVersion").asInt() == JushuitanCreditPushPolicy.VERSION && approval != null
+        && "APPROVED".equals(approval.path("status").asText())
         && submission.approvalUuid().equals(approval.path("uuid").asText())
-        && submission.instanceCode().equals(approval.path("instanceCode").asText())
-        && submission.attemptId().equals(approval.path("creditPush").path("attemptId").asText())
-        && submission.soId().equals(approval.path("creditPush").path("soId").asText())
-        && "SUBMITTING".equals(approval.path("creditPush").path("status").asText());
+        && submission.instanceCode().equals(approval.path("instanceCode").asText());
   }
 
-  private boolean approved(JsonNode approval, JsonNode order) {
+  private boolean eligible(JsonNode task, JsonNode order) {
+    if (task == null || !JushuitanCreditPushPolicy.ordinary(order)
+        || !Set.of("草稿", "审批中", "已批准").contains(order.path("status").asText())
+        || !task.path("orderId").asText().equals(order.path("id").asText())
+        || !task.path("soId").asText().matches("CRM-[a-f0-9]{32}")
+        || !JushuitanCreditPushPolicy.ACCOUNTING_MODE.equals(task.path("accountingMode").asText())
+        || !JushuitanCreditPushPolicy.sameApprovedContents(task.path("orderSnapshot"), order)) return false;
+    if (JushuitanCreditPushPolicy.isParallelJob(task)) return JushuitanCreditPushPolicy.optedIn(task.path("orderSnapshot"));
+    if (task.path("policyVersion").asInt() != JushuitanCreditPushPolicy.VERSION) return false;
+    var approval = loadApproval(order.path("id").asText(), true);
     return approval != null && approval.path("creditPushPolicyVersion").asInt() == JushuitanCreditPushPolicy.VERSION
         && "APPROVED".equals(approval.path("status").asText()) && !approval.path("uuid").asText().isBlank()
-        && !approval.path("instanceCode").asText().isBlank() && JushuitanCreditPushPolicy.ordinary(order)
+        && !approval.path("instanceCode").asText().isBlank()
         && "已批准".equals(order.path("status").asText())
-        && approval.path("creditPush").path("policyVersion").asInt() == JushuitanCreditPushPolicy.VERSION
         && JushuitanCreditPushPolicy.ACCOUNTING_MODE.equals(approval.path("creditPushAccountingMode").asText())
-        && JushuitanCreditPushPolicy.ACCOUNTING_MODE.equals(approval.path("creditPush").path("accountingMode").asText())
-        && approval.path("orderId").asText().equals(approval.path("creditPush").path("orderId").asText())
-        && approval.path("creditPush").path("soId").asText().matches("CRM-[a-f0-9]{32}")
-        && JushuitanCreditPushPolicy.sameApprovedContents(approval.path("creditPush").path("orderSnapshot"), order)
-        && approval.path("uuid").asText().equals(approval.path("creditPush").path("approvalUuid").asText())
-        && approval.path("instanceCode").asText().equals(approval.path("creditPush").path("instanceCode").asText());
+        && approval.path("uuid").asText().equals(task.path("approvalUuid").asText())
+        && approval.path("instanceCode").asText().equals(task.path("instanceCode").asText());
   }
 
   private void requireApproved(JsonNode approval, JsonNode order) {
@@ -383,7 +448,20 @@ public class JushuitanCreditPushService {
     return rows.isEmpty() ? null : (ObjectNode) db.parse(rows.getFirst().get("payload").toString());
   }
 
-  private void store(ObjectNode approval) {
+  private ObjectNode loadApproval(String orderId, boolean lock) {
+    var rows = db.rows(APPROVAL_SELECT + (lock ? " FOR UPDATE" : ""), orderId);
+    return rows.isEmpty() ? null : (ObjectNode) db.parse(rows.getFirst().get("payload").toString());
+  }
+
+  private void store(ObjectNode task) {
+    db.jdbc().update("UPDATE jst_credit_pushes SET payload=?,updated_at=CURRENT_TIMESTAMP(3) WHERE order_id=?",
+        db.encode(task), task.path("orderId").asText());
+  }
+
+  private void storeLegacy(ObjectNode approval) {
+    var task = approval.path("creditPush");
+    db.jdbc().update("INSERT INTO jst_credit_pushes(order_id,payload) VALUES(?,?) ON DUPLICATE KEY UPDATE payload=VALUES(payload),updated_at=CURRENT_TIMESTAMP(3)",
+        approval.path("orderId").asText(), db.encode(task));
     db.jdbc().update("UPDATE feishu_order_approvals SET payload=?,updated_at=CURRENT_TIMESTAMP(3) WHERE order_id=? AND status='APPROVED' AND instance_code=?",
         db.encode(approval), approval.path("orderId").asText(), approval.path("instanceCode").asText());
   }

@@ -70,7 +70,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
         <div className="order-detail-heading"><strong>{orderNumber(order)}</strong>
           <ApprovalStatus order={order} record={approvals.records[order.id]} config={approvals.config} error={approvals.error} Badge={Badge}/>
         </div>
-        {canceled && <p className="order-detail-source">订单已取消，不再计入待回款金额。</p>}
+        {canceled && <p className="order-detail-source">{creditPush?.oId ? 'CRM订单已取消，聚水潭原单及真实应收须单独核对。' : '订单已取消，不再计入待回款金额。'}</p>}
         <dl className="order-detail-fields">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{display(value)}</dd></div>)}</dl>
         <dl className="order-detail-amounts">{[[prepayment ? '预收款金额' : '订单总额', execution.total],
           ['已收款', execution.paid], ['待收款', execution.unpaid]].map(([label, value]) =>
@@ -79,6 +79,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
         {creditPush&&<section className="order-credit-push-status" aria-label="聚水潭账期订单推送">
           <h3>聚水潭推送</h3><Badge tone={creditPush.tone==='success'?'green':creditPush.tone==='info'?'cyan':'warning'}>{creditPush.label}</Badge>
           <p role={['warning','error'].includes(creditPush.tone)?'status':undefined}>{creditPush.message}</p>
+          {creditPush.approvalWarning&&<p className="credit-approval-warning" role="alert">{creditPush.approvalWarning}</p>}
           <dl className="order-detail-fields">
             <div><dt>聚水潭外部订单号</dt><dd>{display(creditPush.soId)}</dd></div>
             <div><dt>聚水潭内部单号</dt><dd>{display(creditPush.oId)}</dd></div>

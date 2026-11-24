@@ -17,3 +17,4 @@
 .order-credit-repair-form>.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;min-width:0}
 .order-credit-repair-form textarea{width:100%;min-height:90px;resize:vertical;box-sizing:border-box}
 .order-credit-repair-form em{font-style:normal;color:#d37875}
+.credit-approval-warning{display:block;margin:8px 0;color:#b74b31;font-size:12px;line-height:1.65;white-space:normal;overflow-wrap:anywhere}

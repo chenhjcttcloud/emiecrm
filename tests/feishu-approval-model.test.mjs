@@ -159,6 +159,7 @@ test('order cancellation respects server ownership checks, money, type and shipm
   assert.equal(canCancelOrder(draft, {status: 'PENDING', canCancel: false}), false);
   assert.equal(canCancelOrder(draft, {status: 'PENDING', canCancel: true}), true);
   assert.equal(canCancelOrder(draft, null, {status: 'queued'}), false);
+  assert.equal(canCancelOrder(draft, {canCancel: true, creditPush: {soId: 'CRM-stable', status: 'QUEUED'}}), false);
   for (const invalid of [{paid: '0.01'}, {status: '已批准'}, {status: '已取消'}, {deletedAt: '2026-11-23'}, {source: 'jushuitan-settlement'}])
     assert.equal(canCancelOrder({...draft, ...invalid}), false);
 });
@@ -173,6 +174,7 @@ test('soft deletion never removes an active external approval and respects serve
   assert.equal(canDeleteOrder({...draft, paid: 1}, {canDelete: true}), false);
   assert.equal(canDeleteOrder({...draft, deletedAt: '2026-11-23'}, {canDelete: true}), false);
   assert.equal(canDeleteOrder(draft, {canDelete: true}, {status: 'queued'}), false);
+  assert.equal(canDeleteOrder(draft, {canDelete: true, creditPush: {soId: 'CRM-stable', status: 'QUEUED'}}), false);
 });
 
 test('canceled and deleted orders cannot be resubmitted or counted as active amounts', () => {

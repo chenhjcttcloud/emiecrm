@@ -138,6 +138,33 @@ public class DashboardService {
           Objects.toString(row.get("o_id"), ""), Objects.toString(row.get("so_id"), ""));
     }
 
+    var approvals = new HashMap<String, JsonNode>();
+    for (var row : db.rows("SELECT payload FROM feishu_order_approvals ORDER BY order_id")) {
+      var approval = db.parse(row.get("payload").toString()); approvals.put(approval.path("orderId").asText(), approval);
+    }
+    var fulfillmentExceptions = new ArrayList<Map<String, Object>>();
+    for (var order : ordersById.values()) {
+      String id = order.path("id").asText(); var shipment = shipments.get(id);
+      if (!"销售订单".equals(order.path("type").asText()) || !CreditFulfillmentView.exception(order, shipment, approvals.get(id))) continue;
+      String cid = customerId(order, customers, uniqueNames), signer = order.path("owner").asText();
+      if (!owner.isEmpty() && !owner.equals(signer) || !requestedCustomer.isEmpty() && !requestedCustomer.equals(cid)) continue;
+      var created = date(order.path("created").asText());
+      if (created != null && !YearMonth.from(created).equals(period)) continue;
+      var row = new LinkedHashMap<String, Object>();
+      row.put("orderId", id); row.put("orderNumber", OrderNumbers.display(order)); row.put("owner", signer);
+      row.put("customerId", cid); row.put("customer", customerName(order, cid, customers));
+      row.put("date", created == null ? null : created.toString());
+      row.put("soId", shipment.path("soId").asText()); row.put("oId", shipment.path("oId").asText());
+      row.putAll(CreditFulfillmentView.fields(order, shipment, approvals.get(id)));
+      try {
+        var total = amount(order.path("total")); var paid = amount(order.path("paid"));
+        row.put("total", decimalText(total)); row.put("paid", decimalText(paid)); row.put("outstanding", decimalText(total.subtract(paid).max(ZERO)));
+      } catch (IllegalArgumentException failure) { row.put("total", null); row.put("paid", null); row.put("outstanding", null); }
+      fulfillmentExceptions.add(row);
+      warnings.add("订单 " + OrderNumbers.display(order) + "：" + row.get("fulfillmentWarning"));
+    }
+    fulfillmentExceptions.sort(Comparator.comparing(row -> row.get("orderId").toString()));
+
     // Ordinary orders win defensive duplicate checks before settlement totals are considered.
     var candidates = ordersById.values().stream()
         .filter(o -> !o.hasNonNull("deletedAt") && "销售订单".equals(o.path("type").asText())
@@ -211,6 +238,7 @@ public class DashboardService {
       row.put("orderNumber", orderNumber);
       row.put("customer", customerName(order, cid, customers)); row.put("total", decimalText(total)); row.put("paid", decimalText(paid));
       row.put("outstanding", decimalText(outstanding)); row.put("settled", settled); row.put("source", order.path("source").asText());
+      row.putAll(CreditFulfillmentView.fields(order, shipment, approvals.get(id)));
       orderRows.add(row);
     }
     orderRows.sort(Comparator.<Map<String, Object>, String>comparing(r -> r.get("date").toString()).reversed()
@@ -253,6 +281,7 @@ public class DashboardService {
     summary.put("orderCount", orderRows.size()); summary.put("settledCount", settledCount); summary.put("pendingCount", pendingCount);
     summary.put("orderAmount", decimalText(orderAmount)); summary.put("settledAmount", decimalText(settledAmount)); summary.put("outstandingAmount", decimalText(outstandingAmount));
     summary.put("advanceReceived", decimalText(advanceReceived)); summary.put("advanceBalance", owner.isEmpty() ? decimalText(advanceBalance) : null);
+    summary.put("fulfillmentExceptionCount", fulfillmentExceptions.size());
     var result = new LinkedHashMap<String, Object>();
     result.put("month", period.toString()); result.put("generatedAt", CrmRepository.now()); result.put("summary", summary);
     result.put("target", target(period.toString(), scope)); result.put("targetApplicable", owner.isEmpty() && requestedCustomer.isEmpty());
@@ -260,6 +289,7 @@ public class DashboardService {
         .map(c -> Map.of("id", c.path("id").asText(), "name", c.path("name").asText())).toList()));
     result.put("daily", dailyAmounts.entrySet().stream().map(e -> Map.of("date", e.getKey(), "amount", decimalText(e.getValue()), "count", dailyCounts.getOrDefault(e.getKey(), 0))).toList());
     result.put("orders", orderRows); result.put("advanceReceipts", advanceRows); result.put("warnings", new ArrayList<>(warnings));
+    result.put("fulfillmentExceptions", Map.of("count", fulfillmentExceptions.size(), "rows", fulfillmentExceptions));
     return result;
   }
 

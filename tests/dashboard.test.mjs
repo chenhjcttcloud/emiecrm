@@ -79,7 +79,8 @@ test('独立经营看板：统计口径、目标并发和模块权限',async()=>
     const moneyFields=new Set(['orderAmount','settledAmount','outstandingAmount','advanceReceived','advanceBalance']);
     const numericSummary=Object.fromEntries(Object.entries(report.summary).map(([key,value])=>[key,moneyFields.has(key)?Number(value):value]));
     assert.deepEqual(numericSummary,{orderCount:5,settledCount:2,pendingCount:3,orderAmount:490.02,
-      settledAmount:230.01,outstandingAmount:260.01,advanceReceived:140,advanceBalance:65});
+      settledAmount:230.01,outstandingAmount:260.01,advanceReceived:140,advanceBalance:65,fulfillmentExceptionCount:0});
+    assert.deepEqual(report.fulfillmentExceptions,{count:0,rows:[]});
     assert.equal(report.daily.length,30);
     assert.equal(Number(report.daily[0].amount),10);
     assert.equal(Number(report.daily[29].amount),120);

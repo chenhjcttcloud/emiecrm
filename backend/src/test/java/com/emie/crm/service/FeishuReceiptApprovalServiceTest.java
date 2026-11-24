@@ -85,6 +85,17 @@ class FeishuReceiptApprovalServiceTest {
         """);
   }
 
+  @ParameterizedTest @ValueSource(strings={"审批中","草稿","已取消"})
+  void erpCreditReleaseDoesNotAuthorizeCashReceiptBeforeActualSalesApproval(String status) throws Exception {
+    ((ObjectNode)state.path("orders").get(0)).put("status",status);
+    when(db.rows("SELECT payload FROM jst_shipments WHERE order_id=?","o1"))
+        .thenReturn(List.of(Map.of("payload","{\"creditFulfillment\":true,\"status\":\"SHIPPED\",\"oId\":123,\"effectiveOrder\":{\"total\":1000,\"paid\":1000}}")));
+    assertThrows(ApiException.class,()->service.create(input(),submitter));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    verify(business,never()).applyApprovedReceipt(any());
+    assertEquals(0,state.path("orders").get(0).path("paid").asInt());
+  }
+
   private ObjectNode definition() throws Exception {
     return (ObjectNode) mapper.readTree("""
         {"form":[

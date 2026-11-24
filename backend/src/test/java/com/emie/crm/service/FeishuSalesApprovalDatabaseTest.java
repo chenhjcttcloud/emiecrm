@@ -94,33 +94,41 @@ class FeishuSalesApprovalDatabaseTest {
     verify(client).create(eq("fixture-template"), eq("ou_sales"), eq(savedUuid), any(ArrayNode.class));
   }
 
-  @Test void creditIntentCommitsWithApprovedStatusAndCannotBeErasedByRestore() throws Exception {
+  @Test void independentCreditIntentCommitsBeforeNativeApprovalAndCannotBeErasedByRestore() throws Exception {
     var request=request();
     order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15").put("shopName","店铺")
         .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
-    service.createAndSubmit("o1",request,writer);runWorkers();
-    assertEquals(1,record().path("creditPushPolicyVersion").asInt());
+    service.createAndSubmit("o1",request,writer);
+    assertEquals(2,record().path("creditPushPolicyVersion").asInt());
+    assertEquals("ORDER_SUBMISSION",creditTask().path("trigger").asText());
+    String so=creditTask().path("soId").asText();
+    assertEquals("审批中",creditTask().path("orderSnapshot").path("status").asText());
+    assertEquals("",creditTask().path("instanceCode").asText());
+    verify(client,never()).create(any(),any(),any(),any());
+    runWorkers();
     assertFalse(record().has("creditPush"));
     when(client.instance("fixture-instance")).thenReturn(instance(record(),"APPROVED"));
     service.sync("o1",writer);
     assertEquals("APPROVED",record().path("status").asText());assertEquals("已批准",currentOrder().path("status").asText());
-    assertEquals("BLOCKED",record().path("creditPush").path("status").asText());
-    assertEquals("ON_ACCOUNT_TENDER",record().path("creditPush").path("accountingMode").asText());
+    assertEquals("BLOCKED",creditTask().path("status").asText());
+    assertEquals("ON_ACCOUNT_TENDER",creditTask().path("accountingMode").asText());
     assertEquals(0,currentOrder().path("paid").asInt());
     assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
     assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments",Integer.class));
-    String so=record().path("creditPush").path("soId").asText();service.sync("o1",writer);
-    assertEquals(so,record().path("creditPush").path("soId").asText());
+    service.sync("o1",writer);
+    assertEquals(so,creditTask().path("soId").asText());
+    assertEquals(so,service.list(writer).getFirst().path("creditPush").path("soId").asText());
     var backup=(ObjectNode)mapper.valueToTree(business.backup());
-    ((ObjectNode)backup.path("feishuApprovals").get(0)).remove("creditPush");
+    backup.putArray("jstCreditPushes");
     assertThrows(ApiException.class,()->new TransactionTemplate(manager).executeWithoutResult(tx->business.restore(backup,writer)));
-    assertEquals(so,record().path("creditPush").path("soId").asText());
+    assertEquals(so,creditTask().path("soId").asText());
   }
 
-  @Test void approvalAndCreditIntentRollbackTogetherWhenTheFinalAuditFails() throws Exception {
+  @Test void approvalResultRollbackCannotEraseAnAlreadyCommittedSubmissionTask() throws Exception {
     var request=request();order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15")
         .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
     service.createAndSubmit("o1",request,writer);runWorkers();
+    var existingTask=creditTask().deepCopy();
     when(client.instance("fixture-instance")).thenReturn(instance(record(),"APPROVED"));
     var failing=new CrmRepository(jdbc,mapper){@Override public void audit(String user,String action){
       if(action.contains("审批通过"))throw new IllegalStateException("simulated approval audit failure");super.audit(user,action);
@@ -129,8 +137,65 @@ class FeishuSalesApprovalDatabaseTest {
     assertThrows(IllegalStateException.class,()->failingService.sync("o1",writer));
     assertEquals("PENDING",record().path("status").asText());assertEquals("审批中",currentOrder().path("status").asText());
     assertFalse(record().has("creditPush"));
+    assertEquals(existingTask,creditTask());
     service.sync("o1",writer);
-    assertEquals("APPROVED",record().path("status").asText());assertTrue(record().path("creditPush").isObject());
+    assertEquals("APPROVED",record().path("status").asText());assertEquals(existingTask,creditTask());
+  }
+
+  @Test void formalSubmissionRollsBackBothIndependentTasksWhenItsAuditFails() throws Exception {
+    var request=request();order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15")
+        .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
+    var before=db.state(false).deepCopy();
+    var failing=new CrmRepository(jdbc,mapper){@Override public void audit(String user,String action){
+      if(action.contains("发起飞书"))throw new IllegalStateException("simulated submission audit failure");super.audit(user,action);
+    }};
+    var failingService=new FeishuSalesApprovalService(failing,client,mapper,manager,business,executor);
+    assertThrows(IllegalStateException.class,()->failingService.createAndSubmit("o1",request,writer));
+    assertEquals(before,db.state(false));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM jst_credit_pushes",Integer.class));
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals",Integer.class));assertTrue(workers.isEmpty());
+  }
+
+  @Test void legacyMigrationIsIdempotentAndPreservesUnknownIdentityAndLeaseWithoutResending() throws Exception {
+    var fixture=new JushuitanCreditPushPolicyTest();var order=fixture.order();var original=fixture.approval(order);
+    original.put("orderId","o1");JushuitanCreditPushPolicy.enqueue(original,order);
+    ((ObjectNode)original.path("creditPush")).put("status","UNKNOWN").put("attempted",true).put("attemptId","old-owner").put("leaseUntil",1);
+    jdbc.update("INSERT INTO feishu_order_approvals(order_id,status,instance_code,payload) VALUES('o1','APPROVED','instance',?)",db.encode(original));
+    var migration=new JushuitanCreditPushMigration(db);migration.migrate();migration.migrate();
+    var persistedOriginal=db.parse(db.encode(original));
+    assertEquals(persistedOriginal.path("creditPush"),creditTask());assertEquals(persistedOriginal,record());
+    assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM jst_credit_pushes",Integer.class));
+    var changed=creditTask().put("status","ACCEPTED").put("oId",123);
+    jdbc.update("UPDATE jst_credit_pushes SET payload=? WHERE order_id='o1'",db.encode(changed));migration.migrate();
+    assertEquals(changed,creditTask());
+  }
+
+  @Test void independentTaskCanReachErpBeforeNativeInstanceAndRemainsAfterFeishuCreationFails() throws Exception {
+    var directory=mock(JushuitanService.class);when(directory.warehouses()).thenReturn(mapper.readTree("[{\"id\":5,\"name\":\"隔离仓库\"}]"));
+    service=new FeishuSalesApprovalService(db,client,mapper,manager,business,executor,directory);
+    var input=request();
+    order(input.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15").put("shopName","隔离店铺")
+        .put("warehouseId","5").put("warehouseName","隔离仓库").put("recipientName","隔离收件人").put("recipientPhone","00000000000")
+        .put("recipientProvince","广东省").put("recipientCity","深圳市").put("recipientDistrict","龙岗区").put("recipientAddress","隔离测试路10号");
+    input.withObject("approval").put("warehouseId","5");
+    service.createAndSubmit("o1",input,writer);
+    assertEquals("QUEUED",record().path("status").asText());assertFalse(record().has("instanceCode"));
+    assertEquals("QUEUED",creditTask().path("status").asText());
+    var transport=mock(JushuitanCreditPushService.Transport.class);when(transport.ready()).thenReturn(true);
+    when(transport.push(any())).thenAnswer(call->{
+      var submission=call.getArgument(0,JushuitanCreditPushService.Submission.class);
+      assertEquals(2,submission.policyVersion());assertEquals("",submission.instanceCode());
+      return mapper.createObjectNode().put("soId",submission.soId()).put("oId",123).put("status","ACCEPTED");
+    });
+    @SuppressWarnings("unchecked") org.springframework.beans.factory.ObjectProvider<JushuitanCreditPushService.Transport> provider=mock(org.springframework.beans.factory.ObjectProvider.class);
+    when(provider.getIfAvailable()).thenReturn(transport);
+    var queue=new JushuitanCreditPushService(db,manager,provider,"sandbox");queue.process("o1");
+    assertEquals("ACCEPTED",creditTask().path("status").asText());String so=creditTask().path("soId").asText();
+    verify(client,never()).create(any(),any(),any(),any());
+    when(client.create(eq("fixture-template"),eq("ou_sales"),anyString(),any(ArrayNode.class))).thenThrow(new ApiException(503,"isolated native create failure"));
+    runWorkers();assertEquals("FAILED",record().path("status").asText());assertEquals("草稿",currentOrder().path("status").asText());
+    queue.process("o1");assertEquals(so,creditTask().path("soId").asText());assertEquals("ACCEPTED",creditTask().path("status").asText());
+    verify(transport,times(1)).push(any());assertEquals(0,currentOrder().path("paid").asInt());
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
   }
 
   @Test void invalidTemplateRollsBackOrderAuditAndQueueTogether() throws Exception {
@@ -518,6 +583,9 @@ class FeishuSalesApprovalDatabaseTest {
   private ObjectNode currentOrder() { return order(db.state(false)); }
   private ObjectNode record() {
     return (ObjectNode) db.parse(jdbc.queryForObject("SELECT payload FROM feishu_order_approvals WHERE order_id='o1'", String.class));
+  }
+  private ObjectNode creditTask() {
+    return (ObjectNode)db.parse(jdbc.queryForObject("SELECT payload FROM jst_credit_pushes WHERE order_id='o1'",String.class));
   }
   private ObjectNode instance(JsonNode record, String status) {
     return mapper.createObjectNode().put("approval_code", record.path("approvalCode").asText())

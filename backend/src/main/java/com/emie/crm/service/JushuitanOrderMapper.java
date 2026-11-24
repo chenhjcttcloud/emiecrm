@@ -24,19 +24,29 @@ public class JushuitanOrderMapper {
 
   public static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
       JsonNode input, String soId, boolean sandbox) {
-    return build(mapper, order, products, input, soId, sandbox, false);
+    return build(mapper, order, products, input, soId, sandbox, false, false);
   }
 
   /** Server-selected credit settlement; callers must authorize the credit workflow separately. */
   public static ObjectNode buildCredit(ObjectMapper mapper, JsonNode order, JsonNode products,
       JsonNode input, String soId, boolean sandbox) {
-    return build(mapper, order, products, input, soId, sandbox, true);
+    return build(mapper, order, products, input, soId, sandbox, true, false);
+  }
+
+  /** A separately authorized, durable submission task releases the ERP order for financial review. */
+  public static ObjectNode buildSubmittedCredit(ObjectMapper mapper, JsonNode order, JsonNode products,
+      JsonNode input, String soId, boolean sandbox) {
+    return build(mapper, order, products, input, soId, sandbox, true, true);
   }
 
   private static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
-      JsonNode input, String soId, boolean sandbox, boolean credit) {
+      JsonNode input, String soId, boolean sandbox, boolean credit, boolean submitted) {
     require(!order.path("customerId").asText().isBlank(), "请先在订单中确认客户关联并保存");
-    require(order.path("status").asText().equals("已批准"), "订单须先批准后提交发货");
+    if (submitted) {
+      require(credit && JushuitanCreditPushPolicy.optedIn(order)
+          && Set.of("草稿", "审批中", "已批准").contains(order.path("status").asText()),
+          "仅已正式提交的账期销售订单可推送聚水潭审核");
+    } else require(order.path("status").asText().equals("已批准"), "订单须先批准后提交发货");
     require(order.path("type").asText().equals("销售订单"), "目前仅支持销售订单发货");
     BigDecimal total, paid;
     try { total = new BigDecimal(order.path("total").asText()); paid = new BigDecimal(order.path("paid").asText("0")); }
@@ -59,7 +69,7 @@ public class JushuitanOrderMapper {
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
         .put("pay_amount", total).put("freight", 0)
         .put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + order.path("id").asText()
-            + (credit ? creditRemark(order, total, paid) : ""));
+            + (credit ? creditRemark(order, total, paid, submitted) : ""));
     var recipient = input.path("recipient");
     if (credit) require(CreditShippingAddress.valid(recipient), CreditShippingAddress.MESSAGE);
     boolean hasRegions = recipient.has("province") || recipient.has("city") || recipient.has("district");
@@ -112,13 +122,14 @@ public class JushuitanOrderMapper {
     return out;
   }
 
-  private static String creditRemark(JsonNode order, BigDecimal total, BigDecimal paid) {
+  private static String creditRemark(JsonNode order, BigDecimal total, BigDecimal paid, boolean submitted) {
     String customer = order.path("customer").asText().trim();
     if (customer.isBlank()) customer = order.path("customerId").asText();
     if (customer.length() > 200) customer = customer.substring(0, 200);
     return "；客户：" + customer + "；审批快照时CRM已收：" + paid.setScale(2).toPlainString()
         + "；审批快照应收：" + total.subtract(paid).setScale(2).toPlainString()
         + "；账期挂账（非实收）结算金额：" + total.setScale(2).toPlainString()
-        + "；ERP按全额结算放行，付款状态为已付，不代表现金到账";
+        + "；ERP按全额结算放行，付款状态为已付，不代表现金到账"
+        + (submitted ? "；正式提交即推单，财务须在聚水潭审核，飞书审批并行；发货以ERP审核为准" : "");
   }
 }
