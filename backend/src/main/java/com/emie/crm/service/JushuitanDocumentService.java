@@ -41,16 +41,26 @@ public class JushuitanDocumentService {
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Sale(String id, String shopId, String soId, String source,
-                     String shippedOn, String warehouseId, String status, BigDecimal amount, List<Item> items) {
+                     String shippedOn, String warehouseId, String status, BigDecimal amount, List<Item> items,
+                     String logisticsCompany, String trackingNumber) {
     public Sale(String id, String shopId, String soId, String source) {
-      this(id, shopId, soId, source, null, null, null, null, null);
+      this(id, shopId, soId, source, null, null, null, null, null, null, null);
+    }
+    public Sale(String id, String shopId, String soId, String source,
+        String shippedOn, String warehouseId, String status, BigDecimal amount, List<Item> items) {
+      this(id, shopId, soId, source, shippedOn, warehouseId, status, amount, items, null, null);
     }
   }
   private record SaleKey(String shopId, String id) {}
   public record Item(String sku, String name, BigDecimal quantity) {}
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Document(String id, String status, String date, String warehouse, String afterSaleId,
-                         List<Item> items, String saleId) {}
+                         List<Item> items, String saleId, String company, String trackingNumber) {
+    public Document(String id, String status, String date, String warehouse, String afterSaleId,
+        List<Item> items, String saleId) {
+      this(id, status, date, warehouse, afterSaleId, items, saleId, null, null);
+    }
+  }
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Section(List<Document> rows, String error) {}
   @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -198,7 +208,8 @@ public class JushuitanDocumentService {
     String soId = text(row, "so_id", 191);
     if (id.isEmpty() || soId.isBlank() || !sameSale(row, shopId, id)) return null;
     return new Sale(id, shopId, soId, "manual", shipmentDate(row.path("send_date").asText()),
-        optionalId(row.path("wms_co_id")), text(row, "status", 64), documentAmount(row.path("pay_amount")), items(row));
+        optionalId(row.path("wms_co_id")), text(row, "status", 64), documentAmount(row.path("pay_amount")), items(row),
+        optionalText(row, "logistics_company", 191), optionalText(row, "l_id", 191));
   }
 
   public static void requireSettlementPeriod(List<Sale> sales, JsonNode settlement) {
@@ -392,6 +403,8 @@ public class JushuitanDocumentService {
     metadata.put("status", sale.status());
     metadata.put("amount", sale.amount());
     metadata.put("items", sale.items());
+    if (sale.logisticsCompany() != null) metadata.put("logisticsCompany", sale.logisticsCompany());
+    if (sale.trackingNumber() != null) metadata.put("trackingNumber", sale.trackingNumber());
     return metadata;
   }
 
@@ -415,7 +428,8 @@ public class JushuitanDocumentService {
       items.add(new Item(sku, text(row, "name", 250), new BigDecimal(quantity)));
     }
     return new Sale(identity.id(), identity.shopId(), identity.soId(), identity.source(),
-        shippedOn, warehouseId, status.isEmpty() ? null : status, amount, List.copyOf(items));
+        shippedOn, warehouseId, status.isEmpty() ? null : status, amount, List.copyOf(items),
+        metadataText(metadata, "logisticsCompany"), metadataText(metadata, "trackingNumber"));
   }
 
   private static String optionalId(JsonNode node) {
@@ -620,7 +634,7 @@ public class JushuitanDocumentService {
     if (warehouse.isEmpty()) warehouse = identifier(row.path("wms_co_id"));
     rows.putIfAbsent(saleId == null ? id : saleId + ":" + id, new Document(id, text(row, "status", 64),
         text(row, "io_date", 64), warehouse, afterSaleId == null || afterSaleId.isEmpty() ? null : afterSaleId,
-        items(row), saleId));
+        items(row), saleId, optionalText(row, "logistics_company", 191), optionalText(row, "l_id", 191)));
   }
 
   private static List<Item> items(JsonNode row) {
@@ -673,5 +687,17 @@ public class JushuitanDocumentService {
   private static String text(JsonNode row, String key, int limit) {
     String value = row.path(key).asText("").replaceAll("\\p{Cntrl}", " ").strip();
     return value.substring(0, Math.min(limit, value.length()));
+  }
+
+  private static String optionalText(JsonNode row, String key, int limit) {
+    String value = text(row, key, limit);
+    return value.isEmpty() ? null : value;
+  }
+
+  private static String metadataText(JsonNode metadata, String field) {
+    var value = metadata.path(field);
+    require(value.isMissingNode() || value.isNull() || (value.isTextual() && value.asText().length() <= 191),
+        "聚水潭销售单物流快照格式无效");
+    return optionalText(metadata, field, 191);
   }
 }

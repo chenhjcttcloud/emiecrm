@@ -31,7 +31,7 @@ export default function CreditOrderPush({order,approval,shipment,api,canWrite=fa
   <button type="button" className="secondary" disabled={busy} onClick={()=>{setOpen(value=>!value);setError('');setSaved(false)}}>{open?'收起推送资料':'补齐资料并推送聚水潭'}</button>
   {saved&&<p className="form-hint" role="status">推送资料已保存，聚水潭处理结果以上方状态为准。</p>}
   {open&&<form className="order-credit-repair-form" onSubmit={submit}>
-   <OrderWarehousePicker api={api} order={order} owner={order.owner} value={draft} disabled={busy} onChange={setDraft}/>
+   <OrderWarehousePicker api={api} order={order} owner={order.owner} value={draft} disabled={busy} logisticsLocked onChange={setDraft}/>
    <p className="form-hint">收货人最多50字，电话7至30位。省、市、区分别填写，详细地址最多200字。原审批已有内容须保持一致；如需更正，请先核对审批及推送授权。</p>
    {[['recipientName','收货人',50,'text'],['recipientPhone','收货电话',30,'tel']].map(([name,label,max,type])=><label className="field" key={name}>
     <span>{label} <em>*</em></span><input name={name} type={type} maxLength={max} required disabled={busy}

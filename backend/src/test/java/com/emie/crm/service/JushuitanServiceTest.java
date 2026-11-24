@@ -66,6 +66,31 @@ class JushuitanServiceTest {
   assertEquals("FAILED",service.submit("o1",request,admin).path("status").asText());
   verify(client,never()).upload(any());
  }
+ @Test void explicitlyPlannedCarrierMustBeConfiguredInTheSelectedWarehouseBeforeUpload() throws Exception {
+  var state=(ObjectNode)db.state(true);var order=(ObjectNode)state.path("orders").get(0);
+  order.putObject("approvalDraft").put("logisticsMode","CARRIER").put("logisticsCode","SF.5").put("logisticsCompany","顺丰到付");
+  var request=(ObjectNode)input();request.put("logisticsMode","CARRIER").put("logisticsCode","SF.5").put("logisticsCompany","顺丰到付");
+  when(client.query(eq("/open/logisticscompany/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"lc_id\":\"SF\",\"lc_name\":\"顺丰速运\"}],\"has_next\":false}}"));
+  assertEquals("FAILED",service.submit("o1",request,admin).path("status").asText());
+  verify(client,never()).upload(any());
+  when(client.query(eq("/open/logisticscompany/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[{\"lc_id\":\"SF.5\",\"lc_name\":\"顺丰到付\"}],\"has_next\":false}}"));
+  when(client.upload(any())).thenAnswer(call->{
+   var row=((JsonNode)call.getArgument(0)).get(0);assertEquals("SF.5",row.path("lc_id").asText());assertEquals("顺丰到付",row.path("logistics_company").asText());
+   return json("{\"code\":0,\"data\":{\"datas\":[{\"so_id\":\""+row.path("so_id").asText()+"\",\"o_id\":123,\"issuccess\":true}]}}");
+  });
+  assertEquals("ACCEPTED",service.submit("o1",request,admin).path("status").asText());
+  verify(client,times(2)).query(eq("/open/logisticscompany/query"),eq(Map.of("wms_co_id",10048859L,"page_index",1,"page_size",50)));
+ }
+ @Test void failedCarrierPreflightCannotBeRebuiltBySilentlyDroppingTheOriginalCarrier() throws Exception {
+  var state=(ObjectNode)db.state(true);var order=(ObjectNode)state.path("orders").get(0);
+  order.putObject("approvalDraft").put("logisticsMode","CARRIER").put("logisticsCode","SF.5").put("logisticsCompany","顺丰到付");
+  var request=(ObjectNode)input();request.put("logisticsMode","CARRIER").put("logisticsCode","SF.5").put("logisticsCompany","顺丰到付");
+  when(client.query(eq("/open/logisticscompany/query"),any())).thenThrow(new ApiException("物流目录不可用"));
+  assertEquals("FAILED",service.submit("o1",request,admin).path("status").asText());
+  order.remove("approvalDraft");
+  assertThrows(ApiException.class,()->service.submit("o1",input(),admin));
+  assertEquals("SF.5",json(persisted).path("request").path("lc_id").asText());verify(client,never()).upload(any());
+ }
  @Test void partialCatalogFetchNeverReplacesProducts() throws Exception {
   when(client.query(eq("/open/sku/query"),any())).thenReturn(
       json("{\"code\":0,\"data\":{\"datas\":[{\"sku_id\":\"A\",\"enabled\":1}],\"has_next\":true}}"))

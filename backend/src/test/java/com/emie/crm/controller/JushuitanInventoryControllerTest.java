@@ -60,4 +60,19 @@ class JushuitanInventoryControllerTest {
         .andExpect(status().isForbidden());
     verifyNoInteractions(service);
   }
+
+  @Test void logisticsCatalogRequiresAuthenticatedReadAndAnExactPositiveWarehouseIdentifier() throws Exception {
+    when(service.logisticsCatalog(anyLong())).thenReturn(new ObjectMapper().createArrayNode());
+    for(String raw:new String[]{"","0","-1","01","1.0","1e3","true","+1"," 1","9223372036854775808"})
+      mvc.perform(get("/api/jst/logistics-companies").param("warehouseId",raw)).andExpect(status().isBadRequest());
+    verify(service,never()).logisticsCatalog(anyLong());
+    for(long id:new long[]{1,15136229,Long.MAX_VALUE}) {
+      mvc.perform(get("/api/jst/logistics-companies").param("warehouseId",Long.toString(id))).andExpect(status().isOk()).andExpect(content().json("[]"));
+      verify(service).logisticsCatalog(id);
+    }
+    when(auth.actor(any())).thenThrow(new ApiException(401,"请先登录"));
+    mvc.perform(get("/api/jst/logistics-companies").param("warehouseId","15136229")).andExpect(status().isUnauthorized());
+    doReturn(new Actor("forbidden","无权限",Set.of())).when(auth).actor(any());
+    mvc.perform(get("/api/jst/logistics-companies").param("warehouseId","15136229")).andExpect(status().isForbidden());
+  }
 }

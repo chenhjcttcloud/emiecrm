@@ -104,6 +104,7 @@ export function approvalDraftValues(config, order, fields) {
         ? String(hasWarehouseField ? fields.get('warehouseName') ?? '' : draft.warehouseName ?? '') : '';
     }
     if (isCreditSalesOrder(order)) {
+      Object.assign(result,logisticsDraftValues(draft,fields));
       if (hasCreditField || Object.hasOwn(draft, 'creditFulfillment')) {
         result.creditFulfillment = credit;
       }
@@ -236,6 +237,7 @@ export function approvalDetails(config, order, fields) {
       result.warehouseName = name;
     }
     if (credit) {
+      Object.assign(result,logisticsDetails(order.approvalDraft,fields));
       if ((fields?.has?.('creditShippingReady') || fields?.get?.('creditShippingReady') != null)
           && fields.get('creditShippingReady') !== 'true')
         throw Error('聚水潭账期推送设置暂不可用，请重新加载后提交；可先保存草稿。');
@@ -291,3 +293,4 @@ export function approvalTime(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('sv-SE', {timeZone: 'Asia/Shanghai'});
 }
 import {moneyCents} from './orderMoney.js';
+import {logisticsDetails,logisticsDraftValues} from './orderLogisticsModel.js';

@@ -50,6 +50,8 @@ final class JushuitanCreditPushPolicy {
 
   /** Submission-only constraints: incomplete drafts may still be saved. */
   static void validateSubmission(JsonNode order) {
+    JushuitanLogistics.validateDraft(order);
+    JushuitanLogistics.selection(order.path("approvalDraft"), true);
     if (!optedIn(order)) return;
     var draft = order.path("approvalDraft");
     var name = draft.path("recipientName"); var phone = draft.path("recipientPhone"); var address = draft.path("recipientAddress");
@@ -73,12 +75,17 @@ final class JushuitanCreditPushPolicy {
     if (!snapshot.isObject()) return false;
     for (String field : APPROVED_FIELDS) {
       JsonNode left = snapshot.path(field), right = order.path(field);
+      if (field.equals("approvalDraft")) {
+        if (!JushuitanLogistics.sameDraft(left, right)) return false;
+        continue;
+      }
       if (!left.equals(right) && !(left.isNumber() && right.isNumber() && left.decimalValue().compareTo(right.decimalValue()) == 0)) return false;
     }
     return true;
   }
 
   static void validateDraft(JsonNode order) {
+    JushuitanLogistics.validateDraft(order);
     var draft = order.path("approvalDraft");
     var credit = draft.path("creditFulfillment");
     require(credit.isMissingNode() || credit.isNull() || credit.isBoolean(), "账期推送选项无效");
@@ -102,7 +109,8 @@ final class JushuitanCreditPushPolicy {
     var a = left.path("approvalDraft"); var b = right.path("approvalDraft");
     boolean same = identifier(a.path("shopId")).equals(identifier(b.path("shopId")))
         && a.path("shopName").asText("").strip().equals(b.path("shopName").asText("").strip())
-        && a.path("creditFulfillment").asBoolean() == b.path("creditFulfillment").asBoolean();
+        && a.path("creditFulfillment").asBoolean() == b.path("creditFulfillment").asBoolean()
+        && JushuitanLogistics.selection(a, false).equals(JushuitanLogistics.selection(b, false));
     if (!same) return false;
     var fields = a.path("creditFulfillment").asBoolean() || b.path("creditFulfillment").asBoolean()
         ? RECIPIENT.values() : List.of("recipientProvince", "recipientCity", "recipientDistrict");
@@ -179,6 +187,8 @@ final class JushuitanCreditPushPolicy {
     if (name.isEmpty() || name.length() > 50) missing.add("有效收货人");
     if (!phone.matches("[0-9+() -]{7,30}")) missing.add("有效收货电话");
     if (!CreditShippingAddress.valid(recipient)) missing.add("完整收货地址（省、市、区县及详细地址）");
+    try { JushuitanLogistics.requirePlan(push.path("orderSnapshot").path("approvalDraft"), input); }
+    catch (com.emie.crm.common.exception.ApiException failure) { missing.add("与提交计划一致的有效物流公司或仓库安排"); }
     if (!Set.of("sandbox", "production").contains(push.path("environment").asText())) missing.add("有效聚水潭环境");
     if (push.path("policyVersion").asInt() == SUBMISSION_VERSION) {
       if (!isParallelJob(push)) missing.add("有效订单提交身份");
@@ -205,6 +215,7 @@ final class JushuitanCreditPushPolicy {
     var input = JSON.objectNode().put("creditFulfillment", true);
     for (String field : List.of("shopId", "warehouseId")) putIdentifier(input, field, draft.path(field));
     input.put("shopName", draft.path("shopName").asText()).put("warehouseName", draft.path("warehouseName").asText());
+    JushuitanLogistics.copyPlan(input, draft);
     var recipient = input.putObject("recipient");
     RECIPIENT.forEach((key, field) -> {
       String value = draft.path(field).asText().strip();
@@ -223,6 +234,7 @@ final class JushuitanCreditPushPolicy {
   static void supplement(ObjectNode push, JsonNode details) {
     var input = (ObjectNode) push.path("input");
     var original = push.path("orderSnapshot").path("approvalDraft");
+    JushuitanLogistics.requireUnchangedSupplement(original, details);
     for (String field : List.of("shopId", "warehouseId")) if (details.has(field)) {
       String approved = identifier(original.path(field)), chosen = identifier(details.path(field));
       require(!chosen.isEmpty() && (approved.isEmpty() || approved.equals(chosen)), "推送店铺或仓库与审批资料不一致");

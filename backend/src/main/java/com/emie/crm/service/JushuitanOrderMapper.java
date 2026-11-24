@@ -119,6 +119,7 @@ public class JushuitanOrderMapper {
     out.putObject("pay").put("outer_pay_id", soId + "-PAY").put("pay_date", out.path("order_date").asText())
         .put("payment", credit ? "账期挂账（非实收）" : "CRM已收款").put("seller_account", "EMIE-CRM")
         .put("buyer_account", soId).put("amount", credit ? total : paid);
+    JushuitanLogistics.apply(out, order.path("approvalDraft"), input);
     return out;
   }
 

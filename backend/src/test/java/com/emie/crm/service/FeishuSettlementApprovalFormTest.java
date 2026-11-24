@@ -63,6 +63,19 @@ class FeishuSettlementApprovalFormTest {
     assertFalse(form.toString().contains("伪造"));
   }
 
+  @Test void settlementSummaryShowsVerifiedOriginalLogisticsWithoutRequestingAnotherShipment() throws Exception {
+    var definition=FeishuDomesticApprovalTemplateTest.definition("sales");var order=settlement();
+    ((ObjectNode)order.path("settlement").path("sales").get(0)).put("logisticsCompany","原销售单承运商").put("trackingNumber","000012345ABC");
+    var before=order.deepCopy();
+    var input=FeishuApprovalFixtures.MAPPER.createObjectNode().put("logisticsCompany","伪造承运商").put("trackingNumber","FAKE");
+    String note=field(build(definition,order,input),definition,"备注").path("value").asText();
+    assertTrue(note.contains("原物流：原销售单承运商；原运单：000012345ABC"));
+    assertTrue(note.contains("原物流：聚水潭未回传；原运单：聚水潭未回传"));
+    assertTrue(note.contains("已发货，无需再次发货"));assertFalse(note.contains("伪造承运商"));assertFalse(note.contains("FAKE"));
+    assertFalse(note.contains("计划物流："),"An already shipped accounting summary must not request another planned carrier");
+    assertEquals(before,order);
+  }
+
   @Test void settlementCannotLoseItsSalesEvidenceOrTemplateNote() throws Exception {
     var definition = FeishuDomesticApprovalTemplateTest.definition("sales");
     var order = settlement();

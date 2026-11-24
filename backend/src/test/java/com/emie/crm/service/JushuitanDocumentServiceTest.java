@@ -90,7 +90,8 @@ class JushuitanDocumentServiceTest {
   @Test void settlementPickerUsesShipmentDatesAndExcludesUnavailableOrders() throws Exception {
     var current = json("""
         {"code":0,"data":{"orders":[
-          {"shop_id":7,"o_id":11,"so_id":"a","send_date":"2026-10-01 12:00:00","status":"Sent","pay_amount":20},
+          {"shop_id":7,"o_id":11,"so_id":"a","send_date":"2026-10-01 12:00:00","status":"Sent","pay_amount":20,
+           "logistics_company":"原销售单物流","l_id":"SALE-11"},
           {"shop_id":7,"o_id":12,"so_id":"b","send_date":"2026-10-02","status":"Sent"},
           {"shop_id":8,"o_id":13,"so_id":"c","send_date":"2026-10-02","status":"Sent"},
           {"shop_id":7,"o_id":14,"so_id":"d","send_date":"2026-09-30","status":"Sent"},
@@ -108,6 +109,8 @@ class JushuitanDocumentServiceTest {
     var sales = service.settlementCandidates(json("7"), LocalDate.parse("2026-10-01"), LocalDate.parse("2026-10-08"));
 
     assertEquals(List.of("16", "11"), sales.stream().map(Sale::id).toList());
+    assertEquals("原销售单物流",sales.get(1).logisticsCompany());assertEquals("SALE-11",sales.get(1).trackingNumber());
+    verify(client,never()).query(eq(OUTBOUND),anyMap());
     verify(client).query(SALES, Map.of("shop_id", 7L, "date_type", 3, "status", "Sent",
         "modified_begin", "2026-10-08 00:00:00", "modified_end", "2026-10-08 23:59:59",
         "archive", true, "page_index", 1, "page_size", 50));
@@ -127,6 +130,48 @@ class JushuitanDocumentServiceTest {
     verify(client).query(SALES, Map.of("shop_id", 7L, "o_ids", List.of(12L), "page_index", 1, "page_size", 50));
     verify(client).query(SALES, Map.of("shop_id", 7L, "o_ids", List.of(12L), "archive", true, "page_index", 1, "page_size", 50));
     verify(db, never()).jdbc();
+  }
+
+  @Test void settlementLogisticsSurviveVerificationMetadataAndLegacySnapshotsRemainReadable() throws Exception {
+    when(client.query(eq(SALES),anyMap())).thenReturn(json("""
+      {"code":0,"data":{"orders":[{"shop_id":7,"o_id":12,"so_id":"online-12","status":"Sent",
+       "send_date":"2026-10-01 10:00:00","pay_amount":20,"logistics_company":"原始承运商","l_id":"000012345ABC",
+       "items":[{"sku_id":"SKU-12","name":"已发货商品","qty":1}]}]}}
+      """));
+    var sale=service.verifySales(json("[{\"shopId\":7,\"oId\":12}]")).getFirst();
+    assertEquals("原始承运商",sale.logisticsCompany());assertEquals("000012345ABC",sale.trackingNumber());
+    var metadata=mapper.valueToTree(saleMetadata(sale));
+    var restored=withMetadata(new Sale(sale.id(),sale.shopId(),sale.soId(),"manual"),metadata);
+    assertEquals(sale,restored);assertEquals("000012345ABC",metadata.path("trackingNumber").asText());
+    var old=withMetadata(new Sale("12","7","online-12","manual"),json("{\"status\":\"Sent\",\"items\":[]}"));
+    assertNull(old.logisticsCompany());assertNull(old.trackingNumber());
+    assertFalse(saleMetadata(old).containsKey("logisticsCompany"));assertFalse(saleMetadata(old).containsKey("trackingNumber"));
+    assertThrows(ApiException.class,()->withMetadata(new Sale("12","7","online-12","manual"),json("{\"trackingNumber\":123}")));
+    verify(client,never()).query(eq(OUTBOUND),anyMap());
+  }
+
+  @Test void linkedSettlementShowsEachRealOutboundPackageWithoutCombiningOrInventingTrackingNumbers() throws Exception {
+    orderExists();
+    when(db.rows(SALES_BY_ORDER,"production","crm-1")).thenReturn(List.of(
+        Map.of("shop_id","7","o_id","12","so_id","online-12"),Map.of("shop_id","7","o_id","13","so_id","online-13")));
+    when(client.query(eq(OUTBOUND),anyMap())).thenReturn(json("""
+      {"code":0,"data":{"datas":[
+       {"shop_id":7,"o_id":12,"io_id":101,"status":"Confirmed","io_date":"2026-10-01 10:00:00","wms_co_id":4,
+        "logistics_company":"包裹甲物流","l_id":"PKG-A","items":[{"sku_id":"A","qty":1}]},
+       {"shop_id":7,"o_id":12,"io_id":102,"status":"Confirmed","io_date":"2026-10-01 11:00:00","wms_co_id":4,
+        "logistics_company":"包裹乙物流","l_id":"PKG-B","items":[{"sku_id":"B","qty":1}]},
+       {"shop_id":7,"o_id":13,"io_id":103,"status":"Confirmed","io_date":"2026-10-01 12:00:00","warehouse":"原发货仓",
+        "logistics_company":"包裹丙物流","l_id":"PKG-C","items":[{"sku_id":"C","qty":2}]},
+       {"shop_id":8,"o_id":12,"io_id":104,"logistics_company":"不得混入","l_id":"OTHER-SHOP"}]}}
+      """));
+    when(client.query(eq(RETURNS),anyMap())).thenReturn(json("{\"code\":0,\"data\":{\"datas\":[]}}"));
+    var result=service.get("crm-1",actor);
+    assertEquals(List.of("101","102","103"),result.outbound().rows().stream().map(Document::id).toList());
+    assertEquals(List.of("PKG-A","PKG-B","PKG-C"),result.outbound().rows().stream().map(Document::trackingNumber).toList());
+    assertEquals(List.of("12","12","13"),result.outbound().rows().stream().map(Document::saleId).toList());
+    assertEquals("包裹乙物流",result.outbound().rows().get(1).company());assertEquals("原发货仓",result.outbound().rows().get(2).warehouse());
+    assertEquals("4",result.outbound().rows().get(0).warehouse());assertNull(result.salesOrder().trackingNumber());
+    verify(client,never()).upload(any());verify(db,never()).jdbc();
   }
 
   @Test void exactPurchaseVerificationRejectsMismatchedNumberWithoutWriting() throws Exception {

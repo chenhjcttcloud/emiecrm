@@ -47,6 +47,11 @@ public final class FeishuSalesApprovalForm {
 
   public static ArrayNode build(ObjectMapper mapper, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, String ownerOpenId) {
+    return build(mapper, definition, order, products, input, ownerOpenId, false);
+  }
+
+  private static ArrayNode build(ObjectMapper mapper, JsonNode definition, JsonNode order, JsonNode products,
+      JsonNode input, String ownerOpenId, boolean settlementSummary) {
     if (JushuitanDocumentService.isSettlement(order))
       return buildSettlement(mapper, definition, order, ownerOpenId);
     boolean prepayment = "预收款订单".equals(order.path("type").asText());
@@ -75,6 +80,10 @@ public final class FeishuSalesApprovalForm {
     boolean credit = JushuitanCreditPushPolicy.optedIn(order);
     if (credit) require(mapped.contains("note"), "账期推送须在飞书审批备注中展示店铺及挂账口径，请管理员核对模板");
     JushuitanCreditPushPolicy.validateSubmission(order);
+    boolean logisticsPlan = !settlementSummary && "销售订单".equals(order.path("type").asText());
+    var logistics = logisticsPlan ? JushuitanLogistics.selection(order.path("approvalDraft"), true) : null;
+    if (logistics != null && logistics.carrier())
+      require(mapped.contains("note"), "所选计划物流需在飞书审批备注中展示，请管理员核对模板");
     var total = decimal(order.path("total"), "订单金额", MAX_MONEY, 2);
     var lines = order.path("items");
     require(lines.isArray() && (prepayment || !lines.isEmpty()), "订单产品明细无效");
@@ -161,6 +170,7 @@ public final class FeishuSalesApprovalForm {
         case "note" -> writeText(form, widget, "CRM 订单：" + OrderNumbers.display(order)
             + (OrderNumbers.display(order).equals(order.path("id").asText()) ? "" : "\n内部记录ID：" + order.path("id").asText())
             + (warehouse.selected() ? "\n计划发货仓库：" + warehouse.name() + "（" + warehouse.id() + "）" : "")
+            + (logisticsPlan ? "\n计划物流：" + (logistics.carrier() ? logistics.company() + "（" + logistics.code() + "）" : "由仓库安排") : "")
             + (credit ? "\n聚水潭推送店铺：" + order.path("approvalDraft").path("shopName").asText("未选择")
                 + "（" + order.path("approvalDraft").path("shopId").asText("待补齐") + "）"
                 + "\n发货方式：按账期发货；正式提交即推送聚水潭，飞书审批并行；财务直接在聚水潭审核，ERP审核后发货。"
@@ -213,7 +223,9 @@ public final class FeishuSalesApprovalForm {
       require(!sale.path("id").asText().isBlank() && !sale.path("shopId").asText().isBlank(), "结算销售单快照缺少单号或店铺");
       var header = new StringBuilder("\n销售单 ").append(sale.path("id").asText()).append("；店铺 ").append(sale.path("shopId").asText())
           .append("；线上单号 ").append(sale.path("soId").asText()).append("；金额 ")
-          .append(sale.hasNonNull("amount") ? sale.path("amount").asText() : "未知");
+          .append(sale.hasNonNull("amount") ? sale.path("amount").asText() : "未知")
+          .append("；原物流：").append(sale.path("logisticsCompany").asText().isBlank() ? "聚水潭未回传" : sale.path("logisticsCompany").asText())
+          .append("；原运单：").append(sale.path("trackingNumber").asText().isBlank() ? "聚水潭未回传" : sale.path("trackingNumber").asText());
       if (note.length() + header.length() + omittedItems.length() > 3900) break;
       note.append(header);
       shown++;
@@ -243,7 +255,7 @@ public final class FeishuSalesApprovalForm {
     var details = mapper.createObjectNode();
     for (String key : List.of("recipientName", "recipientPhone", "recipientAddress")) details.put(key, "不适用（聚水潭已发货结算）");
     details.putArray("discounts").add(0);
-    return build(mapper, definition, summary, catalog, details, ownerOpenId);
+    return build(mapper, definition, summary, catalog, details, ownerOpenId, true);
   }
 
   static boolean requiresOwnerIdentity(ObjectMapper mapper, JsonNode definition) {

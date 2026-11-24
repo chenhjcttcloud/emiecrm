@@ -1,9 +1,10 @@
 import React,{useEffect,useState} from 'react';
 import OrderSelect from './OrderSelect';
+import OrderLogisticsPicker from './OrderLogisticsPicker';
 import {isCreditSalesOrder,suggestedCreditShop,warehouseIdentifier} from './feishuApprovalModel';
 import './orderWarehousePicker.css';
 
-export default function OrderWarehousePicker({api,value={},disabled=false,onChange,order,owner}){
+export default function OrderWarehousePicker({api,value={},disabled=false,logisticsLocked=false,onChange,order,owner}){
  const draft=value&&typeof value==='object'?value:{};
  const credit=isCreditSalesOrder(order);
  const[rows,setRows]=useState([]),[shops,setShops]=useState([]),[ready,setReady]=useState(false),[message,setMessage]=useState(''),[terms,setTerms]=useState({mode:'UNCONFIGURED',description:''}),[loading,setLoading]=useState(false),[error,setError]=useState(''),[attempt,setAttempt]=useState(0),[loaded,setLoaded]=useState(false);
@@ -41,6 +42,7 @@ export default function OrderWarehousePicker({api,value={},disabled=false,onChan
    <input type="hidden" name="creditFulfillment" disabled value={draft.creditFulfillment===true?'true':'false'}/></>}
   <div className="read-field"><span>发货仓库</span><p>{warehouseId?(name||'仓库')+'（编号 '+warehouseId+'）':'未预选'}</p></div>
   <input type="hidden" name="warehouseId" disabled value={warehouseId}/><input type="hidden" name="warehouseName" disabled value={savedName}/>
+  {credit&&<OrderLogisticsPicker api={api} value={draft} warehouseId={warehouseId} disabled onChange={onChange}/>}
  </section>;
  const unavailable=loaded&&warehouseId&&!selected;
  const shopUnavailable=credit&&loaded&&shopId&&!shop;
@@ -75,6 +77,7 @@ export default function OrderWarehousePicker({api,value={},disabled=false,onChan
   <OrderSelect label="发货仓库" required={credit} value={warehouseId} options={options} onChange={change} disabled={loading||(credit&&!ready)}
    placeholder={loading?'正在加载仓库…':credit?'请选择发货仓库':'请选择发货仓库（选填）'} searchPlaceholder="搜索仓库名称或编号"/>
   <input type="hidden" name="warehouseId" value={warehouseId}/><input type="hidden" name="warehouseName" value={warehouseId?name:''}/>
+  {credit&&<OrderLogisticsPicker api={api} value={draft} warehouseId={warehouseId} disabled={logisticsLocked} onChange={onChange}/>}
   {loading&&<p className="form-hint" role="status">正在读取聚水潭{credit?'店铺和':''}仓库…</p>}
   {(error||(credit&&loaded&&!ready))&&<p className="order-warehouse-error" role="status">{error||message||'账期推送当前不可用，请核对连接设置。'}<button type="button" className="link-btn" onClick={()=>setAttempt(current=>current+1)}>重新加载{credit?'发货设置':'仓库'}</button></p>}
   {shopUnavailable&&<p className="order-warehouse-error" role="status">原选店铺当前不可用，请重新选择后提交；也可先保存草稿。</p>}

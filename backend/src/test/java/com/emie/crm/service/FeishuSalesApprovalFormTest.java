@@ -29,6 +29,24 @@ class FeishuSalesApprovalFormTest {
     assertTrue(field(form, "note").path("value").asText().contains("订单备注"));
   }
 
+  @Test void plannedCarrierIsVisibleWhileTheDefaultDoesNotInventAnyCarrier() throws Exception {
+    var definition=FeishuApprovalFixtures.definition();var order=FeishuApprovalFixtures.order();
+    String defaultNote=field(build(definition,order),"note").path("value").asText();
+    assertTrue(defaultNote.contains("计划物流：由仓库安排"));assertFalse(order.has("approvalDraft"));
+    order.putObject("approvalDraft").put("logisticsMode","CARRIER").put("logisticsCode","CUSTOM_7").put("logisticsCompany","已核验物流公司");
+    var before=order.deepCopy();String selected=field(build(definition,order),"note").path("value").asText();
+    assertTrue(selected.contains("计划物流：已核验物流公司（CUSTOM_7）"));assertFalse(selected.contains("计划物流：由仓库安排"));
+    assertEquals(before,order);
+  }
+
+  @Test void anExplicitCarrierCannotBeHiddenByATemplateWithoutNotes() throws Exception {
+    var definition=FeishuApprovalFixtures.definition();definition.withArray("form").remove(4);
+    definition.withArray("form").addObject().put("id","order-id").put("name","订单编号").put("type","input");
+    var order=FeishuApprovalFixtures.order();order.putObject("approvalDraft").put("logisticsMode","CARRIER")
+        .put("logisticsCode","CUSTOM_7").put("logisticsCompany","已核验物流公司");
+    assertTrue(assertThrows(ApiException.class,()->build(definition,order)).getMessage().contains("物流"));
+  }
+
   @Test void creditApproversSeeTheExactShopRecipientAndNonCashAccountingBasis() throws Exception {
     var order=FeishuApprovalFixtures.order();
     order.putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15").put("shopName","国内线下店铺")

@@ -169,6 +169,9 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
       }
       if (!db.rows("SELECT order_id FROM jst_document_sales WHERE order_id=?", submission.orderId()).isEmpty())
         throw new JushuitanCreditPushService.Blocked("订单已有聚水潭销售单关联，不能重复推送");
+      if (!frozen && record != null && record.path("request").hasNonNull("lc_id")
+          && !JushuitanLogistics.selection(submission.orderSnapshot().path("approvalDraft")).carrier())
+        throw new JushuitanCreditPushService.Blocked("原发货请求已指定物流，请核对原单，不能改为由仓库安排后重建");
       var request = frozen ? (ObjectNode)record.path("request").deepCopy()
           : canonicalRequest(onSubmission(submission)
               ? JushuitanOrderMapper.buildSubmittedCredit(mapper, submission.orderSnapshot(), submission.products(),

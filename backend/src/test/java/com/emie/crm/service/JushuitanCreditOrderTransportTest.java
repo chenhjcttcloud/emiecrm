@@ -294,4 +294,36 @@ class JushuitanCreditOrderTransportTest {
     assertThrows(JushuitanCreditPushService.Blocked.class,()->transport.push(invalid));
     assertNull(persisted); verify(client,never()).upload(any());
   }
+
+  @Test void logisticsChoiceIsFrozenForTheErpRequestAndUnknownResultsAreQueryOnly() throws Exception {
+    var original = submitted("first-approval", "", "submission-stable");
+    var order = (ObjectNode) original.orderSnapshot().deepCopy();
+    order.withObject("approvalDraft").put("logisticsMode", "CARRIER").put("logisticsCode", "SF.5").put("logisticsCompany", "顺丰到付");
+    var input = (ObjectNode) original.input().deepCopy();
+    input.put("logisticsMode", "CARRIER").put("logisticsCode", "SF.5").put("logisticsCompany", "顺丰到付");
+    var shipment = new JushuitanCreditPushService.Submission(original.orderId(),original.soId(),original.approvalUuid(),
+        original.instanceCode(),original.environment(),order,original.products(),input,original.attemptId(),
+        original.policyVersion(),original.trigger(),original.submissionId());
+    when(client.upload(any())).thenAnswer(call -> {
+      var payload = ((JsonNode) call.getArgument(0)).get(0);
+      assertEquals("SF.5", payload.path("lc_id").asText());
+      assertEquals("顺丰到付", payload.path("logistics_company").asText());
+      assertEquals(payload, saved().path("request"));
+      throw new ApiException("isolated timeout");
+    });
+    assertEquals("UNKNOWN", transport.push(shipment).path("status").asText());
+    var frozen = saved().path("request").deepCopy();
+    assertEquals("ACCEPTED", transport.reconcile(shipment).path("status").asText());
+    assertEquals(frozen, saved().path("request"));
+    verify(client,times(1)).upload(any());verify(db,never()).receipt(any());
+  }
+
+  @Test void aPreviouslySelectedCarrierCannotSilentlyBecomeWarehouseArrangedDuringRebuild() throws Exception {
+    doThrow(new ApiException("isolated preflight failure")).when(shipments).validateCreditRequest(any());
+    assertThrows(JushuitanCreditPushService.Blocked.class,()->transport.push(submission()));
+    var previous=saved();((ObjectNode)previous.path("request")).put("lc_id","SF.5").put("logistics_company","顺丰到付");
+    persisted=previous.toString();
+    assertThrows(JushuitanCreditPushService.Blocked.class,()->transport.push(submission()));
+    assertEquals("SF.5",saved().path("request").path("lc_id").asText());verify(client,never()).upload(any());
+  }
 }

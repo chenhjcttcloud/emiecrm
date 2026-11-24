@@ -123,6 +123,45 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(hashlib.md5('secretapp_keyAbiz{}'.encode()).hexdigest(),
                          gateway.sign({'biz': '{}', 'app_key': 'A', 'sign': 'ignored'}, 'secret'))
 
+    def test_logistics_company_query_is_read_only_and_requires_an_exact_warehouse(self):
+        import threading
+        import urllib.request
+        from http.server import HTTPServer
+
+        path = '/open/logisticscompany/query'
+        self.assertIn(path, gateway.READ_PATHS)
+        self.assertNotIn(path, gateway.WRITE_PATHS)
+        result = {'code': 0, 'data': {'datas': [{'lc_id': 'SF.5', 'lc_name': '顺丰到付'}], 'has_next': False}}
+        with patch.dict(os.environ, {'GATEWAY_TOKEN': 'fixture-bearer', 'JST_ALLOW_ORDER_UPLOAD': '0'}), \
+                patch.object(gateway, 'upstream', return_value=result) as upstream:
+            server = HTTPServer(('127.0.0.1', 0), gateway.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def query(biz):
+                    request = urllib.request.Request(
+                        'http://127.0.0.1:' + str(server.server_port) + '/v1/query',
+                        headers={'Authorization': 'Bearer fixture-bearer', 'X-CRM-JST-Environment': 'sandbox'},
+                        data=json.dumps({'path': path, 'biz': biz}).encode())
+                    return urllib.request.urlopen(request, timeout=3)
+
+                for invalid in ({}, *({'wms_co_id': value} for value in
+                        [0, -1, True, False, None, '15136229', 15136229.0, 15136229.9, 9223372036854775808])):
+                    with self.subTest(invalid=invalid), self.assertRaises(urllib.error.HTTPError) as caught:
+                        query(invalid)
+                    with caught.exception as response:
+                        self.assertEqual(400, response.code)
+                upstream.assert_not_called()
+                biz = {'wms_co_id': 15136229, 'page_index': 1, 'page_size': 50}
+                with query(biz) as response:
+                    self.assertEqual(200, response.status)
+                    self.assertEqual(result, json.load(response))
+                upstream.assert_called_once_with(path, biz)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
 
 if __name__ == '__main__':
     unittest.main()

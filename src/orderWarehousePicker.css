@@ -18,3 +18,9 @@
 .order-credit-repair-form textarea{width:100%;min-height:90px;resize:vertical;box-sizing:border-box}
 .order-credit-repair-form em{font-style:normal;color:#d37875}
 .credit-approval-warning{display:block;margin:8px 0;color:#b74b31;font-size:12px;line-height:1.65;white-space:normal;overflow-wrap:anywhere}
+.order-logistics-picker{display:grid;gap:12px;min-width:0;margin-top:6px}
+.order-logistics-picker .form-hint,.order-logistics-picker .order-warehouse-error{margin:0}
+.jst-logistics-summary{display:grid;gap:4px;font-size:12px;line-height:1.65;white-space:normal;overflow-wrap:anywhere}
+.jst-logistics-parcel{margin:10px 0;padding:12px;border:1px solid #e5ebf6;border-radius:8px}
+.jst-logistics-parcel .order-detail-fields{margin-bottom:0}
+.jst-logistics-parcel dd{overflow-wrap:anywhere}

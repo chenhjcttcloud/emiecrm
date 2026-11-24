@@ -137,6 +137,32 @@ class JushuitanCreditPushPolicyTest {
     assertEquals(10,mapped.path("pay").path("amount").asInt());
   }
 
+  @Test void logisticsPlansAreFrozenAndIncompleteCarrierDraftsCannotBeSubmitted() throws Exception {
+    var order=order();var draft=(ObjectNode)order.path("approvalDraft");draft.put("logisticsMode","CARRIER");
+    assertDoesNotThrow(()->JushuitanCreditPushPolicy.validateDraft(order));
+    assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.validateSubmission(order));
+    draft.put("logisticsCode","00012.SF").put("logisticsCompany","顺丰速运");
+    var approval=approval(order);JushuitanCreditPushPolicy.enqueue(approval,order);
+    var push=(ObjectNode)approval.path("creditPush");
+    assertEquals("00012.SF",push.path("input").path("logisticsCode").asText());
+    assertEquals("顺丰速运",push.path("input").path("logisticsCompany").asText());
+    assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.supplement(push,json("{\"logisticsCode\":\"OTHER\"}")));
+    var modified=order.deepCopy();((ObjectNode)modified.path("approvalDraft")).put("logisticsCompany","顺丰到付");
+    assertFalse(JushuitanCreditPushPolicy.samePlan(order,modified));assertFalse(JushuitanCreditPushPolicy.sameApprovedContents(order,modified));
+  }
+
+  @Test void explicitEmptyWarehouseDefaultIsCompatibleWithLegacyButAllOtherDraftFieldsStayStrict() throws Exception {
+    var original=order();var defaults=original.deepCopy();
+    ((ObjectNode)defaults.path("approvalDraft")).put("logisticsMode","WAREHOUSE").put("logisticsCode","").put("logisticsCompany","");
+    assertTrue(JushuitanCreditPushPolicy.samePlan(original,defaults));assertTrue(JushuitanCreditPushPolicy.sameApprovedContents(original,defaults));
+    var input=JushuitanCreditPushPolicy.input(original,products());
+    for(String field:java.util.List.of("logisticsMode","logisticsCode","logisticsCompany"))assertFalse(input.has(field));
+    ((ObjectNode)defaults.path("approvalDraft")).put("recipientDistrict","福田区");
+    assertFalse(JushuitanCreditPushPolicy.sameApprovedContents(original,defaults));
+    var nonCredit=order();((ObjectNode)nonCredit.path("approvalDraft")).put("creditFulfillment",false).put("logisticsMode","CARRIER");
+    assertThrows(ApiException.class,()->JushuitanCreditPushPolicy.validateSubmission(nonCredit));
+  }
+
   @Test void incompleteHistoricalAddressBlocksIntentAndNewCreditSubmission() throws Exception {
     var valid=order(); var approval=approval(valid);
     var incomplete=order(); ((ObjectNode)incomplete.path("approvalDraft")).put("recipientAddress","万科星火");

@@ -30,6 +30,12 @@ public class JushuitanController {
     return service.shops(false);
   }
   @GetMapping("/warehouses") public Object warehouses(HttpServletRequest req) { auth.actor(req).require("business.read"); return service.warehouses(); }
+  @GetMapping("/logistics-companies") public Object logistics(@RequestParam(defaultValue = "") String warehouseId, HttpServletRequest req) {
+    auth.actor(req).require("business.read");
+    require(warehouseId.matches("[1-9][0-9]{0,18}")
+        && (warehouseId.length() < 19 || warehouseId.compareTo(Long.toString(Long.MAX_VALUE)) <= 0), "请选择有效的发货仓库编号");
+    return service.logisticsCatalog(Long.parseLong(warehouseId));
+  }
   @PostMapping("/products/sync") public Object syncProducts(@RequestBody JsonNode body, HttpServletRequest req) { return service.syncProducts(auth.actor(req), body); }
   @PostMapping("/inventory") public Object inventory(@RequestBody JsonNode body, HttpServletRequest req) {
     auth.actor(req).require("business.read");

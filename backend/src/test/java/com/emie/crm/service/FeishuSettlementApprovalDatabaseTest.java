@@ -128,6 +128,28 @@ class FeishuSettlementApprovalDatabaseTest {
     assertFalse(saved.path("form").toString().contains("不得混入"));
   }
 
+  @Test void originalLogisticsPersistInSettlementLinksApprovalSnapshotAndBackupWithoutCreatingShipments() throws Exception {
+    when(erp.query(eq(JushuitanDocumentService.SALES),anyMap())).thenReturn(mapper.readTree("""
+      {"code":0,"data":{"orders":[{"shop_id":7,"o_id":11,"so_id":"fixture-so-11","status":"Sent",
+       "send_date":"2026-11-01 10:00:00","pay_amount":24,"wms_co_id":4,"logistics_company":"原始已发货物流",
+       "l_id":"000012345ABC","items":[{"sku_id":"FIXTURE-SKU","name":"已发货商品","qty":2}]}]}}
+      """));
+    var input=request().put("logisticsCompany","不得使用的前端值").put("trackingNumber","FAKE");
+    var response=settlements.create(input,writer);String id=response.path("approval").path("orderId").asText();
+    var saved=record(id);var sale=saved.path("orderSnapshot").path("settlement").path("sales").get(0);
+    assertEquals("原始已发货物流",sale.path("logisticsCompany").asText());assertEquals("000012345ABC",sale.path("trackingNumber").asText());
+    assertTrue(saved.path("form").toString().contains("原物流：原始已发货物流；原运单：000012345ABC"));
+    assertFalse(saved.toString().contains("不得使用的前端值"));assertFalse(saved.toString().contains("FAKE"));
+    var metadata=mapper.readTree(jdbc.queryForObject("SELECT sale_metadata FROM jst_document_sales WHERE order_id=?",String.class,id));
+    assertEquals("原始已发货物流",metadata.path("logisticsCompany").asText());assertEquals("000012345ABC",metadata.path("trackingNumber").asText());
+    var backup=mapper.valueToTree(business.backup());
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.restore(backup,writer));
+    assertEquals(metadata,mapper.readTree(jdbc.queryForObject("SELECT sale_metadata FROM jst_document_sales WHERE order_id=?",String.class,id)));
+    assertEquals(saved,record(id));assertEquals(0,count("jst_shipments"));assertEquals(0,count("receipts"));
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM jst_credit_pushes",Integer.class));
+    verify(erp,never()).upload(any());
+  }
+
   @Test void invalidTemplateRollsBackTheSettlementItsLinksAndAudit() throws Exception {
     when(client.definition("fixture-template")).thenReturn(mapper.readTree("""
         {"form":[{"id":"unsupported","name":"不支持字段","type":"radioV2","required":true}]}

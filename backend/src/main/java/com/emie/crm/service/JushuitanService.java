@@ -132,6 +132,41 @@ public class JushuitanService {
     throw new ApiException("仓库列表过多，请联系管理员");
   }
 
+  public ArrayNode logisticsCatalog(long warehouseId) {
+    require(warehouseId > 0, "请先选择有效的发货仓库");
+    requireWarehouse(warehouseId);
+    ArrayNode companies = mapper.createArrayNode();
+    var names = new LinkedHashMap<String, String>();
+    for (int page = 1; page <= 100; page++) {
+      var result = data(client.query("/open/logisticscompany/query", Map.of("wms_co_id", warehouseId, "page_index", page, "page_size", 50)));
+      require(result.path("datas").isArray() && result.path("has_next").isBoolean(), "物流公司接口返回格式异常，请稍后重试或由仓库安排物流");
+      for (var row : result.path("datas")) {
+        require(row.path("lc_id").isTextual() && row.path("lc_name").isTextual(), "物流公司目录缺少有效编码或名称");
+        String code = JushuitanLogistics.text(row.path("lc_id"), 100, "物流公司编码");
+        String name = JushuitanLogistics.text(row.path("lc_name"), 191, "物流公司名称");
+        require(!code.isBlank() && !name.isBlank(), "物流公司目录缺少有效编码或名称");
+        String previous = names.putIfAbsent(code, name);
+        require(previous == null || previous.equals(name), "物流公司目录出现同编码不同名称，请在聚水潭核对配置");
+        if (previous == null) companies.addObject().put("code", code).put("name", name);
+      }
+      if (!result.path("has_next").booleanValue()) return companies;
+    }
+    throw new ApiException("物流公司目录分页未完成，请稍后重试或由仓库安排物流");
+  }
+
+  void requireLogistics(ObjectNode request) {
+    if (!request.has("lc_id") && !request.has("logistics_company")) return;
+    require(request.path("lc_id").isTextual() && request.path("logistics_company").isTextual(), "请完整选择有效的物流公司");
+    String code = JushuitanLogistics.text(request.path("lc_id"), 100, "物流公司编码");
+    String name = JushuitanLogistics.text(request.path("logistics_company"), 191, "物流公司名称");
+    require(!code.isEmpty() && !name.isEmpty(), "请完整选择有效的物流公司");
+    var warehouse = request.path("wms_co_id");
+    require(warehouse.isIntegralNumber() && warehouse.canConvertToLong() && warehouse.asLong() > 0, "请选择有效的发货仓库");
+    for (var company : logisticsCatalog(warehouse.longValue()))
+      if (code.equals(company.path("code").asText()) && name.equals(company.path("name").asText())) return;
+    throw new ApiException("所选物流公司在该仓库未配置或名称已变化，请核对聚水潭目录后重新提交");
+  }
+
   public JsonNode inventory(String sku, long warehouseId) {
     require(!sku.isBlank() && sku.length() <= 40 && !sku.contains(","), "SKU编码无效");
     require(warehouseId > 0, "请先手工选择发货仓库");
@@ -201,6 +236,7 @@ public class JushuitanService {
 
   private void validateSkus(ObjectNode request) {
     requireWarehouse(request.path("wms_co_id").asLong());
+    requireLogistics(request);
     // A stock row alone is insufficient: deleted products may still have historical stock.
     for (var item : request.path("items")) {
       String sku = item.path("sku_id").asText();
@@ -250,6 +286,8 @@ public class JushuitanService {
         require(prior.path("status").asText().equals("FAILED"), "该订单已提交，请先同步状态核对，不要重复推送");
         require(!prior.path("busy").asBoolean(), "订单正在处理，请稍后");
         if (!prior.path("upstreamAttempted").asBoolean()) {
+          require(!prior.path("request").has("lc_id") || JushuitanLogistics.selection(order.path("approvalDraft")).carrier(),
+              "原请求已指定物流公司，但订单缺少对应计划，请人工核对原单，不能默默改为仓库安排");
           prior.set("request", JushuitanOrderMapper.build(mapper, order, state.path("products"), input, prior.path("soId").asText(), sandbox));
         }
         prior.put("status", "SUBMITTING").put("busy", true).put("startedAt", Instant.now().toEpochMilli());

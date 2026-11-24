@@ -5,6 +5,7 @@ import { customerOptions } from './customerOptions';
 import { moneyCents } from './orderMoney';
 import { submissionProblem } from './feishuApprovalModel';
 import { createSettlementApprovalRequest, submitSettlementApproval } from './settlementApprovalSubmission';
+import {LogisticsSummary} from './OrderLogistics';
 
 const statusLabels = { Sent: '已发货', Archive: '已归档', Cancelled: '已取消' };
 const positiveId = /^[1-9][0-9]{0,18}$/;
@@ -71,6 +72,7 @@ export function SettlementSalesTable({ sales, selected, onSelect, onRemove, disa
         {onSelect && <th scope="col">选择</th>}
         <th scope="col">聚水潭内部单号</th><th scope="col">店铺</th>
         <th scope="col">发货日</th><th scope="col">发货仓</th><th scope="col">状态</th>
+        <th scope="col">原销售单物流摘要</th>
         <th scope="col">聚水潭金额</th>{onRemove && <th scope="col">操作</th>}
       </tr></thead>
       <tbody>{sales.map(sale => {
@@ -88,7 +90,7 @@ export function SettlementSalesTable({ sales, selected, onSelect, onRemove, disa
             </details>}
           </td><td>{shopId}</td>
           <td>{sale.shippedOn || '—'}</td><td>{sale.warehouseName || sale.warehouseId || '—'}</td>
-          <td>{statusLabels[sale.status] || sale.status || '待查询'}</td><td>{saleAmount(sale.amount)}</td>
+          <td>{statusLabels[sale.status] || sale.status || '待查询'}</td><td><LogisticsSummary company={sale.logisticsCompany} trackingNumber={sale.trackingNumber}/></td><td>{saleAmount(sale.amount)}</td>
           {onRemove && <td><button type="button" className="link-btn" disabled={disabled}
             aria-label={`移除销售单 ${oId}`} onClick={() => onRemove(oId)}>移除</button></td>}
         </tr>;

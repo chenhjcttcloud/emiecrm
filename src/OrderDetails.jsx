@@ -2,6 +2,8 @@ import React, {useState} from 'react';
 import BusinessImage from './BusinessImage';
 import OrderChangeLog from './OrderChangeLog';
 import CreditOrderPush from './CreditOrderPush';
+import OrderLogistics from './OrderLogistics';
+import {plannedLogistics} from './orderLogisticsModel';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
 import {shipmentLabel} from './JushuitanOrders';
 import {orderTotal} from './orderMoney';
@@ -59,6 +61,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
   ];
   if(warehouse)fields.push(['计划发货仓库',(warehouse.name||'仓库')+'（编号 '+warehouse.id+'）']);
   if(shop)fields.push(['聚水潭店铺',(shop.name||'店铺')+'（编号 '+shop.id+'）']);
+  if(order.type==='销售订单'&&order.source!=='jushuitan-settlement')fields.push(['计划物流',plannedLogistics(order.approvalDraft)]);
   if (order.type === '销售订单' && order.source !== 'jushuitan-settlement') fields.push([creditPush?'聚水潭进度':'发货状态', creditPush?.label||shipmentLabel(shipment)]);
   if (order.source === 'jushuitan-settlement') fields.push(['订单来源', '聚水潭结算补录']);
   return <DialogLayer open kind="drawer" label="订单详情" onClose={close}>
@@ -86,6 +89,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
           </dl>
           <p>账期推送不登记收款；已收款和待收款按上方实际入账金额显示。</p>
         </section>}
+        {shipment&&order.type==='销售订单'&&order.source!=='jushuitan-settlement'&&<section aria-label="实际出库物流"><h3>实际出库物流</h3><OrderLogistics shipments={shipment.shipments}/></section>}
         {hasRecipient && <section><h3>{actualDiffers ? '原审批收货信息' : '收货信息'}</h3><dl className="order-detail-fields">
           <div><dt>收货人</dt><dd>{display(recipient.recipientName)}</dd></div>
           <div><dt>收货电话</dt><dd>{display(recipient.recipientPhone)}</dd></div>

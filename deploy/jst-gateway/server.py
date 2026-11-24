@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-READ_PATHS = {'/open/wms/partner/query', '/open/shops/query', '/open/inventory/query', '/open/orders/single/query',
+READ_PATHS = {'/open/wms/partner/query', '/open/shops/query', '/open/logisticscompany/query', '/open/inventory/query', '/open/orders/single/query',
               '/open/orders/out/simple/query', '/open/logistic/query', '/open/sku/query', '/open/skumap/query',
               '/open/aftersale/received/query', '/open/purchase/query', '/open/webapi/wmsapi/purchasein/purchaseinquery'}
 WRITE_PATHS = {'/open/jushuitan/orderaddress/update', '/open/jushuitan/order/remark/upload',
@@ -207,6 +207,10 @@ class Handler(BaseHTTPRequestHandler):
                 path = body.get('path')
                 if not isinstance(path, str) or path not in READ_PATHS:
                     return self.reply(403, {'error': 'path_not_allowed'})
+                if path == '/open/logisticscompany/query':
+                    warehouse = body.get('biz', {}).get('wms_co_id')
+                    if type(warehouse) is not int or not 0 < warehouse <= 9223372036854775807:
+                        raise ValueError()
             elif self.path == '/v1/mutations':
                 if os.getenv('JST_ALLOW_ORDER_CHANGE') != '1' or expected != environment():
                     return self.reply(403, {'error': 'order_change_disabled_or_environment_missing'})

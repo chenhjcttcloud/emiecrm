@@ -87,6 +87,36 @@ class JushuitanOrderMapperTest {
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),bad,"CRM-id",true));
   }
 
+  @Test void explicitCarrierIsMappedOnlyFromTheOrdersImmutablePlanWithoutTouchingMoneyOrAddress() throws Exception {
+    var order=order();var request=input();
+    var planned=order.putObject("approvalDraft").put("logisticsMode","CARRIER").put("logisticsCode","SF.5").put("logisticsCompany","顺丰到付");
+    for(String field:java.util.List.of("logisticsMode","logisticsCode","logisticsCompany"))request.set(field,planned.path(field));
+    var before=order.deepCopy();var inputBefore=request.deepCopy();
+    var result=JushuitanOrderMapper.build(m,order,products(),request,"CRM-logistics",true);
+    assertEquals("SF.5",result.path("lc_id").asText());assertEquals("顺丰到付",result.path("logistics_company").asText());
+    assertEquals("虚拟测试地址",result.path("receiver_address").asText());assertEquals("19.98",result.path("pay").path("amount").asText());
+    assertEquals(before,order);assertEquals(inputBefore,request);
+    var forged=request.deepCopy().put("logisticsCode","OTHER");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order,products(),forged,"CRM-logistics",true));
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order,products(),input(),"CRM-logistics",true));
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),request,"CRM-logistics",true));
+    order.put("paid",0);planned.put("creditFulfillment",true);
+    assertEquals("SF.5",JushuitanOrderMapper.buildCredit(m,order,products(),request,"CRM-logistics",true).path("lc_id").asText());
+    order.put("status","审批中");
+    assertEquals("SF.5",JushuitanOrderMapper.buildSubmittedCredit(m,order,products(),request,"CRM-logistics",true).path("lc_id").asText());
+  }
+
+  @Test void legacyAndExplicitWarehouseDefaultProduceNoNativeLogisticsFields() throws Exception {
+    var legacy=JushuitanOrderMapper.build(m,order(),products(),input(),"CRM-default",true);
+    var planned=order();planned.putObject("approvalDraft").put("logisticsMode","WAREHOUSE").put("logisticsCode","").put("logisticsCompany","");
+    var request=input().put("logisticsMode","WAREHOUSE").put("logisticsCode","").put("logisticsCompany","");
+    var explicit=JushuitanOrderMapper.build(m,planned,products(),request,"CRM-default",true);
+    for(var result:java.util.List.of(legacy,explicit)) {
+      assertFalse(result.has("lc_id"));assertFalse(result.has("logistics_company"));result.remove("order_date");((ObjectNode)result.path("pay")).remove("pay_date");
+    }
+    assertEquals(legacy,explicit);
+  }
+
   @Test void creditSettlementUsesFullErpAmountAndKeepsActualCrmAmountsUnchanged() throws Exception {
     for (String paid : new String[]{"0", "5.25", "19.98"}) {
       var o = order().put("customer", "真实客户甲"); o.set("paid", json(paid));

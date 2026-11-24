@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {orderNumber} from './orderNumber';
+import {LogisticsSummary} from './OrderLogistics';
 import { SaleBatchInput, SettlementSalesTable, saleAmount, saleRef, salesAmountCents } from './JushuitanSettlement';
 
 const warehouseStatuses = { Archive: '已归档', Cancelled: '已取消', Delete: '已作废', OuterConfirming: '外部确认中' };
@@ -41,6 +42,7 @@ function WarehouseDocuments({ title, documents, outbound = false }) {
           {row.status && <span className="badge badge-blue">{statuses[row.status] || row.status}</span>}
         </div>
         {details && <p className="form-hint">{details}</p>}
+        {outbound&&<LogisticsSummary company={row.company} trackingNumber={row.trackingNumber} summary={false}/>}
         <Items items={row.items} quantityLabel={outbound ? '出库数量' : '入库数量'} />
       </article>;
     })}
@@ -183,6 +185,7 @@ function DocumentDrawer({ order, api, canWrite, canSettle, Icon, onClose }) {
               <span className="badge badge-blue">{sale.source === 'manual' ? '手动关联' : '来自发货记录'}</span>
             </div>
             <p className="form-hint">店铺编号 {sale.shopId}{sale.soId && ` · 线上单号 ${sale.soId}`}</p>
+            <LogisticsSummary company={sale.logisticsCompany} trackingNumber={sale.trackingNumber}/>
             {canWrite && sale.source === 'manual' && <button type="button" className="link-btn" disabled={busy}
               onClick={() => { if (window.confirm(`确认解除聚水潭销售订单 ${sale.id} 的关联？`)) update('sale', { remove: true }); }}>
               解除销售订单关联
