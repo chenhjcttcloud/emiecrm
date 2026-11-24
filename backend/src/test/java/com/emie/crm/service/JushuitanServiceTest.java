@@ -114,6 +114,33 @@ class JushuitanServiceTest {
   var r=service.sync("o1");
   assertEquals("ACCEPTED",r.path("status").asText());assertTrue(r.has("syncError"));
  }
+ @Test void creditShipmentCannotUseLegacySubmitOrFullCashAmendment()throws Exception{
+  acceptedOrder();var record=(ObjectNode)m.readTree(persisted);record.put("creditFulfillment",true);persisted=record.toString();
+  clearInvocations(client);
+  assertThrows(ApiException.class,()->service.submit("o1",input(),admin));
+  assertThrows(ApiException.class,()->service.amend("o1",input(),admin));
+  assertThrows(ApiException.class,()->service.continueAmendment("o1",input(),admin));
+  verify(client,never()).upload(any());verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+ @Test void missingCreditOrderRemainsUnknownAndCannotEnableBlindResend()throws Exception{
+  acceptedOrder();var record=(ObjectNode)m.readTree(persisted);
+  record.put("creditFulfillment",true).put("upstreamAttempted",true).put("status","UNKNOWN").put("startedAt",0);persisted=record.toString();
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"orders\":[]}}"));
+  assertEquals("UNKNOWN",service.sync("o1").path("status").asText());
+ }
+ @Test void nativeWaitPayIsExposedWithoutInventingShipment()throws Exception{
+  acceptedOrder();upstreamOrder("WaitPay",null);
+  var result=service.sync("o1");
+  assertEquals("WaitPay",result.path("nativeStatus").asText());
+  assertNotEquals("SHIPPED",result.path("status").asText());
+ }
+ @Test void explicitCreditRejectionIsNotReclassifiedAsAnUnknownWrite()throws Exception{
+  acceptedOrder();var record=(ObjectNode)m.readTree(persisted);
+  record.put("creditFulfillment",true).put("confirmedRejected",true).put("upstreamAttempted",true).put("status","FAILED").put("startedAt",0);persisted=record.toString();
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"orders\":[]}}"));
+  assertEquals("FAILED",service.sync("o1").path("status").asText());
+  assertTrue(m.readTree(persisted).path("confirmedRejected").asBoolean());
+ }
  void acceptedOrder() throws Exception {
   when(client.upload(any())).thenAnswer(i->{
    String so=((JsonNode)i.getArgument(0)).get(0).path("so_id").asText();

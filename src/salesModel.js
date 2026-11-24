@@ -2,8 +2,8 @@ import{csvCell}from'./csv.js';
 import{moneyCents}from'./orderMoney.js';
 import{orderNumberForId}from'./orderNumber.js';
 
-export function salesOrderFinance(order,effective={}){
- const total=moneyCents(effective?.total??order.total),paid=moneyCents(effective?.paid??order.paid??0);
+export function salesOrderFinance(order,effective={},creditFulfillment=false){
+ const total=moneyCents(effective?.total??order.total),paid=moneyCents(creditFulfillment?order.paid??0:effective?.paid??order.paid??0);
  if(total===null||paid===null)return{status:'待核对',tone:'warning',paid:null,outstanding:null};
  return{status:total===0?'无需回款':paid>=total?'已回款':paid>0?'部分回款':'待回款',tone:total>0&&paid>=total?'green':'warning',paid:paid/100,outstanding:Math.max(0,total-paid)/100};
 }

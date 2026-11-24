@@ -80,7 +80,7 @@ public class JushuitanService {
 
   private ObjectNode editState(JsonNode record) {
     var value = mapper.createObjectNode();
-    for (String key : List.of("soId", "oId", "status", "request", "effectiveOrder", "change", "amendment", "externalDifference"))
+    for (String key : List.of("soId", "oId", "status", "creditFulfillment", "accountingMode", "request", "effectiveOrder", "change", "amendment", "externalDifference"))
       value.set(key, record.path(key));
     value.put("oId", record.path("oId").asLong());
     return value;
@@ -224,6 +224,9 @@ public class JushuitanService {
     require(validShop, "店铺不存在或不支持订单上传");
   }
 
+  /** Shared read-only preflight; the credit outbox owns its separate payment mapping and lease. */
+  public void validateCreditRequest(ObjectNode request) { validateSkus(request); }
+
   public synchronized JsonNode submit(String orderId, JsonNode input, Actor actor) {
     actor.require("business.write"); actor.require("order.approve");
     require(client.configured(), "尚未配置聚水潭云端服务");
@@ -237,6 +240,9 @@ public class JushuitanService {
       require(db.rows(JushuitanDocumentService.SALES_BY_ORDER, sandbox ? "sandbox" : "production", orderId).isEmpty(),
           "该 CRM 订单已手工关联聚水潭销售单，请核对后再提交");
       var prior = load(orderId, true);
+      require(prior == null || !prior.path("creditFulfillment").asBoolean(), "账期订单请通过自动推送记录核对或重试，不能另行提交发货");
+      for (var approval : db.rows("SELECT payload FROM feishu_order_approvals WHERE order_id=?", orderId))
+        require(!db.parse(approval.get("payload").toString()).path("creditPush").isObject(), "该订单已登记自动账期推送，请在订单详情核对进度");
       if (prior != null) {
         require(prior.path("environment").asText().equals(sandbox ? "sandbox" : "production"), "该订单已绑定另一聚水潭环境");
         require(prior.path("status").asText().equals("FAILED"), "该订单已提交，请先同步状态核对，不要重复推送");
@@ -318,7 +324,8 @@ public class JushuitanService {
     } else if (kind.equals("REMARK")) {
       String remark = input.path("remark").asText().trim();
       require(remark.length() <= 400, "发货备注不超过400字");
-      target.put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + orderId + "\n" + remark);
+      target.put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + orderId + "\n"
+          + (record.path("creditFulfillment").asBoolean() ? "账期挂账（非实收）；CRM实收按实际收款记录核算。\n" : "") + remark);
     }
     if (target.has("remark")) require(target.path("remark").asText().length() <= 500, "含订单编号的备注总长度不能超过500字");
     // Fetch authoritative order and outbound records immediately before the mutation.
@@ -425,6 +432,7 @@ public class JushuitanService {
     if (!manualCancellation) require(client.changesEnabled(), "请先开通订单变更服务");
     var record = load(orderId, false);
     requireNoExternalDifference(record);
+    require(record == null || !record.path("creditFulfillment").asBoolean(), "账期订单商品和金额变更须重新核对审批及应收，请勿使用全款换单流程");
     require(record != null && record.path("editVersion").asText(record.path("updatedAt").asText()).equals(input.path("version").asText()), "订单已变化，请重新打开");
     require(record.path("environment").asText().equals(sandbox ? "sandbox" : "production"), "订单环境不一致");
     require(record.path("oId").asLong() > 0 && !record.path("soId").asText().isBlank(), "请先同步确认聚水潭已接单");
@@ -495,6 +503,7 @@ public class JushuitanService {
     actor.require("business.write"); actor.require("order.approve");
     var record = load(orderId, false);
     requireNoExternalDifference(record);
+    require(record == null || !record.path("creditFulfillment").asBoolean(), "账期订单不能使用全款换单流程");
     require(record != null && record.path("amendment").isObject(), "没有关联变更单");
     require(record.path("environment").asText().equals(sandbox ? "sandbox" : "production"), "订单环境不一致");
     require(!record.path("busy").asBoolean(), "正在处理，请先同步核对");
@@ -705,6 +714,8 @@ public class JushuitanService {
       if (previous.isObject()) {archiveExternal(record,(ObjectNode)previous,"RESOLVED");record.remove("externalDifference");}
       return;
     }
+    if (record.path("creditFulfillment").asBoolean() && diff.path("coreChanged").asBoolean())
+      diff.withArray("blockedReasons").add("账期订单商品或金额变更须重新核对审批及应收，不能按全款差额流程直接采纳");
     if(diff.path("coreChanged").asBoolean() && (!outs.isEmpty() || Set.of("PARTIAL","SHIPPED").contains(record.path("status").asText())))
       diff.withArray("blockedReasons").add("已生成出库记录或已经发货，商品和金额差异需人工处理仓库/售后，不能直接采纳");
     var fingerprintData=diff.deepCopy();
@@ -775,6 +786,7 @@ public class JushuitanService {
           && record.path("editVersion").asText().equals(input.path("version").asText()),"聚水潭内容或进度已变化，请刷新后重新确认");
       require(!candidate.path("status").asText().equals("BLOCKED") && candidate.path("blockedReasons").isEmpty(),"该差异不能直接采纳，请先处理提示的问题");
       var diff=(ObjectNode)candidate;
+      require(!record.path("creditFulfillment").asBoolean() || !diff.path("coreChanged").asBoolean(), "账期订单商品或金额变更须重新核对审批及应收");
       String reason=input.path("reason").asText().trim();require(!reason.isBlank()&&reason.length()<=200,"请填写核对原因（不超过200字）");
       var delta=new java.math.BigDecimal(diff.path("difference").asText());
       boolean firstApproval=!diff.has("approvedAt");
@@ -854,11 +866,18 @@ public class JushuitanService {
       params.putArray("so_ids").add(record.path("soId").asText());
       var orders = pages("/open/orders/single/query", params, "orders");
       if (orders.isEmpty()) {
-        if (Instant.now().toEpochMilli() - record.path("startedAt").asLong() > 60000
+        if (record.path("creditFulfillment").asBoolean() && record.path("confirmedRejected").asBoolean()
+            && "FAILED".equals(record.path("status").asText()))
+          record.put("message", "聚水潭已明确拒绝原账期单，可由有权限人员核对后沿用原请求重试");
+        else if (record.path("creditFulfillment").asBoolean() && record.path("upstreamAttempted").asBoolean())
+          record.put("status", "UNKNOWN").put("message", "原账期单暂未查询到，保留原单号继续核对，不会另建订单");
+        else if (Instant.now().toEpochMilli() - record.path("startedAt").asLong() > 60000
             && Set.of("UNKNOWN", "SUBMITTING", "FAILED").contains(record.path("status").asText()))
           record.put("status", "FAILED").put("message", "本次查询未找到订单，可沿用原单号重试");
         else record.put("message", "本次查询未找到订单，保留原状态，请稍后再次核对");
       } else {
+        if (orders.size() == 1) record.put("nativeStatus", orders.get(0).path("status").asText());
+        else record.remove("nativeStatus");
         reconcileChange(record, orders);
         if (record.path("amendment").path("status").asText().equals("WAIT_CANCEL")) reconcileAmendment(record);
         var outs = pages("/open/orders/out/simple/query", params, "datas");

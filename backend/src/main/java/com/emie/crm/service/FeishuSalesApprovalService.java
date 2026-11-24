@@ -346,6 +346,7 @@ public class FeishuSalesApprovalService {
         .put("uuid", UUID.randomUUID().toString()).put("openId", openId).put("createdAt", CrmRepository.now());
     record.set("form", form);
     record.set("orderSnapshot", order.deepCopy());
+    JushuitanCreditPushPolicy.markSubmission(record, order, products, jstEnvironment);
     db.audit(actor.name(), "发起飞书" + order.path("type").asText() + "审批：" + OrderNumbers.display(order));
     return record;
   }
@@ -676,6 +677,7 @@ public class FeishuSalesApprovalService {
       if (!order.path("status").asText().equals(orderStatus)) updateOrderStatus(state, order, orderStatus);
       current.put("status", completed ? result : "PENDING");
       if (completed) current.remove(List.of("cancelRequestedBy", "cancelAttempt", "cancelLeaseUntil"));
+      if ("APPROVED".equals(result)) JushuitanCreditPushPolicy.enqueue(current, order);
       store(current);
       if (completed) db.audit("飞书审批", approvalAudit(result, order.path("type").asText()) + "：" + OrderNumbers.display(order));
       return current;
@@ -764,6 +766,7 @@ public class FeishuSalesApprovalService {
     var result = db.object().put("orderId", record.path("orderId").asText()).put("status", status);
     for (var field : List.of("instanceCode", "message", "createdAt", "updatedAt", "history"))
       if (record.hasNonNull(field)) result.set(field, record.path(field));
+    if (record.path("creditPush").isObject()) result.set("creditPush", JushuitanCreditPushPolicy.summary(record.path("creditPush")));
     if (record.hasNonNull("cancelRequestedBy")) result.put("cancelPending", true);
     if (RESUBMITTABLE.contains(status) && !record.path("uuid").asText().isBlank())
       result.put("retryVersion", record.path("uuid").asText());

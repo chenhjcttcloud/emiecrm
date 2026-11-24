@@ -1,7 +1,8 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useId, useRef, useState} from 'react';
+import recipientRegions from './chinaAdministrativeRegions.json';
 import OrderSelect from './OrderSelect';
 import {approvalInstanceUrl, approvalLabels, approvalStatus, approvalTime, canSubmitApproval,
-  completedApproval, isApprovalOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
+  completedApproval, isApprovalOrder, isCreditSalesOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
 import './feishuApproval.css';
 
 const pollingDelay = rows => rows.some(row => ['QUEUED', 'SUBMITTING'].includes(row.status)) ? 5000 : 30000;
@@ -129,28 +130,55 @@ export function ApprovalActions({order, approvals, onSubmit, onMessage, canWrite
   </span>;
 }
 
+export function RecipientAddressFields({draft = {}, disabled, onChange, split = false, regions = recipientRegions}) {
+  const lists = useId();
+  const change = (key, value) => onChange?.({...draft, [key]: value});
+  if (!split) return <label className="field"><span>收货地址 <em>*</em></span>
+    <textarea name="recipientAddress" aria-label="收货地址" required maxLength={500} disabled={disabled}
+      value={draft.recipientAddress ?? ''} onChange={event => change('recipientAddress', event.target.value)} placeholder="请输入完整收货地址"/>
+  </label>;
+  const legacy = draft.recipientAddress && !['recipientProvince', 'recipientCity', 'recipientDistrict'].some(key => draft[key]);
+  const province = regions.find(row => row.name === String(draft.recipientProvince ?? '').trim());
+  const city = province?.children?.find(row => row.name === String(draft.recipientCity ?? '').trim());
+  const suggestions = [regions.map(row => row.name), province?.children?.map(row => row.name) ?? [], city?.children ?? []];
+  const changeRegion = (key, value) => {
+    if (value === draft[key]) return;
+    const reset = key === 'recipientProvince' ? {recipientCity: '', recipientDistrict: ''} : key === 'recipientCity' ? {recipientDistrict: ''} : {};
+    onChange?.({...draft, ...reset, [key]: value});
+  };
+  return <>
+    {legacy && <p className="form-hint feishu-legacy-address">原收货地址未拆分：{draft.recipientAddress}。请手动核对省、市、区；详细地址暂沿用原文，请检查是否重复填写地区。</p>}
+    <div className="feishu-address-regions">
+      {[['recipientProvince', '省份'], ['recipientCity', '城市'], ['recipientDistrict', '区 / 县']].map(([key, label], index) =>
+        <label className="field" key={key}><span>{label} <em>*</em></span><input type="text" name={key} aria-label={label} list={lists + '-' + key} required maxLength={50} disabled={disabled}
+          value={draft[key] ?? ''} placeholder={'请选择或填写' + label} autoComplete="off" onChange={event => changeRegion(key, event.target.value)}/>
+          <datalist id={lists + '-' + key}>{suggestions[index].map(name => <option key={name} value={name}/>)}</datalist></label>)}
+    </div>
+    <label className="field"><span>详细地址 <em>*</em></span><input type="text" name="recipientAddress" aria-label="详细地址" required maxLength={200} disabled={disabled}
+      value={draft.recipientAddress ?? ''} onChange={event => change('recipientAddress', event.target.value)} placeholder="街道、楼栋、门牌号，例如：万科星火online10栋"/></label>
+  </>;
+}
+
 export function ApprovalFormFields({order, config, disabled, customer, products = [], onChange, onDiscountChange}) {
   const draft = order.approvalDraft ?? {};
   const change = (key, value) => onChange?.({...draft, [key]: value});
-  if (isSalesApprovalOrder(order) && (config?.salesRecipientRequired || config?.salesDiscountRequired)) return <section className="feishu-approval-extra" aria-label="飞书审批信息">
+  const credit = isCreditSalesOrder(order) && draft.creditFulfillment !== false;
+  if (isSalesApprovalOrder(order) && (credit || config?.salesRecipientRequired || config?.salesDiscountRequired)) return <section className="feishu-approval-extra" aria-label="飞书审批信息">
     <h3>飞书审批信息</h3>
-    {config.salesRecipientRequired && <>
+    {(credit || config?.salesRecipientRequired) && <>
       <div className="feishu-recipient-grid">
         <label className="field"><span>收货人 <em>*</em></span>
-          <input type="text" name="recipientName" aria-label="收货人" required maxLength={100} disabled={disabled}
+          <input type="text" name="recipientName" aria-label="收货人" required maxLength={credit ? 50 : 100} disabled={disabled}
             value={draft.recipientName ?? customer?.contact ?? ''} onChange={event => change('recipientName', event.target.value)}/>
         </label>
         <label className="field"><span>收货电话 <em>*</em></span>
-          <input type="tel" name="recipientPhone" aria-label="收货电话" required maxLength={50} disabled={disabled}
+          <input type="tel" name="recipientPhone" aria-label="收货电话" required maxLength={credit ? 30 : 50} disabled={disabled}
             value={draft.recipientPhone ?? customer?.phone ?? ''} onChange={event => change('recipientPhone', event.target.value)}/>
         </label>
       </div>
-      <label className="field"><span>收货地址 <em>*</em></span>
-        <textarea name="recipientAddress" aria-label="收货地址" required maxLength={500} disabled={disabled}
-          value={draft.recipientAddress ?? ''} onChange={event => change('recipientAddress', event.target.value)} placeholder="请输入完整收货地址"/>
-      </label>
+      <RecipientAddressFields draft={draft} disabled={disabled} onChange={onChange} split={credit}/>
     </>}
-    {config.salesDiscountRequired && <>
+    {config?.salesDiscountRequired && <>
       <div className="feishu-discount-heading"><h4>商品折扣</h4><span>默认0，可修改</span></div>
       <div className="feishu-discounts">{(order.items ?? []).map((item, index) => {
         const product = products.find(entry => entry.id === item.product);

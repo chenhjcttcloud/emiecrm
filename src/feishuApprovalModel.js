@@ -5,6 +5,7 @@ export const approvalLabels = {
 };
 
 export const isSalesApprovalOrder = order => order?.source !== 'jushuitan-settlement' && ['销售订单', '海外提货单'].includes(order?.type);
+export const isCreditSalesOrder = order => order?.source !== 'jushuitan-settlement' && order?.type === '销售订单';
 export const isSettlementApprovalOrder = order => order?.source === 'jushuitan-settlement' && order?.type === '销售订单';
 export const isLegacyApprovedSettlement = (order, record) => isSettlementApprovalOrder(order) && order.status === '已批准' && !record;
 export const isApprovalOrder = order => isSalesApprovalOrder(order) || isSettlementApprovalOrder(order) || (order?.source !== 'jushuitan-settlement' && order?.type === '预收款订单');
@@ -67,7 +68,8 @@ export const activeBusinessOrders = orders => orders.filter(order => !order.dele
 
 export function orderExecutionView(order, shipment) {
   const effective = shipment?.effectiveOrder;
-  const total = effective?.total ?? order.total, paid = effective?.paid ?? order.paid ?? 0;
+  const total = effective?.total ?? order.total;
+  const paid = shipment?.creditFulfillment === true ? order.paid ?? 0 : effective?.paid ?? order.paid ?? 0;
   const totalCents = moneyCents(total), paidCents = moneyCents(paid);
   return {total, paid, effective: Boolean(effective), executionItems: Array.isArray(effective?.items),
     items: Array.isArray(effective?.items) ? effective.items : Array.isArray(order.items) ? order.items : [],
@@ -83,19 +85,46 @@ export function approvalInstanceUrl(instanceCode) {
 export function approvalDraftValues(config, order, fields) {
   const result = {};
   if (isSalesApprovalOrder(order)) {
-    if (config?.salesRecipientRequired)
-      for (const key of ['recipientName', 'recipientPhone', 'recipientAddress']) result[key] = String(fields?.get(key) ?? '');
     const draft = order.approvalDraft ?? {};
+    const hasCreditField = fields?.has?.('creditFulfillment') || fields?.get?.('creditFulfillment') != null;
+    const creditValue = hasCreditField ? fields.get('creditFulfillment') : draft.creditFulfillment;
+    const credit = isCreditSalesOrder(order) && (creditValue === true || creditValue === 'true');
+    if (config?.salesRecipientRequired || credit)
+      for (const key of ['recipientName', 'recipientPhone', 'recipientAddress'])
+        result[key] = String(fields?.get(key) ?? (credit ? draft[key] : '') ?? '');
+    for (const key of ['recipientProvince', 'recipientCity', 'recipientDistrict']) {
+      const present = fields?.has?.(key) || fields?.get?.(key) != null;
+      if (present || Object.hasOwn(draft, key)) result[key] = String(present ? fields.get(key) ?? '' : draft[key] ?? '');
+    }
     const hasWarehouseField = fields?.has?.('warehouseId') || fields?.get?.('warehouseId') != null;
     if (hasWarehouseField || Object.hasOwn(draft, 'warehouseId')) {
       result.warehouseId = String(hasWarehouseField ? fields.get('warehouseId') ?? '' : draft.warehouseId ?? '');
       result.warehouseName = result.warehouseId.trim()
         ? String(hasWarehouseField ? fields.get('warehouseName') ?? '' : draft.warehouseName ?? '') : '';
     }
+    if (isCreditSalesOrder(order)) {
+      if (hasCreditField || Object.hasOwn(draft, 'creditFulfillment')) {
+        result.creditFulfillment = credit;
+      }
+      const hasShopField = fields?.has?.('shopId') || fields?.get?.('shopId') != null;
+      if (hasShopField || Object.hasOwn(draft, 'shopId')) {
+        result.shopId = String(hasShopField ? fields.get('shopId') ?? '' : draft.shopId ?? '');
+        result.shopName = result.shopId.trim()
+          ? String(hasShopField ? fields.get('shopName') ?? '' : draft.shopName ?? '') : '';
+      }
+    }
   }
   if (order.type === '预收款订单' && config?.prepaymentReceiptForm)
     for (const key of ['receiptDate', 'receiptCategory']) result[key] = String(fields?.get(key) ?? '');
   return result;
+}
+
+// Old full addresses remain unchanged; structured regions are only added by explicit entry.
+export function recipientAddressText(draft = {}) {
+  const [province, city, district, address] = ['recipientProvince', 'recipientCity', 'recipientDistrict', 'recipientAddress']
+    .map(key => String(draft?.[key] ?? '').trim());
+  const grouping = ['市辖区', '县', '省直辖县级行政区划', '自治区直辖县级行政区划', '省直辖行政单位', '自治区直辖行政单位'];
+  return [province, city === province || grouping.includes(city) ? '' : city, district, address].filter(Boolean).join('');
 }
 
 export function warehouseIdentifier(value) {
@@ -108,6 +137,46 @@ export function plannedOrderWarehouse(order) {
   if (!isSalesApprovalOrder(order)) return null;
   const id = warehouseIdentifier(order.approvalDraft?.warehouseId);
   return id ? {id, name: String(order.approvalDraft?.warehouseName ?? '').trim()} : null;
+}
+
+export function plannedCreditShop(order) {
+  if (!isCreditSalesOrder(order)) return null;
+  const id = warehouseIdentifier(order.approvalDraft?.shopId);
+  return id ? {id, name: String(order.approvalDraft?.shopName ?? '').trim()} : null;
+}
+
+// A unique exact owner-name match is a suggestion only. The form never selects it silently.
+export function suggestedCreditShop(shops, owner) {
+  const name = String(owner ?? '').trim();
+  if (!name) return null;
+  const matches = (shops ?? []).filter(shop => String(shop?.name ?? '').trim() === name && warehouseIdentifier(shop?.id));
+  return matches.length === 1 ? {id: warehouseIdentifier(matches[0].id), name} : null;
+}
+
+export function creditPushView(order, approval, shipment) {
+  if (!isCreditSalesOrder(order) || order.deletedAt || order.status === '已取消') return null;
+  const push = approval?.creditPush;
+  if (!push && shipment?.creditFulfillment !== true && order.approvalDraft?.creditFulfillment !== true) return null;
+  const nativeStatus = shipment?.nativeStatus || push?.nativeStatus || '';
+  const actual = shipment?.creditFulfillment ? shipment.status : '';
+  if (actual === 'SHIPPED' || actual === 'PARTIAL') return {
+    label: actual === 'SHIPPED' ? '聚水潭已发货' : '聚水潭部分发货', tone: 'success',
+    message: shipment.message || '', nativeStatus, soId: shipment.soId, oId: shipment.oId,
+  };
+  const nativeLabels = {WaitPay: '聚水潭待付款 / 账期待处理', WaitConfirm: '聚水潭待审核',
+    WaitFConfirm: '聚水潭待财审', Delivering: '聚水潭发货中', WaitOuterSent: '等待外仓发货',
+    Sent: '聚水潭已发货', Cancelled: '聚水潭已取消'};
+  const statuses = {QUEUED: ['待自动推送', 'info'], BLOCKED: ['自动推送需补充资料', 'warning'],
+    SUBMITTING: ['正在推送聚水潭', 'info'], UNKNOWN: ['聚水潭推送结果待核对', 'warning'],
+    FAILED: ['聚水潭推送失败', 'error'], ACCEPTED: ['聚水潭已接单', 'success']};
+  statuses.EXCEPTION = ['聚水潭订单异常', 'error'];
+  statuses.CANCELLED = ['聚水潭订单已取消', 'warning'];
+  const status = push?.status || (actual === 'ACCEPTED' ? 'ACCEPTED' : actual);
+  const [label, tone] = statuses[status] || [order.status === '已批准' ? '待自动推送' : '审批通过后自动推送', 'info'];
+  return {label: nativeLabels[nativeStatus] || label, tone: nativeStatus === 'WaitPay' ? 'warning' : tone,
+    message: nativeStatus === 'WaitPay' ? '聚水潭返回待付款状态，需核对账期处理进度。'
+      : shipment?.message || push?.message || (order.status === '已批准' ? '订单将按账期策略推送，收款按实际到账记录。' : '飞书审批通过后自动推送聚水潭。'),
+    nativeStatus, soId: shipment?.soId || push?.soId, oId: shipment?.oId || push?.oId};
 }
 
 export function shippingWarehouseId(order, record) {
@@ -138,6 +207,7 @@ export function approvalDetails(config, order, fields) {
   const input = approvalDraftValues(config, order, fields);
   if (isSalesApprovalOrder(order)) {
     const result = {};
+    const credit = isCreditSalesOrder(order) && input.creditFulfillment === true;
     if (input.warehouseId?.trim()) {
       const id = warehouseIdentifier(input.warehouseId);
       if (!id) throw Error('请选择有效的发货仓库');
@@ -146,10 +216,35 @@ export function approvalDetails(config, order, fields) {
       result.warehouseId = id;
       result.warehouseName = name;
     }
-    if (config?.salesRecipientRequired) {
-      for (const [key, label, max] of [['recipientName', '收货人', 100], ['recipientPhone', '收货电话', 50], ['recipientAddress', '收货地址', 500]]) {
-        const value = input[key].trim();
+    if (credit) {
+      if ((fields?.has?.('creditShippingReady') || fields?.get?.('creditShippingReady') != null)
+          && fields.get('creditShippingReady') !== 'true')
+        throw Error('聚水潭账期推送设置暂不可用，请重新加载后提交；可先保存草稿。');
+      if (fields?.get?.('creditShippingChoiceValid') === 'false')
+        throw Error('所选聚水潭店铺或仓库当前不可用，请重新选择后提交；可先保存草稿。');
+      const shopId = warehouseIdentifier(input.shopId);
+      if (!shopId) throw Error('请选择有效的聚水潭店铺，审批通过后将自动推送。');
+      if (!result.warehouseId) throw Error('请选择发货仓库，审批通过后将自动推送。');
+      const shopName = String(input.shopName ?? '').trim();
+      if (shopName.length > 191 || /[\u0000-\u001f\u007f-\u009f]/.test(shopName)) throw Error('聚水潭店铺名称无效，最多191字');
+      result.creditFulfillment = true;
+      result.shopId = shopId;
+      result.shopName = shopName;
+    }
+    if (config?.salesRecipientRequired || credit) {
+      const limits = credit ? [50, 30, 200] : [100, 50, 500];
+      for (const [index, [key, label]] of [['recipientName', '收货人'], ['recipientPhone', '收货电话'], ['recipientAddress', '收货地址']].entries()) {
+        const max = limits[index];
+        const value = String(input[key] ?? '').trim();
         if (!value || value.length > max) throw Error('请填写有效的' + label + '，最多' + max + '字');
+        result[key] = value;
+      }
+      // Validate ERP limits before approval; approved recipient details are immutable.
+      if (credit && !/^[0-9+() -]{7,30}$/.test(result.recipientPhone))
+        throw Error('收货电话须为7至30位数字，可包含 +、括号、空格或连字符');
+      if (credit) for (const [key, label] of [['recipientProvince', '省份'], ['recipientCity', '城市'], ['recipientDistrict', '区 / 县']]) {
+        const value = String(input[key] ?? '').trim();
+        if (!value || value.length > 50) throw Error('请填写有效的' + label + '，最多50字');
         result[key] = value;
       }
     }

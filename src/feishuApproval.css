@@ -33,8 +33,11 @@
 .feishu-approval-extra{border-top:1px solid #e5eaf3;padding-top:20px;margin-top:24px}
 .feishu-approval-extra>h3{color:#465c7d;font-size:13px;margin:0 0 20px;font-weight:600}
 .feishu-recipient-grid,.feishu-discounts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}
+.feishu-address-regions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 12px;min-width:0}
+.feishu-address-regions .field{min-width:0}
+.feishu-legacy-address{overflow-wrap:anywhere}
 .feishu-discount-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 14px}
 .feishu-discount-heading h4{font-weight:500;font-size:12px;color:#687b98;margin:0}.feishu-discount-heading>span{font-size:11px;color:#93a1b7}
 .feishu-approval-extra input:disabled,.feishu-approval-extra textarea:disabled{color:#8d9ab0;background:#f5f7fb}
 @media(max-width:650px){.feishu-flow{padding:14px}.feishu-flow-nodes{padding-left:8px}.feishu-flow-nodes ul>li{width:100%}.feishu-row-actions{flex-wrap:wrap;white-space:normal}}
-@media(max-width:500px){.feishu-recipient-grid,.feishu-discounts{grid-template-columns:1fr}}
+@media(max-width:500px){.feishu-recipient-grid,.feishu-discounts,.feishu-address-regions{grid-template-columns:1fr}}

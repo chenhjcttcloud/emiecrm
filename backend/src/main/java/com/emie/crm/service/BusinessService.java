@@ -192,7 +192,7 @@ public class BusinessService {
   private boolean coreChanged(JsonNode order, JsonNode prior) {
     for (String key : List.of("total", "customerId", "type", "items"))
       if (!same(order.path(key), prior.path(key))) return true;
-    return !OrderWarehouse.same(order, prior);
+    return !OrderWarehouse.same(order, prior) || !JushuitanCreditPushPolicy.samePlan(order, prior);
   }
 
   private void validateTotal(JsonNode order, JsonNode products) {
@@ -371,7 +371,8 @@ public class BusinessService {
       if (record == null || !record.path("effectiveOrder").isObject()) continue;
       var effective = record.path("effectiveOrder");
       for (String key : List.of("total", "paid", "items"))
-        if (effective.hasNonNull(key)) view.set(key, effective.path(key).deepCopy());
+        if (effective.hasNonNull(key) && !(key.equals("paid") && record.path("creditFulfillment").asBoolean()))
+          view.set(key, effective.path(key).deepCopy());
     }
     if (!view.hasNonNull("paid")) view.put("paid", 0);
     return view;
@@ -442,6 +443,7 @@ public class BusinessService {
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
     nextOrders.values().forEach(OrderWarehouse::validateDraft);
+    nextOrders.values().forEach(JushuitanCreditPushPolicy::validateDraft);
     protectCanceledOrders(oldOrders, nextOrders, false);
     protectDeletedOrders(oldOrders, nextOrders, false);
     protectFeishuOrders(oldOrders, nextOrders, submittingOrderId, true);
@@ -734,7 +736,8 @@ public class BusinessService {
       for (var item : backup.path("jstShipments"))
         if (item.path("orderId").equals(current.path("orderId"))) saved = item;
       require(saved != null, "备份缺少现有聚水潭发货记录，不能回退外部订单状态");
-      for (String key : List.of("soId", "oId", "request", "effectiveOrder", "change", "changes", "amendment", "amendments", "externalDifference", "externalChanges", "externalTimeline"))
+      for (String key : List.of("soId", "oId", "request", "snapshot", "effectiveOrder", "change", "changes", "amendment", "amendments", "externalDifference", "externalChanges", "externalTimeline",
+          "creditFulfillment", "accountingMode", "approvalUuid", "instanceCode", "attemptId", "upstreamAttempted", "confirmedRejected"))
         require(saved.path(key).equals(current.path(key)), "备份早于现有聚水潭变更，禁止回退；请使用最新备份");
       var protectedIds = new HashSet<String>();
       collectSettlements(current, protectedIds);
@@ -779,6 +782,7 @@ public class BusinessService {
     }
     var restoredOrders = index(next.path("orders"));
     restoredOrders.values().forEach(OrderWarehouse::validateDraft);
+    restoredOrders.values().forEach(JushuitanCreditPushPolicy::validateDraft);
     for (var current : old.path("orders")) {
       String id = current.path("customerId").asText();
       if (id.isBlank()) {
@@ -1089,7 +1093,7 @@ public class BusinessService {
     if (prior == null || !prior.path("customerId").asText().isBlank() || next.path("customerId").asText().isBlank()) return false;
     for (String field : List.of("status", "total", "type", "items", "paid", "owner"))
       if (!same(next.path(field), prior.path(field))) return false;
-    return OrderWarehouse.same(next, prior);
+    return OrderWarehouse.same(next, prior) && JushuitanCreditPushPolicy.samePlan(next, prior);
   }
 
   private void protectFeishuOrders(Map<String, JsonNode> before, Map<String, JsonNode> after,

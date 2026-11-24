@@ -58,6 +58,20 @@ class BusinessServiceTest {
     assertTrue(history.isEmpty());
   }
 
+  @Test void draftRegionsRemainSeparateAndAreProtectedAsApprovedOrderContents() {
+    order(stored).put("status","草稿");
+    var changed=draft();
+    order(changed).putObject("approvalDraft").put("creditFulfillment",true).put("recipientProvince","广东省")
+        .put("recipientCity","深圳市").put("recipientDistrict","龙岗区").put("recipientAddress","万科星火online10栋");
+    var saved=save(changed,sales);var planned=order(saved).path("approvalDraft");
+    assertEquals("广东省",planned.path("recipientProvince").asText());assertEquals("深圳市",planned.path("recipientCity").asText());
+    assertEquals("龙岗区",planned.path("recipientDistrict").asText());assertEquals("万科星火online10栋",planned.path("recipientAddress").asText());
+    assertEquals(0,order(saved).path("paid").asInt());assertTrue(history.isEmpty());
+    order(stored).put("status","已批准");
+    var approved=draft();((ObjectNode)order(approved).path("approvalDraft")).put("recipientDistrict","福田区");
+    assertThrows(ApiException.class,()->save(approved,admin));
+  }
+
   @Test void warehouseSelectionIsLockedEvenForLegacyApprovedOrdersAndAssociationOnlyEdits() {
     var changed = draft(); order(changed).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "计划仓");
     assertThrows(ApiException.class, () -> save(changed, admin));
@@ -235,6 +249,29 @@ class BusinessServiceTest {
     assertThrows(ApiException.class,()->service.restore(backup,admin));
     backup.putArray("jstShipments").add(shipment);
     assertThrows(ApiException.class,()->service.restore(backup,admin));
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+  @Test void creditShipmentCannotOverrideRealReceiptsWithItsOldExecutionPaidSnapshot() throws Exception {
+    order(stored).put("paid", 25);
+    var shipment=mapper.createObjectNode().put("orderId","o1").put("creditFulfillment",true);
+    shipment.putObject("effectiveOrder").put("total",100).put("paid",0).set("items",order(stored).path("items"));
+    when(db.rows("SELECT payload FROM jst_shipments WHERE order_id=?","o1"))
+        .thenAnswer(call->List.of(Map.of("payload",shipment.toString())));
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    assertEquals(25,BusinessService.receiptExecutionView(db,order(stored)).path("paid").asInt());
+    shipment.put("creditFulfillment",false);
+    assertEquals(0,BusinessService.receiptExecutionView(db,order(stored)).path("paid").asInt());
+  }
+  @Test void restoreCannotEraseCreditModeOrAlterTheApprovedCreditSnapshot() throws Exception {
+    var shipment=mapper.createObjectNode().put("orderId","o1").put("soId","CRM-"+"a".repeat(32)).put("creditFulfillment",true);
+    shipment.set("snapshot",order(stored).deepCopy());
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    for(String field:new String[]{"creditFulfillment","snapshot"}) {
+      var backup=mapper.createObjectNode().put("version",1);backup.set("state",draft());backup.putArray("receipts");
+      var modified=shipment.deepCopy();modified.remove(field);backup.putArray("jstShipments").add(modified);
+      assertThrows(ApiException.class,()->service.restore(backup,admin));
+    }
     verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
   }
   @Test void effectiveAndPendingShipmentProductsCannotBeDeleted() throws Exception {

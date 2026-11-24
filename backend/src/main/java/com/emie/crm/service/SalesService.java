@@ -88,13 +88,23 @@ public class SalesService {
       if (names.put(name, customer.path("id").asText()) != null) ambiguous.add(name);
     }
     ambiguous.forEach(names::remove);
+    var orders = index(state.path("orders"));
     var effective = new HashMap<String, JsonNode>();
     for (var row : db.rows("SELECT order_id,payload FROM jst_shipments")) {
       var shipment = db.parse(row.get("payload").toString());
-      if (environment.equals(shipment.path("environment").asText()) && shipment.path("effectiveOrder").isObject())
-        effective.put(row.get("order_id").toString(), shipment.path("effectiveOrder"));
+      if (environment.equals(shipment.path("environment").asText()) && shipment.path("effectiveOrder").isObject()) {
+        String id = row.get("order_id").toString();
+        var view = (com.fasterxml.jackson.databind.node.ObjectNode) shipment.path("effectiveOrder").deepCopy();
+        // An ERP credit tender releases fulfillment; only CRM receipts establish actual payment.
+        if (shipment.path("creditFulfillment").asBoolean()) {
+          var current = orders.get(id);
+          if (current == null || !current.has("paid")) view.remove("paid");
+          else view.set("paid", current.path("paid"));
+        }
+        effective.put(id, view);
+      }
     }
-    return new Snapshot(state, index(state.path("orders")), customers, names, index(state.path("products")), effective);
+    return new Snapshot(state, orders, customers, names, index(state.path("products")), effective);
   }
 
   private static String customerId(JsonNode record, Snapshot snapshot) {

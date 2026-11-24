@@ -32,9 +32,12 @@ class JushuitanOrderMapperTest {
         var request = input(); request.set(key, json(raw));
         assertThrows(ApiException.class, () -> JushuitanOrderMapper.build(m,order(),products(),request,"CRM-id",true),
             key + "=" + raw);
+        assertThrows(ApiException.class, () -> JushuitanOrderMapper.buildCredit(m,order(),products(),request,"CRM-id",true),
+            "credit " + key + "=" + raw);
       }
       var missing = input(); missing.remove(key);
       assertThrows(ApiException.class, () -> JushuitanOrderMapper.build(m,order(),products(),missing,"CRM-id",true));
+      assertThrows(ApiException.class, () -> JushuitanOrderMapper.buildCredit(m,order(),products(),missing,"CRM-id",true));
     }
   }
   @Test void preservesExactPositiveIntegerIdentifiersIncludingLongBoundary() throws Exception {
@@ -82,5 +85,117 @@ class JushuitanOrderMapperTest {
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),i,"CRM-id",true));
     var bad=input();((ObjectNode)bad.path("recipient")).remove("address");
     assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),bad,"CRM-id",true));
+  }
+
+  @Test void creditSettlementUsesFullErpAmountAndKeepsActualCrmAmountsUnchanged() throws Exception {
+    for (String paid : new String[]{"0", "5.25", "19.98"}) {
+      var o = order().put("customer", "真实客户甲"); o.set("paid", json(paid));
+      var p = products(); var request = input();
+      var originalOrder = o.deepCopy(); var originalProducts = p.deepCopy(); var originalRequest = request.deepCopy();
+      var result = JushuitanOrderMapper.buildCredit(m,o,p,request,"CRM-credit",true);
+      assertEquals(0, result.path("pay").path("amount").decimalValue().compareTo(new java.math.BigDecimal("19.98")));
+      assertEquals("账期挂账（非实收）", result.path("pay").path("payment").asText());
+      assertEquals("WAIT_SELLER_SEND_GOODS", result.path("shop_status").asText());
+      assertEquals("CRM-credit-PAY", result.path("pay").path("outer_pay_id").asText());
+      assertEquals("EMIE-CRM", result.path("pay").path("seller_account").asText());
+      assertEquals("CRM-credit", result.path("pay").path("buyer_account").asText());
+      var remark = result.path("remark").asText();
+      assertTrue(remark.contains("客户：真实客户甲"));
+      assertTrue(remark.contains("审批快照时CRM已收：" + new java.math.BigDecimal(paid).setScale(2).toPlainString()));
+      assertTrue(remark.contains("审批快照应收：" + new java.math.BigDecimal("19.98").subtract(new java.math.BigDecimal(paid)).setScale(2).toPlainString()));
+      assertTrue(remark.contains("账期挂账（非实收）结算金额：19.98"));
+      assertTrue(remark.contains("不代表现金到账"));
+      assertTrue(remark.contains("禁止实际发货"));
+      assertEquals(JushuitanOrderMapper.buyerAccount("c1"), result.path("shop_buyer_id").asText());
+      assertEquals(originalOrder, o); assertEquals(originalProducts, p); assertEquals(originalRequest, request);
+    }
+  }
+
+  @Test void requestFlagsCannotAuthorizeCreditOrOverrideAuthoritativePayment() throws Exception {
+    var o = order().put("paid", 0);
+    var request = input().put("creditFulfillment",true).put("credit",true).put("paid",19.98);
+    request.putObject("pay").put("amount",19.98).put("payment","现金");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,o,products(),request,"CRM-credit",true));
+    var result = JushuitanOrderMapper.buildCredit(m,o,products(),request,"CRM-credit",true);
+    assertEquals("账期挂账（非实收）", result.path("pay").path("payment").asText());
+    assertTrue(result.path("remark").asText().contains("审批快照时CRM已收：0.00"));
+    var legacy = JushuitanOrderMapper.build(m,order(),products(),request,"CRM-paid",true);
+    assertEquals("CRM已收款", legacy.path("pay").path("payment").asText());
+    assertFalse(legacy.path("remark").asText().contains("账期挂账"));
+  }
+
+  @Test void creditStillRequiresApprovedSalesOrderAndCustomer() throws Exception {
+    for (var change : new String[][]{{"status","审批中"}, {"status","草稿"}, {"type","预收款"}, {"customerId",""}}) {
+      var o = order().put(change[0],change[1]).put("paid",0);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,o,products(),input(),"CRM-credit",true));
+    }
+  }
+
+  @Test void creditRejectsInvalidOrExcessiveActualAmounts() throws Exception {
+    for (String raw : new String[]{"-0.01", "19.99", "0.001", "\"not-money\"", "true", "[]", "{}"}) {
+      var o = order(); o.set("paid",json(raw));
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,o,products(),input(),"CRM-credit",true), "paid="+raw);
+    }
+    for (String raw : new String[]{"0", "-19.98", "19.981", "\"not-money\"", "null", "[]"}) {
+      var o = order().put("paid",0); o.set("total",json(raw));
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,o,products(),input(),"CRM-credit",true), "total="+raw);
+    }
+    var mismatched = order().put("total",20).put("paid",0);
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,mismatched,products(),input(),"CRM-credit",true));
+  }
+
+  @Test void creditAcceptsCompleteAddressWithoutSeparateRegionsAndLegacyStillRequiresThem() throws Exception {
+    var request = input(); var recipient = (ObjectNode)request.path("recipient");
+    recipient.remove(java.util.List.of("province","city","district"));
+    recipient.put("address","广东省深圳市南山区科技园测试路1号");
+    var result = JushuitanOrderMapper.buildCredit(m,order().put("paid",0),products(),request,"CRM-credit",true);
+    assertEquals("广东省深圳市南山区科技园测试路1号", result.path("receiver_address").asText());
+    assertEquals("测试", result.path("receiver_name").asText());
+    assertEquals("00000000000", result.path("receiver_mobile").asText());
+    assertFalse(result.has("receiver_state")); assertFalse(result.has("receiver_city")); assertFalse(result.has("receiver_district"));
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.build(m,order(),products(),request,"CRM-paid",true));
+    var withRegions = JushuitanOrderMapper.buildCredit(m,order(),products(),input(),"CRM-credit",true);
+    assertEquals("广东省", withRegions.path("receiver_state").asText());
+    assertEquals("深圳市", withRegions.path("receiver_city").asText());
+    assertEquals("南山区", withRegions.path("receiver_district").asText());
+    recipient.put("address","万科星火");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order().put("paid",0),products(),request,"CRM-credit",true));
+  }
+
+  @Test void creditRejectsPartialBlankMalformedOrOversizeRecipientFields() throws Exception {
+    for (String field : new String[]{"name","phone","address","province","city","district"}) {
+      for (JsonNode invalid : new JsonNode[]{m.nullNode(),m.getNodeFactory().textNode(" "),m.getNodeFactory().numberNode(123),m.createArrayNode()}) {
+        var request = input(); ((ObjectNode)request.path("recipient")).set(field,invalid);
+        assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),request,"CRM-credit",true),field+"="+invalid);
+      }
+      var tooLong = input(); ((ObjectNode)tooLong.path("recipient")).put(field,"长".repeat(field.equals("address") ? 201 : 51));
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),tooLong,"CRM-credit",true),field+" too long");
+      var missing = input(); ((ObjectNode)missing.path("recipient")).remove(field);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),missing,"CRM-credit",true),field+" missing");
+    }
+    var badPhone = input(); ((ObjectNode)badPhone.path("recipient")).put("phone","请联系客户");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),badPhone,"CRM-credit",true));
+    var boundary = input(); ((ObjectNode)boundary.path("recipient")).put("address","广东省深圳市南山区" + "路".repeat(191));
+    assertEquals(200,JushuitanOrderMapper.buildCredit(m,order(),products(),boundary,"CRM-credit",true).path("receiver_address").asText().length());
+  }
+
+  @Test void creditKeepsSkuQuantityAndEnvironmentChecks() throws Exception {
+    var tampered = input(); ((ObjectNode)tampered.path("items").get(0)).put("skuId","OTHER");
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),tampered,"CRM-credit",true));
+    for (String qty : new String[]{"0", "-1", "0.5", "1000000001", "invalid"}) {
+      var o = order(); ((ObjectNode)o.path("items").get(0)).put("qty",qty);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,o,products(),input(),"CRM-credit",true));
+    }
+    for (String[] change : new String[][]{{"source","legacy"},{"jstEnvironment","production"},{"jstSku",""}}) {
+      var p = products(); ((ObjectNode)p.get(0)).put(change[0],change[1]);
+      assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),p,input(),"CRM-credit",true));
+    }
+    var disabled = products(); ((ObjectNode)disabled.get(0)).put("enabled",false);
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),disabled,input(),"CRM-credit",true));
+    assertThrows(ApiException.class,()->JushuitanOrderMapper.buildCredit(m,order(),products(),input(),"CRM-credit",false));
+    var production = products(); ((ObjectNode)production.get(0)).put("jstEnvironment","production");
+    var result = JushuitanOrderMapper.buildCredit(m,order().put("paid",0),production,input(),"CRM-credit",false);
+    assertFalse(result.path("remark").asText().contains("沙箱测试"));
+    assertEquals("账期挂账（非实收）",result.path("pay").path("payment").asText());
   }
 }

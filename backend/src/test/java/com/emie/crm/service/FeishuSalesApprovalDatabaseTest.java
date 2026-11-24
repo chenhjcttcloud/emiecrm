@@ -94,6 +94,45 @@ class FeishuSalesApprovalDatabaseTest {
     verify(client).create(eq("fixture-template"), eq("ou_sales"), eq(savedUuid), any(ArrayNode.class));
   }
 
+  @Test void creditIntentCommitsWithApprovedStatusAndCannotBeErasedByRestore() throws Exception {
+    var request=request();
+    order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15").put("shopName","店铺")
+        .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
+    service.createAndSubmit("o1",request,writer);runWorkers();
+    assertEquals(1,record().path("creditPushPolicyVersion").asInt());
+    assertFalse(record().has("creditPush"));
+    when(client.instance("fixture-instance")).thenReturn(instance(record(),"APPROVED"));
+    service.sync("o1",writer);
+    assertEquals("APPROVED",record().path("status").asText());assertEquals("已批准",currentOrder().path("status").asText());
+    assertEquals("BLOCKED",record().path("creditPush").path("status").asText());
+    assertEquals("ON_ACCOUNT_TENDER",record().path("creditPush").path("accountingMode").asText());
+    assertEquals(0,currentOrder().path("paid").asInt());
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
+    assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments",Integer.class));
+    String so=record().path("creditPush").path("soId").asText();service.sync("o1",writer);
+    assertEquals(so,record().path("creditPush").path("soId").asText());
+    var backup=(ObjectNode)mapper.valueToTree(business.backup());
+    ((ObjectNode)backup.path("feishuApprovals").get(0)).remove("creditPush");
+    assertThrows(ApiException.class,()->new TransactionTemplate(manager).executeWithoutResult(tx->business.restore(backup,writer)));
+    assertEquals(so,record().path("creditPush").path("soId").asText());
+  }
+
+  @Test void approvalAndCreditIntentRollbackTogetherWhenTheFinalAuditFails() throws Exception {
+    var request=request();order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15")
+        .put("recipientName","隔离收件人").put("recipientPhone","00000000000").put("recipientAddress","广东省深圳市龙岗区隔离测试路10号");
+    service.createAndSubmit("o1",request,writer);runWorkers();
+    when(client.instance("fixture-instance")).thenReturn(instance(record(),"APPROVED"));
+    var failing=new CrmRepository(jdbc,mapper){@Override public void audit(String user,String action){
+      if(action.contains("审批通过"))throw new IllegalStateException("simulated approval audit failure");super.audit(user,action);
+    }};
+    var failingService=new FeishuSalesApprovalService(failing,client,mapper,manager,business,executor);
+    assertThrows(IllegalStateException.class,()->failingService.sync("o1",writer));
+    assertEquals("PENDING",record().path("status").asText());assertEquals("审批中",currentOrder().path("status").asText());
+    assertFalse(record().has("creditPush"));
+    service.sync("o1",writer);
+    assertEquals("APPROVED",record().path("status").asText());assertTrue(record().path("creditPush").isObject());
+  }
+
   @Test void invalidTemplateRollsBackOrderAuditAndQueueTogether() throws Exception {
     when(client.definition("fixture-template")).thenReturn(mapper.createObjectNode().putArray("form").addObject()
         .put("id", "unsupported").put("name", "不支持字段").put("type", "radioV2").put("required", true));

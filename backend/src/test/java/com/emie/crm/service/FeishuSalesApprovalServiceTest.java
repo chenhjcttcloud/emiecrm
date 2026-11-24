@@ -65,6 +65,24 @@ class FeishuSalesApprovalServiceTest {
     assertEquals(2, state.path("revision").asInt());
     verify(db).state(state);
   }
+  @Test void approvedCreditOrderKeepsItsRealPaidAmountAndEnqueuesOnlyOnce() throws Exception {
+    var fixture = new JushuitanCreditPushPolicyTest();
+    var order = fixture.order().put("status", "审批中");
+    state.withArray("orders").removeAll().add(order);
+    state.set("products", fixture.products());
+    record.set("orderSnapshot", order.deepCopy());
+    JushuitanCreditPushPolicy.markSubmission(record, order, state.path("products"), "sandbox");
+    when(client.instance("instance")).thenReturn(instance("APPROVED"));
+    var first = service.sync("o1", reader);
+    assertEquals("APPROVED", first.path("status").asText());
+    assertEquals("QUEUED", first.path("creditPush").path("status").asText());
+    assertEquals("ON_ACCOUNT_TENDER", first.path("creditPush").path("accountingMode").asText());
+    assertEquals(0, order.path("paid").asInt());
+    assertEquals(first.path("creditPush").path("soId"), service.sync("o1", reader).path("creditPush").path("soId"));
+    assertFalse(first.path("creditPush").has("orderSnapshot"));
+    verify(client, times(1)).instance("instance");
+    verify(db, never()).receipt(any());
+  }
   @Test void mismatchedTemplateCannotApprove() {
     when(client.instance("instance")).thenReturn(instance("APPROVED").put("approval_code", "other"));
     assertThrows(ApiException.class, () -> service.sync("o1", reader));

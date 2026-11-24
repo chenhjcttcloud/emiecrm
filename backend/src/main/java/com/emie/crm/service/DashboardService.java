@@ -192,7 +192,8 @@ public class DashboardService {
         var totalNode = effective.hasNonNull("total") ? effective.path("total") : order.path("total");
         if (totalNode.isMissingNode() || totalNode.isNull()) throw new IllegalArgumentException();
         total = amount(totalNode);
-        paid = amount(effective.hasNonNull("paid") ? effective.path("paid") : order.path("paid"));
+        paid = amount(shipment != null && shipment.path("creditFulfillment").asBoolean() ? order.path("paid")
+            : effective.hasNonNull("paid") ? effective.path("paid") : order.path("paid"));
         if (total.signum() < 0 || paid.signum() < 0) throw new IllegalArgumentException();
       } catch (IllegalArgumentException error) { warnings.add("订单 " + orderNumber + " 的金额异常，暂未计入。"); continue; }
       if (shipment != null && "CANCELLED".equals(shipment.path("status").asText()))

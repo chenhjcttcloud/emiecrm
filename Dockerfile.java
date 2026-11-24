@@ -11,6 +11,7 @@ WORKDIR /app
 COPY backend/pom.xml ./pom.xml
 COPY backend/src ./src
 COPY --from=frontend /app/dist ./src/main/resources/static
+COPY docs/licenses ./src/main/resources/static/licenses
 RUN --mount=type=cache,target=/root/.m2 mvn -B package
 
 FROM eclipse-temurin:21-jre

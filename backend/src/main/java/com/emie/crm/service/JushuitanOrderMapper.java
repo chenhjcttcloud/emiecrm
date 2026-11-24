@@ -24,13 +24,30 @@ public class JushuitanOrderMapper {
 
   public static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
       JsonNode input, String soId, boolean sandbox) {
+    return build(mapper, order, products, input, soId, sandbox, false);
+  }
+
+  /** Server-selected credit settlement; callers must authorize the credit workflow separately. */
+  public static ObjectNode buildCredit(ObjectMapper mapper, JsonNode order, JsonNode products,
+      JsonNode input, String soId, boolean sandbox) {
+    return build(mapper, order, products, input, soId, sandbox, true);
+  }
+
+  private static ObjectNode build(ObjectMapper mapper, JsonNode order, JsonNode products,
+      JsonNode input, String soId, boolean sandbox, boolean credit) {
     require(!order.path("customerId").asText().isBlank(), "请先在订单中确认客户关联并保存");
     require(order.path("status").asText().equals("已批准"), "订单须先批准后提交发货");
     require(order.path("type").asText().equals("销售订单"), "目前仅支持销售订单发货");
     BigDecimal total, paid;
     try { total = new BigDecimal(order.path("total").asText()); paid = new BigDecimal(order.path("paid").asText("0")); }
     catch (Exception e) { throw new com.emie.crm.common.exception.ApiException("订单金额无效"); }
-    require(total.signum() > 0 && total.compareTo(paid) == 0, "请完成收款后再提交发货；当前暂不支持账期发货");
+    if (credit) {
+      require(total.signum() > 0 && paid.signum() >= 0 && paid.compareTo(total) <= 0
+          && total.stripTrailingZeros().scale() <= 2 && paid.stripTrailingZeros().scale() <= 2,
+          "账期订单总额及真实已收金额无效");
+    } else {
+      require(total.signum() > 0 && total.compareTo(paid) == 0, "请完成收款后再提交发货；当前暂不支持账期发货");
+    }
     require(input.path("shopId").isIntegralNumber() && input.path("shopId").canConvertToLong()
         && input.path("shopId").asLong() > 0, "请选择聚水潭店铺");
     require(input.path("warehouseId").isIntegralNumber() && input.path("warehouseId").canConvertToLong()
@@ -41,10 +58,17 @@ public class JushuitanOrderMapper {
         .put("shop_buyer_id", buyerAccount(order.path("customerId").asText())).put("shop_status", "WAIT_SELLER_SEND_GOODS")
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
         .put("pay_amount", total).put("freight", 0)
-        .put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + order.path("id").asText());
+        .put("remark", (sandbox ? "【CRM沙箱测试，禁止实际发货】" : "") + "CRM订单：" + order.path("id").asText()
+            + (credit ? creditRemark(order, total, paid) : ""));
+    var recipient = input.path("recipient");
+    if (credit) require(CreditShippingAddress.valid(recipient), CreditShippingAddress.MESSAGE);
+    boolean hasRegions = recipient.has("province") || recipient.has("city") || recipient.has("district");
     for (var field : Map.of("receiver_name", "name", "receiver_mobile", "phone", "receiver_state", "province",
         "receiver_city", "city", "receiver_district", "district", "receiver_address", "address").entrySet()) {
-      String text = input.path("recipient").path(field.getValue()).asText().trim();
+      boolean region = Set.of("province", "city", "district").contains(field.getValue());
+      if (credit && region && !hasRegions) continue;
+      require(!credit || recipient.path(field.getValue()).isTextual(), "请完整填写收件人、电话及省市区地址");
+      String text = recipient.path(field.getValue()).asText().trim();
       require(!text.isBlank() && text.length() <= (field.getValue().equals("address") ? 200 : 50), "请完整填写收件人、电话及省市区地址");
       out.put(field.getKey(), text);
     }
@@ -80,9 +104,21 @@ public class JushuitanOrderMapper {
           .put("outer_oi_id", soId + "-" + (i + 1));
     }
     require(sum.compareTo(total) == 0, "订单总额与商品合计不一致");
-    // This records CRM's already collected amount; it never initiates a payment.
+    // Credit explicitly settles the ERP order for release; it is not a CRM cash receipt.
+    // The legacy path continues to record only CRM's already collected amount.
     out.putObject("pay").put("outer_pay_id", soId + "-PAY").put("pay_date", out.path("order_date").asText())
-        .put("payment", "CRM已收款").put("seller_account", "EMIE-CRM").put("buyer_account", soId).put("amount", paid);
+        .put("payment", credit ? "账期挂账（非实收）" : "CRM已收款").put("seller_account", "EMIE-CRM")
+        .put("buyer_account", soId).put("amount", credit ? total : paid);
     return out;
+  }
+
+  private static String creditRemark(JsonNode order, BigDecimal total, BigDecimal paid) {
+    String customer = order.path("customer").asText().trim();
+    if (customer.isBlank()) customer = order.path("customerId").asText();
+    if (customer.length() > 200) customer = customer.substring(0, 200);
+    return "；客户：" + customer + "；审批快照时CRM已收：" + paid.setScale(2).toPlainString()
+        + "；审批快照应收：" + total.subtract(paid).setScale(2).toPlainString()
+        + "；账期挂账（非实收）结算金额：" + total.setScale(2).toPlainString()
+        + "；ERP按全额结算放行，付款状态为已付，不代表现金到账";
   }
 }

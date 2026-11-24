@@ -72,6 +72,9 @@ public final class FeishuSalesApprovalForm {
       require(mapped.contains("note"), "所选计划发货仓库需在飞书审批备注中展示，请管理员核对模板");
       require(!warehouse.name().isBlank(), "计划发货仓库名称尚未核验，请重新提交");
     }
+    boolean credit = JushuitanCreditPushPolicy.optedIn(order);
+    if (credit) require(mapped.contains("note"), "账期推送须在飞书审批备注中展示店铺及挂账口径，请管理员核对模板");
+    JushuitanCreditPushPolicy.validateSubmission(order);
     var total = decimal(order.path("total"), "订单金额", MAX_MONEY, 2);
     var lines = order.path("items");
     require(lines.isArray() && (prepayment || !lines.isEmpty()), "订单产品明细无效");
@@ -158,9 +161,17 @@ public final class FeishuSalesApprovalForm {
         case "note" -> writeText(form, widget, "CRM 订单：" + OrderNumbers.display(order)
             + (OrderNumbers.display(order).equals(order.path("id").asText()) ? "" : "\n内部记录ID：" + order.path("id").asText())
             + (warehouse.selected() ? "\n计划发货仓库：" + warehouse.name() + "（" + warehouse.id() + "）" : "")
+            + (credit ? "\n聚水潭推送店铺：" + order.path("approvalDraft").path("shopName").asText("未选择")
+                + "（" + order.path("approvalDraft").path("shopId").asText("待补齐") + "）"
+                + "\n发货方式：按账期发货；飞书审批通过后自动推送聚水潭。"
+                + "\n收货人：" + order.path("approvalDraft").path("recipientName").asText().strip()
+                + "；收货电话：" + order.path("approvalDraft").path("recipientPhone").asText().strip()
+                + "\n收货地址：" + JushuitanCreditPushPolicy.fullAddress(order.path("approvalDraft"))
+                + "\nERP结算口径：账期挂账（非实收），ERP付款状态显示已付；CRM实收与应收按真实收款独立记录，挂账不计入实收。" : "")
             + (order.path("note").asText().isBlank() ? "" : "\n" + order.path("note").asText()));
         case "recipientName", "recipientPhone", "recipientAddress" -> {
-          String entered = input.path(key).asText().strip();
+          String entered = (credit ? order.path("approvalDraft") : input).path(key).asText().strip();
+          if (credit && key.equals("recipientAddress")) entered = JushuitanCreditPushPolicy.fullAddress(order.path("approvalDraft"));
           if (entered.isBlank()) { requireOptional(widget); continue; }
           int max = switch (key) { case "recipientName" -> 100; case "recipientPhone" -> 50; default -> 500; };
           require(entered.length() <= max, widget.path("name").asText() + "最多 " + max + " 字");

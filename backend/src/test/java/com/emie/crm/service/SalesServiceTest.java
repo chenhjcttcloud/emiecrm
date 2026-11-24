@@ -252,6 +252,20 @@ class SalesServiceTest {
     money("10", items().path("summary").path("amount"));
   }
 
+  @Test void creditShipmentSnapshotsCannotInventOrEraseRealReceiptStatus() {
+    var current=order("credit","100","25");
+    receipt("cash","credit","25","银行转账","2026-11-04T01:00:00Z");
+    shipments.add(Map.of("order_id","credit","payload","{\"environment\":\"sandbox\",\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":100,\"paid\":0}}"));
+    assertEquals("部分回款",receiptList(1,20,"","2026-11","","","").path("rows").get(0).path("status").asText());
+    money("25",targets().path("rows").get(0).path("settledAmount"));
+    current.put("paid",100);
+    assertEquals("已回款",receiptList(1,20,"","2026-11","","","").path("rows").get(0).path("status").asText());
+    current.put("paid",0);shipments.clear();
+    shipments.add(Map.of("order_id","credit","payload","{\"environment\":\"sandbox\",\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":100,\"paid\":100}}"));
+    assertEquals("待回款",receiptList(1,20,"","2026-11","","","").path("rows").get(0).path("status").asText());
+    money("0",targets().path("rows").get(0).path("settledAmount"));
+  }
+
   @Test void productFiltersAndPaginationKeepSummariesOverEveryMatchingRow() {
     var order = order("three-lines", "60", "0");
     line(order, "1", "10"); line(order, "2", "10"); line(order, "3", "10");

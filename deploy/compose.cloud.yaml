@@ -7,6 +7,7 @@ services:
       - "127.0.0.1:8088:5174"
     env_file: .env.crm
     environment:
+      CRM_JST_CREDIT_ACCOUNTING_MODE: ${CRM_JST_CREDIT_ACCOUNTING_MODE:-UNCONFIGURED}
       CRM_DB_HOST: mysql
       CRM_DB_NAME: emiecrm_prod
       CRM_DB_USER: emiecrm_app

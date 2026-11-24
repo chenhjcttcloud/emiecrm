@@ -20,6 +20,10 @@ test('sales CSV protects formulas and does not turn unknown historical cost into
 test('order collection status uses the effective amount and exact cents',()=>{
  assert.deepEqual(salesOrderFinance({total:100.01,paid:50.02}),{status:'部分回款',tone:'warning',paid:50.02,outstanding:49.99});
  assert.equal(salesOrderFinance({total:100,paid:0},{total:60,paid:60}).status,'已回款');
+ assert.deepEqual(salesOrderFinance({total:12200,paid:0},{total:12200,paid:12200},true),{status:'待回款',tone:'warning',paid:0,outstanding:12200});
+ assert.deepEqual(salesOrderFinance({total:12200,paid:200},{total:12200,paid:12200},true),{status:'部分回款',tone:'warning',paid:200,outstanding:12000});
+ assert.equal(salesOrderFinance({total:12200},{total:12200,paid:12200},true).paid,0);
+ assert.equal(salesOrderFinance({total:12200,paid:0},{total:12200,paid:12200},false).status,'已回款');
  assert.equal(salesOrderFinance({total:0,paid:0}).status,'无需回款');
  assert.equal(salesOrderFinance({total:'unknown',paid:0}).status,'待核对');
 });

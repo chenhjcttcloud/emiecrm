@@ -6,7 +6,7 @@ import {orderNumber} from './orderNumber';
 import {shippingWarehouseId} from './feishuApprovalModel';
 
 const labels={SUBMITTING:'提交中',UNKNOWN:'待核对',FAILED:'提交失败',ACCEPTED:'待发货',PARTIAL:'部分发货',SHIPPED:'已发货',EXCEPTION:'聚水潭异常',CANCELLED:'已取消'};
-export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':record?labels[record.status]||'待核对':'未提交';
+export const shipmentLabel=record=>record?.externalDifference?'聚水潭变更待核对':record?.nativeStatus==='WaitPay'?'聚水潭待付款 / 账期待处理':record?labels[record.status]||'待核对':'未提交';
 export function useJushuitan(api,revision){
  const[records,setRecords]=useState({});const[config,setConfig]=useState(null);const[error,setError]=useState('');
  useEffect(()=>{if(revision==null)return;let active=true;const load=()=>Promise.all([api('jst/config'),api('jst/shipments')]).then(([c,rows])=>{if(active){setConfig(c);setRecords(Object.fromEntries(rows.map(r=>[r.orderId,r])));setError('')}}).catch(e=>{if(active)setError(e.message)});load();const timer=setInterval(load,60000);return()=>{active=false;clearInterval(timer)}},[revision]);
@@ -30,7 +30,7 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
  },[record?.request,changeKind]);
  if(!order||!form)return null;
  const editable=canWrite&&(!record||(record.status==='FAILED'&&!record.upstreamAttempted));
- const canSubmit=canWrite&&config?.configured&&config?.uploadsEnabled&&!record?.externalDifference&&(!record||record.status==='FAILED');
+ const canSubmit=!record?.creditFulfillment&&canWrite&&config?.configured&&config?.uploadsEnabled&&!record?.externalDifference&&(!record||record.status==='FAILED');
  const shippingOrder=record?.effectiveOrder||order;
  const amendment=record?.amendment;const activeAmendment=amendment&&!['COMPLETE','ABANDONED'].includes(amendment.status);
  const amendmentLabels={DRAFT:'待取消原单',WAIT_CANCEL:'原单取消待核对',AWAITING_FUNDS:'待登记补收或退款',READY:'待推送新单',SUBMITTING:'新单提交中',UNKNOWN:'新单结果待核对',FAILED:'新单提交失败',COMPLETE:'已生效',ABANDONED:'已放弃'};
@@ -38,7 +38,7 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
  const canManage=canWrite&&config?.configured&&record?.oId>0
   &&!unresolved&&!activeAmendment&&!record?.externalDifference;
  const canChange=canManage&&config?.changesEnabled&&['ACCEPTED','EXCEPTION'].includes(record?.status);
- const canReplaceManually=canManage&&config?.uploadsEnabled&&['ACCEPTED','EXCEPTION','CANCELLED'].includes(record?.status);
+ const canReplaceManually=!record?.creditFulfillment&&canManage&&config?.uploadsEnabled&&['ACCEPTED','EXCEPTION','CANCELLED'].includes(record?.status);
  const manualCancellation=changeKind==='CORE_MANUAL';
  const replacing=changeKind==='CORE'||manualCancellation;
  const selectedReplacementWarehouse=warehouses.some(warehouse=>String(warehouse.id)===String(replacementWarehouse))
@@ -97,12 +97,12 @@ export default function ShipmentDialog({order,db,api,record,config,onUpdate,onCl
  {config?.configured&&!config?.uploadsEnabled&&<p role="status">当前为只读连接，订单推送尚未开启。</p>}
  {!config?.configured&&<p role="alert">尚未配置云端服务，请联系管理员。</p>}
  <div className="read-field">CRM订单<p>{orderNumber(order)} · {order.customer}</p><small>原订单金额 ¥ {Number(order.total).toFixed(2)} · 原单已收 ¥ {Number(order.paid||0).toFixed(2)}{record?.effectiveOrder&&<> · 当前执行金额 ¥ {Number(shippingOrder.total).toFixed(2)}</>}</small></div>
- <p>批准且全额收款的销售订单可提交。提交后可在此变更收件信息、发货备注或取消发货。商品、数量和金额通过关联变更单处理；原订单及收款记录保留。账期发货暂未支持。</p>
+ <p>{record?.creditFulfillment?'本单已按账期挂账（非实收）推送；ERP付款状态显示已付，CRM实收和应收仍按实际到账核算。可在此核对仓库、物流及收件信息，商品金额变更须重新核对审批。':'批准且全额收款的销售订单可提交。提交后可在此变更收件信息、发货备注或取消发货。商品、数量和金额通过关联变更单处理；原订单及收款记录保留。'}</p>
  {record&&<section className="jst-progress"><strong>{shipmentLabel(record)}</strong><p>{record.message}</p>{record.syncError&&<p role="alert">{record.syncError}（保留上次状态）</p>}<small>聚水潭订单号：{record.soId}<br/>内部单号：{record.oId||'待回传'}<br/>最后同步：{record.lastSyncedAt?new Date(record.lastSyncedAt).toLocaleString():'尚未同步'}</small></section>}
  {record?.change&&<section className="jst-progress" role="status"><strong>订单变更 · {{PENDING:'待核对',UNKNOWN:'结果待核对',CONFIRMED:'已生效',REJECTED:'已拒绝'}[record.change.status]||record.change.status}</strong><p>{record.change.message}</p><small>操作人：{record.change.operator} · 原因：{record.change.reason}</small></section>}
  {record&&!config?.changesEnabled&&<p>订单变更服务尚未启用，请联系管理员开通接口并启用同步服务。</p>}
  {(canChange||canReplaceManually)&&!changeKind&&<div className="management-actions">
-  {canChange&&config?.uploadsEnabled&&<button type="button" className="secondary" disabled={busy} onClick={()=>beginChange('CORE')}>变更商品与金额</button>}
+  {!record?.creditFulfillment&&canChange&&config?.uploadsEnabled&&<button type="button" className="secondary" disabled={busy} onClick={()=>beginChange('CORE')}>变更商品与金额</button>}
   {canReplaceManually&&<button type="button" className="secondary" disabled={busy} onClick={()=>beginChange('CORE_MANUAL')}>已在聚水潭取消，修改并重推</button>}
   {canChange&&<>
    <button type="button" className="secondary" disabled={busy} onClick={()=>beginChange('ADDRESS')}>变更收件信息</button>

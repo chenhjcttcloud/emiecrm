@@ -1,18 +1,20 @@
 import React, {useState} from 'react';
 import BusinessImage from './BusinessImage';
 import OrderChangeLog from './OrderChangeLog';
+import CreditOrderPush from './CreditOrderPush';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
 import {shipmentLabel} from './JushuitanOrders';
 import {orderTotal} from './orderMoney';
 import {orderNumber} from './orderNumber';
-import {canSubmitApproval,isLegacyApprovedSettlement,isSettlementApprovalOrder,orderExecutionView,plannedOrderWarehouse,submissionProblem} from './feishuApprovalModel';
+import {canSubmitApproval,creditPushView,isLegacyApprovedSettlement,isSettlementApprovalOrder,orderExecutionView,plannedCreditShop,plannedOrderWarehouse,recipientAddressText,submissionProblem} from './feishuApprovalModel';
+import './orderWarehousePicker.css';
 import './OrderDetails.css';
 
 const money = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value))
   ? '—' : new Intl.NumberFormat('zh-CN', {style: 'currency', currency: 'CNY'}).format(Number(value));
 const display = value => value === undefined || value === null || value === '' ? '—' : value;
 
-export default function OrderDetails({order, customer, products, approvals, shipment, api, DialogLayer, Badge, Icon, onClose, onSubmitApproval}) {
+export default function OrderDetails({order, customer, products, approvals, shipment, api, DialogLayer, Badge, Icon, onClose, onSubmitApproval,canCreditPush=false,onCreditPush}) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   if (!order) return null;
@@ -21,11 +23,22 @@ export default function OrderDetails({order, customer, products, approvals, ship
   const catalog = new Map(products.map(product => [product.id, product]));
   const recipient = order.approvalDraft;
   const warehouse = plannedOrderWarehouse(order);
+  const shop = plannedCreditShop(order);
   const hasRecipient = recipient?.recipientName || recipient?.recipientPhone || recipient?.recipientAddress;
+  const actualRecipient = shipment?.request ? {
+    recipientName: shipment.request.receiver_name, recipientPhone: shipment.request.receiver_mobile,
+    recipientProvince: shipment.request.receiver_state, recipientCity: shipment.request.receiver_city,
+    recipientDistrict: shipment.request.receiver_district, recipientAddress: shipment.request.receiver_address,
+  } : null;
+  const actualAddress = actualRecipient ? recipientAddressText(actualRecipient) : '';
+  const actualDiffers = Boolean(actualRecipient && (actualAddress || actualRecipient.recipientName || actualRecipient.recipientPhone)
+    && (actualAddress !== recipientAddressText(recipient) || String(actualRecipient.recipientName ?? '') !== String(recipient?.recipientName ?? '')
+      || String(actualRecipient.recipientPhone ?? '') !== String(recipient?.recipientPhone ?? '')));
   const canceled = order.status === '已取消';
   const prepayment = order.type === '预收款订单';
   const settlement = isSettlementApprovalOrder(order);
   const record = approvals.records[order.id];
+  const creditPush = creditPushView(order,record,shipment);
   const legacyApproved = isLegacyApprovedSettlement(order, record);
   const canSubmit = settlement && Boolean(onSubmitApproval) && canSubmitApproval(order, record, approvals.config);
   const problem = settlement && ['草稿', '审批中'].includes(order.status)
@@ -45,7 +58,8 @@ export default function OrderDetails({order, customer, products, approvals, ship
     ['订单类型', prepayment ? '预收款' : order.type], ['创建时间', order.created], ['更新时间', order.updated],
   ];
   if(warehouse)fields.push(['计划发货仓库',(warehouse.name||'仓库')+'（编号 '+warehouse.id+'）']);
-  if (order.type === '销售订单' && order.source !== 'jushuitan-settlement') fields.push(['发货状态', shipmentLabel(shipment)]);
+  if(shop)fields.push(['聚水潭店铺',(shop.name||'店铺')+'（编号 '+shop.id+'）']);
+  if (order.type === '销售订单' && order.source !== 'jushuitan-settlement') fields.push([creditPush?'聚水潭进度':'发货状态', creditPush?.label||shipmentLabel(shipment)]);
   if (order.source === 'jushuitan-settlement') fields.push(['订单来源', '聚水潭结算补录']);
   return <DialogLayer open kind="drawer" label="订单详情" onClose={close}>
     <div className="drawer order-detail-drawer">
@@ -62,11 +76,26 @@ export default function OrderDetails({order, customer, products, approvals, ship
           ['已收款', execution.paid], ['待收款', execution.unpaid]].map(([label, value]) =>
           <div key={label}><dt>{label}</dt><dd>{money(value)}</dd></div>)}</dl>
         {execution.effective && <p className="order-products-caption">当前执行金额以上方为准，原订单总额为 {money(order.total)}。</p>}
-        {hasRecipient && <section><h3>收货信息</h3><dl className="order-detail-fields">
+        {creditPush&&<section className="order-credit-push-status" aria-label="聚水潭账期订单推送">
+          <h3>聚水潭推送</h3><Badge tone={creditPush.tone==='success'?'green':creditPush.tone==='info'?'cyan':'warning'}>{creditPush.label}</Badge>
+          <p role={['warning','error'].includes(creditPush.tone)?'status':undefined}>{creditPush.message}</p>
+          <dl className="order-detail-fields">
+            <div><dt>聚水潭外部订单号</dt><dd>{display(creditPush.soId)}</dd></div>
+            <div><dt>聚水潭内部单号</dt><dd>{display(creditPush.oId)}</dd></div>
+          </dl>
+          <p>账期推送不登记收款；已收款和待收款按上方实际入账金额显示。</p>
+        </section>}
+        {hasRecipient && <section><h3>{actualDiffers ? '原审批收货信息' : '收货信息'}</h3><dl className="order-detail-fields">
           <div><dt>收货人</dt><dd>{display(recipient.recipientName)}</dd></div>
           <div><dt>收货电话</dt><dd>{display(recipient.recipientPhone)}</dd></div>
-          <div className="order-detail-wide"><dt>收货地址</dt><dd>{display(recipient.recipientAddress)}</dd></div>
+          <div className="order-detail-wide"><dt>收货地址</dt><dd>{display(recipientAddressText(recipient))}</dd></div>
         </dl></section>}
+        {actualDiffers && <section aria-label="实际发货收货信息"><h3>实际发货收货信息</h3><dl className="order-detail-fields">
+          <div><dt>收货人</dt><dd>{display(actualRecipient.recipientName)}</dd></div>
+          <div><dt>收货电话</dt><dd>{display(actualRecipient.recipientPhone)}</dd></div>
+          <div className="order-detail-wide"><dt>收货地址</dt><dd>{display(actualAddress)}</dd></div>
+        </dl><p className="form-hint">以上为本次聚水潭发货资料，原审批内容保留。</p></section>}
+        <CreditOrderPush key={order.id} order={order} approval={record} shipment={shipment} api={api} canWrite={canCreditPush} onPush={onCreditPush}/>
         {settlement ? <section><h3>结算补录信息</h3>
           <dl className="order-detail-fields">
             <div><dt>结算方式</dt><dd>{order.settlement?.cycle === 'month' ? '月结' : '日结'}</dd></div>

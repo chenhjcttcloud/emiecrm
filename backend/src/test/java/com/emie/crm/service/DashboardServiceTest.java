@@ -188,6 +188,19 @@ class DashboardServiceTest {
     money("40", summary.path("outstandingAmount"));
   }
 
+  @Test void creditTenderNeverCountsAsCrmCashAndLaterRealReceiptsOverrideFrozenShipmentPaid() {
+    var current=order("credit","2026-11-04","12200","0");
+    shipments.add(Map.of("order_id","credit","payload","{\"environment\":\"sandbox\",\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":12200,\"paid\":12200}}"));
+    var summary=sales().path("summary");
+    money("0",summary.path("settledAmount"));money("12200",summary.path("outstandingAmount"));
+    assertEquals(0,summary.path("settledCount").asInt());
+    current.put("paid",200);shipments.clear();
+    shipments.add(Map.of("order_id","credit","payload","{\"environment\":\"sandbox\",\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":12200,\"paid\":0}}"));
+    summary=sales().path("summary");
+    money("200",summary.path("settledAmount"));money("12000",summary.path("outstandingAmount"));
+    money("200",sales().path("orders").get(0).path("paid"));
+  }
+
   @Test void shipmentFromAnotherEnvironmentCannotOverrideTheCurrentBusinessOrder() {
     order("sale", "2026-11-04", "100", "50");
     shipments.add(Map.of("order_id", "sale", "payload", "{\"environment\":\"production\",\"effectiveOrder\":{\"total\":10,\"paid\":10}}"));

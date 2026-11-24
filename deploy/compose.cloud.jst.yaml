@@ -3,6 +3,7 @@ services:
     extra_hosts:
       - "crm.emie.cn=${CRM_JST_BRIDGE_GATEWAY:?Set CRM_JST_BRIDGE_GATEWAY to the CRM Docker bridge gateway}"
     environment:
+      CRM_JST_CREDIT_ACCOUNTING_MODE: ${CRM_JST_CREDIT_ACCOUNTING_MODE:-UNCONFIGURED}
       CRM_JST_GATEWAY_URL: https://crm.emie.cn:9002/_internal/jst
       CRM_JST_ENV: production
       CRM_JST_READ_ONLY: ${CRM_JST_READ_ONLY:-true}
