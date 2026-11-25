@@ -44,3 +44,13 @@
 .receipt-approval-resume{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px}
 @media(max-width:650px){.receipt-approval-panel-heading{flex-wrap:wrap}.receipt-approval-drawer .modal-footer{gap:8px}.receipt-approval-drawer .modal-footer>*{max-width:100%}}
 .receipt-approval-fields.receipt-date-only{grid-template-columns:1fr}
+.receipt-approval-payments{margin:20px 0}
+.receipt-approval-payments h3{margin:0;color:#34466a;font-size:14px}
+.receipt-approval-payment-scroll{max-width:100%;overflow-x:auto;margin:12px 0 16px;border:1px solid #e5ebf6;border-radius:10px}
+.receipt-approval-payment-table{width:100%;min-width:480px;border-collapse:collapse;font-size:12px}
+.receipt-approval-payment-table th,.receipt-approval-payment-table td{padding:11px 12px;text-align:left;border-bottom:0;white-space:nowrap}
+.receipt-approval-payment-table th{background:#f6f8fd;color:#71829e;font-weight:500}
+.receipt-approval-payment-table td{border-top:1px solid #edf1f7;color:#34466a;font-variant-numeric:tabular-nums}
+.receipt-approval-payment-table th:nth-child(2),.receipt-approval-payment-table td:nth-child(2){min-width:140px;white-space:normal;overflow-wrap:anywhere}
+.receipt-approval-payment-table th:nth-child(3),.receipt-approval-payment-table td:nth-child(3){text-align:right}
+.receipt-approval-payment-summary{display:block;margin-top:5px;color:#8191a9;font-size:11px;font-weight:400}

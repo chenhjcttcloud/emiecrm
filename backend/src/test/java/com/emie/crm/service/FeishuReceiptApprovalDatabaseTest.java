@@ -424,6 +424,151 @@ class FeishuReceiptApprovalDatabaseTest {
     return input;
   }
 
+  private ObjectNode multipleCashInput(String id) {
+    jdbc.update("INSERT IGNORE INTO payment_methods(id,name,status) VALUES('pos','POS','启用')");
+    var input=input(id,false).put("amount",50);
+    ((ObjectNode)input.at("/allocations/0")).put("amount",50);
+    var rows=input.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",20).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","POS").put("amount",30).put("receiptDate","2026-11-25");
+    return input;
+  }
+
+  @Test void oneApprovalWithSeveralMethodsAndDatesBooksTheFrozenOrderFundingSplitsOnlyOnce() throws Exception {
+    String id="multi-method-multi-order";var input=voucherRequest(id,1).put("amount",110);
+    jdbc.update("INSERT INTO payment_methods(id,name,status) VALUES('pos','POS','启用')");
+    var allocations=input.putArray("allocations");
+    allocations.addObject().put("orderId","deposit-1").put("amount",80);
+    allocations.addObject().put("orderId","sale-1").put("amount",30);
+    var rows=input.putArray("paymentDetails");
+    rows.addObject().put("lineNo",999).put("method","银行转账").put("amount",60).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","POS").put("amount",50).put("receiptDate","2026-11-25");
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class))).thenReturn("multi-voucher-file");
+    var response=first.create(input,finance).path("approval");var pending=record(id);
+    assertEquals("PENDING",response.path("status").asText());assertEquals("组合收款",pending.path("method").asText());
+    assertEquals("2026-11-25",pending.path("receiptDate").asText());assertEquals(1,pending.at("/paymentDetails/0/lineNo").asInt());
+    assertEquals(2,pending.at("/allocations/0/paymentDetails").size());
+    assertEquals(60,pending.at("/allocations/0/paymentDetails/0/amount").asInt());
+    assertEquals(20,pending.at("/allocations/0/paymentDetails/1/amount").asInt());
+    assertEquals(2,pending.at("/allocations/1/paymentDetails/0/lineNo").asInt());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
+    var sent=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client).create(eq(CODE),eq("ou_finance"),eq(pending.path("uuid").asText()),sent.capture());
+    assertTrue(sent.getValue().toString().contains("银行转账"));assertTrue(sent.getValue().toString().contains("POS"));
+    assertTrue(sent.getValue().toString().contains("2026-11-20"));assertTrue(sent.getValue().toString().contains("2026-11-25"));
+    changeBankConfiguration("rename");jdbc.update("UPDATE payment_methods SET status='停用' WHERE id='pos'");
+    var state=db.state(false).deepCopy();((ObjectNode)state.at("/products/0")).put("name","之后改名的商品");saveFixtureState(state);
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    for(var result:concurrently(()->first.sync(id,reader),()->second.sync(id,reader)))
+      assertTrue(result.at("/approval/booked").asBoolean(),result.at("/approval/bookingError").asText());
+    first.sync(id,reader);second.sync(id,reader);
+    var receipts=db.documents("receipts",false,0);assertEquals(3,receipts.size());
+    for(var receipt:receipts) {
+      int line=receipt.path("paymentLineNo").asInt();String order=receipt.path("order").asText();
+      assertEquals(java.util.UUID.nameUUIDFromBytes((id+":"+order+":"+line).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString(),receipt.path("id").asText());
+      assertEquals(line==1?"银行转账":"POS",receipt.path("method").asText());
+      assertEquals(line==1?"2026-11-20":"2026-11-25",receipt.path("receivedOn").asText());
+      assertEquals(receipt.path("receivedOn"),receipt.path("receiptDate"));
+      assertEquals(order.equals("sale-1")?30:line==1?60:20,receipt.path("amount").asInt());
+      assertEquals(pending.path("attachments"),receipt.path("attachments"));
+      if(order.equals("sale-1"))assertEquals("隔离测试商品",receipt.at("/items/0/name").asText());
+    }
+    assertEquals(30,db.state(false).at("/orders/0/paid").asInt());assertEquals(80,db.state(false).at("/orders/1/paid").asInt());
+    assertEquals(80,db.state(false).at("/customers/0/balance").asInt());assertNoAutomaticShipment();
+  }
+
+  @Test void mixedCashAndCreditReserveOnlyTheCreditPartAndExcludeTheirOwnReservationWhenBooking() {
+    creditFixture();
+    var input=partialInput("mixed-credit-first","sale-1",60,"银行转账");
+    var rows=input.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",20).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","预收款核销").put("amount",40).put("receiptDate","2026-11-25");
+    assertEquals("PENDING",first.create(input,finance).at("/approval/status").asText());
+    var excessive=partialInput("mixed-credit-too-much","sale-2",50,"银行转账");
+    var excessRows=excessive.putArray("paymentDetails");
+    excessRows.addObject().put("method","银行转账").put("amount",10).put("receiptDate","2026-11-20");
+    excessRows.addObject().put("method","预收款核销").put("amount",40).put("receiptDate","2026-11-25");
+    assertTrue(assertThrows(ApiException.class,()->second.create(excessive,finance)).getMessage().contains("余额"));
+    assertEquals("PENDING",second.create(partialInput("legacy-credit-second","sale-2",30,"预收款核销"),finance).at("/approval/status").asText());
+    assertEquals(70,db.state(false).at("/customers/0/balance").asInt());
+    var mixed=record("mixed-credit-first");when(client.instance(mixed.path("instanceCode").asText())).thenReturn(approvedInstance(mixed));
+    var booked=first.sync("mixed-credit-first",reader).path("approval");
+    assertTrue(booked.path("booked").asBoolean(),booked.path("bookingError").asText());
+    assertEquals(30,db.state(false).at("/customers/0/balance").asInt());assertEquals(60,db.state(false).at("/orders/0/paid").asInt());
+    var legacy=record("legacy-credit-second");when(client.instance(legacy.path("instanceCode").asText())).thenReturn(approvedInstance(legacy));
+    assertTrue(second.sync("legacy-credit-second",reader).at("/approval/booked").asBoolean());
+    assertEquals(0,db.state(false).at("/customers/0/balance").asInt());
+    var mixedRows=db.documents("receipts",false,0).stream().filter(r->r.path("approvalId").asText().equals("mixed-credit-first")).toList();
+    assertEquals(2,mixedRows.size());assertEquals(20,mixedRows.stream().filter(r->r.path("method").asText().equals("银行转账")).findFirst().orElseThrow().path("amount").asInt());
+    assertEquals(40,mixedRows.stream().filter(r->r.path("method").asText().equals("预收款核销")).findFirst().orElseThrow().path("amount").asInt());
+    assertEquals(4,db.documents("receipts",false,0).size());
+  }
+
+  @Test void anInvalidFrozenFundingMatrixCannotPostAnyMoney() {
+    String id="invalid-funding-matrix";first.create(multipleCashInput(id),finance);var original=record(id);
+    var invalid=original.deepCopy();((ObjectNode)invalid.at("/allocations/0/paymentDetails/0")).put("amount",19);
+    jdbc.update("UPDATE feishu_receipt_approvals SET payload=? WHERE id=?",db.encode(invalid),id);
+    when(client.instance(invalid.path("instanceCode").asText())).thenReturn(approvedInstance(invalid));
+    var result=first.sync(id,reader).path("approval");
+    assertEquals("APPROVED",result.path("status").asText());assertFalse(result.path("booked").asBoolean());
+    assertFalse(result.path("bookingError").asText().isBlank());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
+  @Test void aLaterSplitInsertFailureRollsBackAllEarlierPartsAndTheWholeOrderPayment() {
+    String id="split-ledger-rollback";first.create(multipleCashInput(id),finance);var pending=record(id);
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    jdbc.execute("CREATE TRIGGER "+RECEIPT_TRIGGER+" BEFORE INSERT ON receipts FOR EACH ROW BEGIN "
+        +"IF JSON_EXTRACT(NEW.payload,'$.paymentLineNo')=2 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='isolated second split failure'; END IF; END");
+    var result=first.sync(id,reader).path("approval");
+    assertEquals("APPROVED",result.path("status").asText());assertFalse(result.path("booked").asBoolean());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
+    removeFailureTriggers();
+    assertTrue(second.sync(id,reader).at("/approval/booked").asBoolean());first.sync(id,reader);
+    assertEquals(2,db.documents("receipts",false,0).size());assertEquals(50,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  @Test void anOrdinaryReceiptBeforeTheSettlementPeriodDoesNotInvalidateADifferentAllocatedSettlementPayment() {
+    var state=db.state(false).deepCopy();
+    ((ObjectNode)state.at("/orders/0")).put("total",120);((ObjectNode)state.at("/orders/0/items/0")).put("price",120);
+    var settlement=(ObjectNode)state.at("/orders/1");settlement.put("type","销售订单").put("total",180)
+        .put("source",JushuitanDocumentService.SETTLEMENT_SOURCE);
+    settlement.putObject("settlement").put("cycle","month").put("periodStart","2026-11-01").put("periodEnd","2026-11-30");
+    saveFixtureState(state);
+    String id="ordinary-and-settlement-funding-dates";var input=input(id,false).put("amount",300);
+    var allocations=input.putArray("allocations");allocations.addObject().put("orderId","sale-1").put("amount",120);
+    allocations.addObject().put("orderId","deposit-1").put("amount",180);
+    var rows=input.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",120).put("receiptDate","2026-10-31");
+    rows.addObject().put("method","银行转账").put("amount",180).put("receiptDate","2026-11-02");
+    assertEquals("PENDING",first.create(input,finance).at("/approval/status").asText());var pending=record(id);
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    var result=first.sync(id,reader).path("approval");assertTrue(result.path("booked").asBoolean(),result.path("bookingError").asText());
+    var receipts=db.documents("receipts",false,0);assertEquals(2,receipts.size());
+    assertEquals("2026-10-31",receipts.stream().filter(r->r.path("order").asText().equals("sale-1")).findFirst().orElseThrow().path("receivedOn").asText());
+    assertEquals("2026-11-02",receipts.stream().filter(r->r.path("order").asText().equals("deposit-1")).findFirst().orElseThrow().path("receivedOn").asText());
+    assertEquals(120,db.state(false).at("/orders/0/paid").asInt());assertEquals(180,db.state(false).at("/orders/1/paid").asInt());
+  }
+
+  @Test void uncertainMultilineReceiptsWithoutImagesKeepTheSameNativeFormAndFrozenFundingRowsOnRetry() {
+    String id="multiline-unknown-without-images";var input=multipleCashInput(id);
+    when(client.create(eq(CODE),eq("ou_finance"),anyString(),any()))
+        .thenThrow(mock(FeishuApprovalClient.Uncertain.class)).thenReturn("multiline-recovered-instance");
+    assertEquals("UNKNOWN",first.create(input,finance).at("/approval/status").asText());var original=record(id);
+    String uuid=original.path("uuid").asText();
+    when(client.instance(uuid)).thenThrow(mock(FeishuApprovalClient.NotFound.class));
+    jdbc.update("UPDATE payment_methods SET status='停用'");
+    ((ObjectNode)input.at("/paymentDetails/0")).put("amount",999);
+    assertEquals("PENDING",second.retry(id,finance).at("/approval/status").asText());
+    assertEquals(uuid,record(id).path("uuid").asText());assertEquals(original.path("paymentDetails"),record(id).path("paymentDetails"));
+    assertEquals(original.path("allocations"),record(id).path("allocations"));
+    var forms=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client,times(2)).create(eq(CODE),eq("ou_finance"),eq(uuid),forms.capture());
+    assertEquals(forms.getAllValues().get(0),forms.getAllValues().get(1));
+    verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
   @ParameterizedTest @ValueSource(ints={0,1})
   void failedVoucherUploadRetriesOnlyMissingFilesWithoutCreatingOrBookingAnIncompleteApproval(int alreadyUploaded) throws Exception {
     String id="retry-voucher-files";var input=voucherRequest(id,2);

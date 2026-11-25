@@ -377,6 +377,8 @@ public class SalesService {
       row.put("customer", customer); row.put("owner", signer); row.put("type", receipt.path("type").asText());
       row.put("amount", money(amount)); row.put("method", paymentMethod); row.put("receivedOn", receivedOn); row.put("time", time);
       row.put("operator", receipt.path("operator").asText());
+      row.put("approvalId", text(receipt, "approvalId"));
+      row.put("paymentLineNo", receipt.path("paymentLineNo").isIntegralNumber() ? receipt.path("paymentLineNo").asInt() : null);
       row.put("note", receipt.path("note").asText());
       var products = BusinessService.receiptItems(receipt, origin, snapshot.products());
       row.put("items", products.path("items")); row.put("itemsSource", products.path("itemsSource").asText());

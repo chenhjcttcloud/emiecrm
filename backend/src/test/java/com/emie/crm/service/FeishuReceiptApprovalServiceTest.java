@@ -176,6 +176,89 @@ class FeishuReceiptApprovalServiceTest {
     verify(db, never()).receipt(any());
   }
 
+  private ObjectNode splitInput() throws Exception {
+    var input=input();
+    var details=input.putArray("paymentDetails");
+    details.addObject().put("method","银行转账").put("amount",120).put("receiptDate","2026-10-31");
+    details.addObject().put("method","自定义账户").put("amount",180).put("receiptDate","2026-11-02");
+    when(db.rows(startsWith("SELECT id FROM payment_methods"),eq("自定义账户"))).thenReturn(List.of(Map.of("id","custom")));
+    return input;
+  }
+
+  @Test void splitMethodsDatesAndOrderFundingAreFrozenBeforeTheOnlyNativeCreate() throws Exception {
+    var input=splitInput();var original=input.deepCopy();
+    var result=approval(service.create(input,submitter));
+    ReceiptPaymentDetails.validateFrozen(record);
+    assertEquals("组合收款",record.path("method").asText());
+    assertEquals("2026-11-02",record.path("receiptDate").asText());
+    assertEquals(2,result.path("paymentDetails").size());
+    assertEquals(2,record.path("allocations").get(0).path("paymentDetails").size());
+    assertEquals(80,record.path("allocations").get(0).path("paymentDetails").get(1).path("amount").asInt());
+    assertEquals(100,record.path("allocations").get(1).path("paymentDetails").get(0).path("amount").asInt());
+    assertEquals(original,input);
+    var forms=org.mockito.ArgumentCaptor.forClass(ArrayNode.class);
+    verify(client,times(1)).create(eq("receipt-code"),eq("ou_sales"),anyString(),forms.capture());
+    assertTrue(forms.getValue().toString().contains("2026-10-31"));
+    assertTrue(forms.getValue().toString().contains("自定义账户"));
+    verify(business,never()).applyApprovedReceipt(any());
+    var repeated=input.deepCopy();repeated.withArray("paymentDetails").removeAll();
+    assertEquals(result,approval(service.create(repeated,submitter)));
+    verify(client,times(1)).create(eq("receipt-code"),eq("ou_sales"),anyString(),any());
+  }
+
+  @Test void newSplitReceiptRejectsInactiveMethodsAndAmountMismatchBeforeCreatingAnything() throws Exception {
+    var input=splitInput();((ObjectNode)input.path("paymentDetails").get(0)).put("method","已停用账户");
+    assertThrows(ApiException.class,()->service.create(input,submitter));
+    assertNull(record);verify(client,never()).create(any(),any(),any(),any());
+    var mismatched=splitInput();mismatched.put("amount",301);
+    assertThrows(ApiException.class,()->service.create(mismatched,submitter));
+    assertNull(record);verify(client,never()).create(any(),any(),any(),any());
+  }
+
+  @Test void mixedCreditCannotUsePrepaymentOrdersAndPendingMixedCreditReservesOnlyItsCreditPortion() throws Exception {
+    var input=splitInput();((ObjectNode)input.path("paymentDetails").get(1)).put("method","预收款核销");
+    ((ObjectNode)state.path("customers").get(0)).put("balance",300);
+    assertThrows(ApiException.class,()->service.create(input,submitter));
+    assertNull(record);
+    ((ObjectNode)state.path("orders").get(1)).put("type","销售订单");
+    var reserved=mapper.createObjectNode().put("customerId","c1").put("amount",200).put("method","组合收款");
+    reserved.putArray("allocations").addObject().put("orderId","unrelated-order");
+    var funding=reserved.putArray("paymentDetails");
+    funding.addObject().put("method","银行转账").put("amount",160).put("receiptDate","2026-11-01");
+    funding.addObject().put("method","预收款核销").put("amount",40).put("receiptDate","2026-11-01");
+    when(db.rows(startsWith("SELECT payload FROM feishu_receipt_approvals WHERE status IN")))
+        .thenReturn(List.of(Map.of("payload",reserved.toString())));
+    ((ObjectNode)state.path("customers").get(0)).put("balance",200);
+    assertThrows(ApiException.class,()->service.create(input,submitter));
+    assertNull(record);verify(client,never()).create(any(),any(),any(),any());
+    ((ObjectNode)state.path("customers").get(0)).put("balance",220);
+    assertEquals("PENDING",approval(service.create(input,submitter)).path("status").asText());
+  }
+
+  private ObjectNode settlementSplitInput() throws Exception {
+    var input=splitInput();
+    ((ObjectNode)input.path("allocations").get(0)).put("amount",120);
+    ((ObjectNode)input.path("allocations").get(1)).put("amount",180);
+    var settlement=(ObjectNode)state.path("orders").get(1);
+    settlement.put("type","销售订单").put("source","jushuitan-settlement");
+    settlement.putObject("settlement").put("periodStart","2026-11-01");
+    return input;
+  }
+
+  @Test void settlementDatesAreCheckedOnlyForTheFundingActuallyAssignedToThatOrder() throws Exception {
+    var result=approval(service.create(settlementSplitInput(),submitter));
+    assertEquals("PENDING",result.path("status").asText());
+    assertEquals(1,record.path("allocations").get(1).path("paymentDetails").size());
+    assertEquals(2,record.path("allocations").get(1).path("paymentDetails").get(0).path("lineNo").asInt());
+  }
+
+  @Test void aSettlementStillRejectsAnAssignedPaymentDatedBeforeItsOwnPeriod() throws Exception {
+    var input=settlementSplitInput();
+    ((ObjectNode)input.path("paymentDetails").get(1)).put("receiptDate","2026-10-30");
+    assertTrue(assertThrows(ApiException.class,()->service.create(input,submitter)).getMessage().contains("到账日期"));
+    assertNull(record);verify(client,never()).create(any(),any(),any(),any());
+  }
+
 
 
 

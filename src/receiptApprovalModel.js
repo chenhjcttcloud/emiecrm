@@ -1,5 +1,7 @@
 import {moneyCents} from './orderMoney.js';
 import {copyReceiptVouchers} from './receiptVoucherModel.js';
+import {canonicalReceiptPaymentDetails,validReceiptDate} from './receiptPaymentDetailsModel.js';
+export {validReceiptDate} from './receiptPaymentDetailsModel.js';
 
 export const receiptApprovalLabels = {
   QUEUED:'待发起审批', SUBMITTING:'正在发起', PENDING:'审批中', UNKNOWN:'发起结果待核对',
@@ -25,13 +27,9 @@ export function receiptApprovalProblem(config, error = '', canRegister = true) {
   if (!config.canSubmit) return config.message || '请使用已绑定的飞书账号，并确认收款权限后发起审批';
   return '';
 }
-export function validReceiptDate(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
-  const date = new Date(value + 'T00:00:00Z');
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
-}
-export function buildReceiptApprovalRequest({requestId, db, customerId, selected, payments, amount, method,
-  receiptDate, note = '', attachments, methods, config, records = []}) {
+export function buildReceiptApprovalRequest(input) {
+  const {requestId, db, customerId, selected, payments, amount, method,
+    receiptDate, paymentDetails, note = '', attachments, methods, config, records = []} = input;
   if (!config?.enabled) throw Error('收款审批尚未配置');
   const problem = receiptApprovalProblem(config);
   if (problem) throw Error(problem);
@@ -41,10 +39,12 @@ export function buildReceiptApprovalRequest({requestId, db, customerId, selected
     throw Error('请选择该客户已批准且未结清的订单');
   const reserved = reservedReceiptOrderIds(records);
   if (selected.some(order => reserved.has(order.id))) throw Error('所选订单已有未完成的收款审批，请先核对原申请');
-  if (!receiptPaymentMethods(methods,selected).includes(method)) throw Error('请选择有效收款方式；预收款和聚水潭结算单不能使用预收款核销');
-  if (!validReceiptDate(receiptDate)) throw Error('请选择有效的实际到账日期');
-  const total = moneyCents(amount);
-  if (total === null || total <= 0) throw Error('实际收款金额须大于零且最多两位小数');
+  const details = canonicalReceiptPaymentDetails(Object.hasOwn(input,'paymentDetails') ? paymentDetails : [{method,amount,receiptDate}]);
+  const allowedMethods = receiptPaymentMethods(methods,selected);
+  if (details.paymentDetails.some(row => !allowedMethods.includes(row.method)))
+    throw Error('请选择有效收款方式；预收款和聚水潭结算单不能使用预收款核销');
+  const total = details.totalCents;
+  if (amount !== undefined && moneyCents(amount) !== total) throw Error('实际收款金额必须与收款明细合计一致');
   let allocated = 0;
   const allocations = selected.map(order => {
     const value = moneyCents(payments[order.id]), orderTotal = moneyCents(order.total), paid = moneyCents(order.paid ?? 0);
@@ -54,17 +54,19 @@ export function buildReceiptApprovalRequest({requestId, db, customerId, selected
     return {orderId:order.id,amount:value / 100};
   });
   if (!Number.isSafeInteger(allocated) || allocated !== total) throw Error('实际收款金额必须与本次付款合计一致');
-  if (method === '预收款核销' && (moneyCents(customer.balance) ?? 0) < total) throw Error('客户预收款余额不足');
+  if ((moneyCents(customer.balance) ?? 0) < details.writeOffCents) throw Error('客户预收款余额不足');
   const vouchers=copyReceiptVouchers(attachments);
-  return {requestId,revision:db.revision,customerId,amount:total / 100,method,receiptDate,
+  return {requestId,revision:db.revision,customerId,amount:total / 100,method:details.method,receiptDate:details.receiptDate,
+    paymentDetails:details.paymentDetails,
     note:String(note).trim(),allocations,...(vouchers.length?{attachments:vouchers}:{})};
 }
 
 // Only an explicit server opt-out may use the existing direct-booking path.
 export function buildDirectReceiptChange(input) {
   if (input.config?.enabled !== false || input.config?.required !== false) throw Error('本次收款必须先通过飞书审批');
+  const detailed=Object.hasOwn(input,'paymentDetails');
   const settlement=input.selected.some(order=>order.source==='jushuitan-settlement');
-  if(settlement&&!validReceiptDate(input.receiptDate))throw Error('请填写结算单的实际到账日期');
+  if(settlement&&!detailed&&!validReceiptDate(input.receiptDate))throw Error('请填写结算单的实际到账日期');
   const details=buildReceiptApprovalRequest({...input,requestId:'direct-validation-only',
     receiptDate:input.receiptDate||'2000-01-01',
     config:{enabled:true,required:true,canSubmit:true}});
@@ -73,10 +75,11 @@ export function buildDirectReceiptChange(input) {
   return {
     data:{...input.db,orders:input.db.orders.map(order=>amounts.has(order.id)?{...order,
       paid:((moneyCents(views.get(order.id).paid??0)??0)+(moneyCents(amounts.get(order.id))??0))/100,
-      method:input.method,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:order)},
+      method:details.method,updated:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'})}:order)},
     verification:{amount:details.amount,customerId:input.customerId,
-      customer:input.db.customers.find(customer=>customer.id===input.customerId)?.name,method:input.method,
+      customer:input.db.customers.find(customer=>customer.id===input.customerId)?.name,method:details.method,
+      ...(detailed?{paymentDetails:details.paymentDetails,allocations:details.allocations}:{}),
       ...(details.attachments?.length?{attachments:copyReceiptVouchers(details.attachments)}:{}),
-      ...(settlement?{receivedOn:input.receiptDate}:{})},
+      ...(settlement?{receivedOn:details.receiptDate}:{})},
   };
 }

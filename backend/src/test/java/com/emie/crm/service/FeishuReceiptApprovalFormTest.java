@@ -58,6 +58,14 @@ class FeishuReceiptApprovalFormTest {
   private ObjectNode widget(String id) { return (ObjectNode) field(definition.path("form"), id); }
   private ObjectNode allocation(int index) { return (ObjectNode) batch.path("allocations").get(index); }
 
+  private void paymentDetails(String secondMethod) {
+    var details = batch.putArray("paymentDetails");
+    details.addObject().put("lineNo", 1).put("method", "银行转账").put("amount", 150).put("receiptDate", "2026-11-17");
+    details.addObject().put("lineNo", 2).put("method", secondMethod).put("amount", 150).put("receiptDate", "2026-11-18");
+    batch.put("method", "银行转账".equals(secondMethod) ? "银行转账" : "组合收款");
+    ReceiptPaymentDetails.freezeAllocations(details, (ArrayNode) batch.path("allocations"));
+  }
+
   @Test void submitsTheReceiptAllocationTotalInsteadOfTheGoodsOrFullOrderValue() {
     var form = build();
     assertEquals(0, new java.math.BigDecimal("300.00").compareTo(field(form, "amount").path("value").decimalValue()));
@@ -85,6 +93,61 @@ class FeishuReceiptApprovalFormTest {
     assertTrue(project.contains("内部记录ID：order-1"));
     assertTrue(project.contains("订单：order-2 | 本次收款：100.00"));
     assertEquals(original, batch);
+  }
+
+  @Test void multiplePaymentLinesShowEveryRealChannelDateAndFrozenOrderAllocation() {
+    paymentDetails("自定义收款账户");
+    var original = batch.deepCopy();
+    var form = build();
+    assertEquals("2026-11-18T00:00:00+08:00", field(form, "date").path("value").asText());
+    assertEquals(300, field(form, "amount").path("value").asInt());
+    String project = field(form, "project").path("value").asText();
+    assertTrue(project.contains("收款日期汇总：2026-11-18（取收款明细最晚日期"));
+    assertTrue(project.contains("第1笔 | 收款方式：银行转账 | 收款金额：150.00 元 | 实际到账日期：2026-11-17"));
+    assertTrue(project.contains("第2笔 | 收款方式：自定义收款账户 | 收款金额：150.00 元 | 实际到账日期：2026-11-18"));
+    String firstOrder = project.substring(project.indexOf("订单：order-1"), project.indexOf("订单：order-2"));
+    assertTrue(firstOrder.contains("第1笔 | 收款方式：银行转账 | 分配金额：150.00 元 | 实际到账日期：2026-11-17"));
+    assertTrue(firstOrder.contains("第2笔 | 收款方式：自定义收款账户 | 分配金额：50.00 元 | 实际到账日期：2026-11-18"));
+    String secondOrder = project.substring(project.indexOf("订单：order-2"));
+    assertFalse(secondOrder.contains("第1笔"));
+    assertTrue(secondOrder.contains("第2笔 | 收款方式：自定义收款账户 | 分配金额：100.00 元 | 实际到账日期：2026-11-18"));
+    assertEquals(original, batch);
+  }
+
+  @Test void repeatedChannelsOnDifferentDatesStaySeparateAndExistingLargeProjectsAreNotTruncated() {
+    paymentDetails("银行转账");
+    var items = allocation(0).putArray("items");
+    for (int index = 0; index < 16; index++) items.addObject().put("name", "商品" + index + "大".repeat(480)).put("qty", 1).put("price", 1);
+    String project = field(build(), "project").path("value").asText();
+    assertTrue(project.length() > 5000);
+    assertTrue(project.contains("第1笔 | 收款方式：银行转账 | 收款金额：150.00 元 | 实际到账日期：2026-11-17"));
+    assertTrue(project.contains("第2笔 | 收款方式：银行转账 | 收款金额：150.00 元 | 实际到账日期：2026-11-18"));
+    assertTrue(project.contains("商品15"));
+    assertTrue(project.contains("订单：order-2"));
+  }
+
+  @Test void inconsistentFrozenPaymentRowsCannotProduceANativeApprovalForm() {
+    paymentDetails("自定义收款账户");
+    ((ObjectNode) allocation(0).path("paymentDetails").get(0)).put("amount", 149);
+    assertThrows(ApiException.class, this::build);
+  }
+
+  @Test void allFiftySupportedPaymentLinesRemainPresentInTheNativeProject() {
+    var details = batch.putArray("paymentDetails");
+    for (int lineNo = 1; lineNo <= 50; lineNo++)
+      details.addObject().put("lineNo", lineNo).put("method", "银行转账").put("amount", 6).put("receiptDate", "2026-11-18");
+    ReceiptPaymentDetails.freezeAllocations(details, (ArrayNode) batch.path("allocations"));
+    String project = field(build(), "project").path("value").asText();
+    assertEquals(50, project.lines().filter(line -> line.contains("| 收款金额：6.00")).count());
+    assertTrue(project.contains("第50笔 | 收款方式：银行转账 | 分配金额：6.00 元 | 实际到账日期：2026-11-18"));
+  }
+
+  @Test void historicalSinglePaymentFormsDoNotInventDetailedPaymentsOrChangeTheirOriginalSummary() {
+    String project = field(build(), "project").path("value").asText();
+    assertTrue(project.contains("收款方式：银行转账"));
+    assertFalse(project.contains("逐笔收款明细"));
+    assertFalse(project.contains("收款日期汇总"));
+    assertFalse(batch.has("paymentDetails"));
   }
 
   @Test void usesTheBoundReceiptOperatorAndNeverUsesANominatedContactFromTheBatch() {

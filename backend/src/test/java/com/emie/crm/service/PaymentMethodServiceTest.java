@@ -53,6 +53,8 @@ class PaymentMethodServiceTest {
     assertThrows(ApiException.class, () -> service.save(invalid, admin));
     invalid.put("name", "预收款核销\u3000");
     assertThrows(ApiException.class, () -> service.save(invalid, admin));
+    invalid.put("name", "组合收款");
+    assertThrows(ApiException.class, () -> service.save(invalid, admin));
     invalid.put("name", "现金\n核销");
     assertThrows(ApiException.class, () -> service.save(invalid, admin));
     invalid.put("name", "\n现金");

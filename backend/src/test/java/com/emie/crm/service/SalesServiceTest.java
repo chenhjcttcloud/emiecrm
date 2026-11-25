@@ -92,6 +92,20 @@ class SalesServiceTest {
     return mapper.valueToTree(service.receipts(page, pageSize, q, month, owner, customer, method, reader));
   }
 
+  @Test void splitReceiptsFilterByEachRealMethodAndArrivalMonthAndExposeTheirApprovalLine() {
+    order("split-order","100","100");
+    receipt("split-one","split-order","40","银行A","2026-11-25T01:00:00Z")
+        .put("receivedOn","2026-10-31").put("approvalId","batch-split").put("paymentLineNo",1);
+    receipt("split-two","split-order","60","银行B","2026-11-25T01:00:00Z")
+        .put("receivedOn","2026-11-01").put("approvalId","batch-split").put("paymentLineNo",2);
+    var october=receiptList(1,20,"","2026-10","","","银行A");
+    money("40",october.path("summary").path("amount"));
+    assertEquals("batch-split",october.path("rows").get(0).path("approvalId").asText());
+    assertEquals(1,october.path("rows").get(0).path("paymentLineNo").asInt());
+    money("60",receiptList(1,20,"","2026-11","","","银行B").path("summary").path("amount"));
+    assertEquals(0,receiptList(1,20,"","2026-11","","","组合收款").path("total").asInt());
+  }
+
   @Test void shippedRejectedOrCancelledOrdersRemainVisibleAndHistoricalCashStaysActual() {
     var order=order("rejected","100","25").put("status","已取消");line(order,"1","100");
     shipments.add(Map.of("order_id","rejected","payload","{\"environment\":\"sandbox\",\"status\":\"SHIPPED\",\"nativeStatus\":\"Sent\",\"oId\":123,\"creditFulfillment\":true,\"effectiveOrder\":{\"total\":100,\"paid\":100}}"));

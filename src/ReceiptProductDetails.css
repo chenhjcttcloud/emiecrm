@@ -14,6 +14,7 @@
 .receipt-products-summary{display:block;max-width:240px;white-space:normal;overflow-wrap:anywhere;line-height:1.6}
 .receipt-order-products-toggle{display:block;margin-top:6px;padding:0;font-size:12px}
 .receipt-order-product-row>td{padding:14px 16px!important;background:#f8faff}
+.receipt-ledger-payment-line{display:block;margin-top:5px;color:#8191a9;font-size:11px}
 .receipt-detail-drawer{width:min(780px,100vw);color:#34466a}
 .receipt-detail-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:22px}
 .receipt-detail-heading strong{display:block;margin:5px 0;font-size:20px;font-variant-numeric:tabular-nums}

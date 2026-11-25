@@ -44,7 +44,7 @@ public class BusinessService {
   /** New cash proposals use configured choices; a write-off remains its own financial operation. */
   String requireEnabledPaymentMethod(JsonNode value) {
     String method = paymentMethodName(value);
-    require(!"预收款核销".equals(method)
+    require(!"预收款核销".equals(method) && !ReceiptPaymentDetails.COMBINED.equals(method)
         && !db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'", method).isEmpty(),
         "请选择已启用的收款方式");
     return method;
@@ -332,6 +332,7 @@ public class BusinessService {
     require(!persisted.isEmpty(), "收款审批记录不存在");
     var verified = db.parse(persisted.getFirst().get("payload").toString());
     require("APPROVED".equals(verified.path("status").asText()) && verified.equals(batch), "收款审批尚未通过或与入账记录不一致");
+    if (hasPaymentDetails(batch)) ReceiptPaymentDetails.validateFrozen(batch);
     normalizeOrders(current, current);
     ObjectNode next = current.deepCopy();
     var orders = index(next.path("orders"));
@@ -380,6 +381,79 @@ public class BusinessService {
     for (String field : RECEIPT_APPROVAL_FIELDS)
       if (!same(current.path(field), snapshot.path(field))) return false;
     return true;
+  }
+
+  private static boolean hasPaymentDetails(JsonNode batch) {
+    if (batch == null || !batch.has("paymentDetails")) return false;
+    require(ReceiptPaymentDetails.hasDetails(batch), "收款明细须为非空列表");
+    return true;
+  }
+
+  private ObjectNode directPaymentDetails(JsonNode verification, Map<String, JsonNode> before, Map<String, JsonNode> after) {
+    var batch = (ObjectNode) verification.deepCopy();
+    var details = ReceiptPaymentDetails.read(verification);
+    batch.set("paymentDetails", details);
+    batch.put("amount", ReceiptPaymentDetails.total(details)).put("method", ReceiptPaymentDetails.method(details))
+        .put("receiptDate", ReceiptPaymentDetails.receiptDate(details));
+    var requested = verification.path("allocations");
+    require(requested.isArray() && !requested.isEmpty() && requested.size() <= 100, "收款明细须包含1至100笔订单分配");
+    var allocations = batch.putArray("allocations");
+    var ids = new HashSet<String>();
+    for (var source : requested) {
+      String id = source.path("orderId").asText();
+      var previous = before.get(id); var next = after.get(id);
+      require(previous != null && next != null && ids.add(id), "收款分配订单无效或重复");
+      var delta = money(next.path("paid"), true).subtract(money(previous.path("paid"), true));
+      require(delta.signum() > 0 && delta.compareTo(money(source.path("amount"), false)) == 0, "收款分配与订单实际增加金额不一致");
+      allocations.addObject().put("orderId", id).put("amount", delta);
+    }
+    for (var entry : after.entrySet()) {
+      var previous = before.get(entry.getKey());
+      var delta = money(entry.getValue().path("paid"), true).subtract(previous == null ? BigDecimal.ZERO : money(previous.path("paid"), true));
+      if (delta.signum() > 0) require(ids.contains(entry.getKey()), "收款分配遗漏了本次增加已收金额的订单");
+    }
+    ReceiptPaymentDetails.freezeAllocations(details, allocations);
+    ReceiptPaymentDetails.validateFrozen(batch);
+    return batch;
+  }
+
+  private void validatePaymentDetailsOrders(JsonNode batch, Map<String, JsonNode> orders, boolean verified) {
+    boolean credit = ReceiptPaymentDetails.creditTotal(batch).signum() > 0;
+    if (!verified) for (var detail : batch.path("paymentDetails"))
+      if (!"预收款核销".equals(detail.path("method").asText())) requireEnabledPaymentMethod(detail.path("method"));
+    for (var allocation : batch.path("allocations")) {
+      var order = orders.get(allocation.path("orderId").asText());
+      require(order != null, "收款订单不存在");
+      if (credit) require(Set.of("销售订单", "海外提货单").contains(order.path("type").asText())
+          && !JushuitanDocumentService.isSettlement(order), "预收款及结算补录不能使用预收款核销");
+      if (JushuitanDocumentService.isSettlement(order)) for (var detail : ReceiptPaymentDetails.parts(batch, allocation))
+        JushuitanSettlementService.receivedOn(detail.path("receiptDate").asText(), order);
+    }
+  }
+
+  private JsonNode paymentAllocation(JsonNode batch, String orderId) {
+    for (var allocation : batch.path("allocations"))
+      if (orderId.equals(allocation.path("orderId").asText())) return allocation;
+    throw new ApiException("收款明细缺少本次订单分配");
+  }
+
+  private void requireAvailableCredit(List<JsonNode> receipts, Map<String, JsonNode> customers, String ownApprovalId) {
+    var requested = new HashMap<String, BigDecimal>();
+    for (var receipt : receipts) if ("预收款核销".equals(receipt.path("method").asText()))
+      requested.merge(receipt.path("customerId").asText(), money(receipt.path("amount"), false), BigDecimal::add);
+    if (requested.isEmpty()) return;
+    var reserved = new HashMap<String, BigDecimal>();
+    for (var row : db.rows(ACTIVE_RECEIPT_APPROVALS)) {
+      var batch = db.parse(row.get("payload").toString());
+      if (!ownApprovalId.isEmpty() && ownApprovalId.equals(batch.path("id").asText())) continue;
+      reserved.merge(batch.path("customerId").asText(), ReceiptPaymentDetails.creditTotal(batch), BigDecimal::add);
+    }
+    for (var entry : requested.entrySet()) {
+      var customer = customers.get(entry.getKey());
+      require(customer != null && entry.getValue().compareTo(money(customer.path("balance"), true)
+          .subtract(reserved.getOrDefault(entry.getKey(), BigDecimal.ZERO))) <= 0,
+          "客户预收款余额不足，或余额已被其他待处理核销审批占用");
+    }
   }
 
   /** Read-only execution money/products used to freeze the exact receipt proposal. */
@@ -467,6 +541,16 @@ public class BusinessService {
     normalizeOrders(next, old.isNull() ? next : old);
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
+    JsonNode paymentBatch = approvedReceipt;
+    if (approvedReceipt == null && hasPaymentDetails(body.path("receiptVerification"))) {
+      require(feishuReceiptApprovalCode.isBlank(), "收款须通过飞书审批后入账");
+      paymentBatch = directPaymentDetails(body.path("receiptVerification"), oldOrders, nextOrders);
+    }
+    boolean splitPayments = hasPaymentDetails(paymentBatch);
+    if (splitPayments) {
+      ReceiptPaymentDetails.validateFrozen(paymentBatch);
+      validatePaymentDetailsOrders(paymentBatch, nextOrders, verifiedReceipt != null);
+    }
     nextOrders.values().forEach(OrderWarehouse::validateDraft);
     nextOrders.values().forEach(JushuitanCreditPushPolicy::validateDraft);
     protectCanceledOrders(oldOrders, nextOrders, false);
@@ -593,45 +677,60 @@ public class BusinessService {
               "该客户有待确认归属的历史收款，请先核对流水");
         require(entry.path("status").asText().equals("已批准"), "订单需先批准");
         String method = paymentMethodName(entry.path("method"));
-        if (settlement) require(!method.equals("预收款核销"), "结算补录须登记实际到账的收款方式");
-        if (!method.equals("预收款核销")) {
-          if (verifiedReceipt == null) requireEnabledPaymentMethod(entry.path("method"));
-          else require(entry.path("method").equals(approvedReceipt.path("method")), "收款方式与已审批的原申请不一致");
+        ArrayNode parts;
+        if (splitPayments) {
+          var allocation = paymentAllocation(paymentBatch, entry.path("id").asText());
+          require(delta.compareTo(money(allocation.path("amount"), false)) == 0
+              && method.equals(paymentBatch.path("method").asText()), "订单增加金额或收款摘要与本次明细不一致");
+          parts = ReceiptPaymentDetails.parts(paymentBatch, allocation);
+        } else {
+          if (settlement) require(!method.equals("预收款核销"), "结算补录须登记实际到账的收款方式");
+          if (!method.equals("预收款核销")) {
+            if (verifiedReceipt == null) requireEnabledPaymentMethod(entry.path("method"));
+            else require(entry.path("method").equals(approvedReceipt.path("method")), "收款方式与已审批的原申请不一致");
+          }
+          require(!(entry.path("type").asText().equals("预收款订单") && method.equals("预收款核销")),
+              "预收款订单不能使用核销方式");
+          parts = db.object().putArray("parts");
+          parts.addObject().put("method", method).put("amount", delta);
         }
-        require(
-            !(entry.path("type").asText().equals("预收款订单") && method.equals("预收款核销")),
-            "预收款订单不能使用核销方式");
-        var r = db.object();
-        r.put("id", approvedReceipt == null ? UUID.randomUUID().toString()
-            : UUID.nameUUIDFromBytes((approvedReceipt.path("id").asText()+":"+entry.path("id").asText())
-                .getBytes(StandardCharsets.UTF_8)).toString());
-        r.put("order", entry.path("id").asText());
-        r.put("customer", entry.path("customer").asText());
-        r.put("customerId", entry.path("customerId").asText());
-        r.put("amount", delta.setScale(2, RoundingMode.HALF_UP));
-        r.put("method", method);
-        r.put("type", entry.path("type").asText());
-        r.put("time", CrmRepository.now());
-        if (settlement) r.put("receivedOn", JushuitanSettlementService.receivedOn(
-            body.path("receiptVerification").path("receivedOn").asText(), entry));
-        r.put("operator", actor.name());
-        if (evidence != null) r.set("attachments", evidence.deepCopy());
-        r.set("items", productItems(entry, nextRefs.products()));
-        r.put("itemsSource", "snapshot");
-        if (approvedReceipt != null) {
-          r.put("approvalId", approvedReceipt.path("id").asText()).put("instanceCode", approvedReceipt.path("instanceCode").asText())
-              .put("receiptDate", approvedReceipt.path("receiptDate").asText()).put("receiptCategory", approvedReceipt.path("receiptCategory").asText());
-          for (var allocation : approvedReceipt.path("allocations")) {
-            if (!entry.path("id").equals(allocation.path("orderId"))) continue;
-            var snapshots = r.putArray("items");
-            for (var source : allocation.path("items")) {
-              var item = snapshots.addObject();
-              for (String field : List.of("product", "name", "sku", "model", "qty", "price"))
-                if (source.has(field)) item.set(field, source.path(field).deepCopy());
+        for (var part : parts) {
+          var r = db.object();
+          r.put("id", approvedReceipt == null ? UUID.randomUUID().toString()
+              : UUID.nameUUIDFromBytes((approvedReceipt.path("id").asText()+":"+entry.path("id").asText()
+                  + (splitPayments ? ":" + part.path("lineNo").asInt() : ""))
+                  .getBytes(StandardCharsets.UTF_8)).toString());
+          r.put("order", entry.path("id").asText());
+          r.put("customer", entry.path("customer").asText());
+          r.put("customerId", entry.path("customerId").asText());
+          r.put("amount", money(part.path("amount"), false));
+          r.put("method", part.path("method").asText());
+          r.put("type", entry.path("type").asText());
+          r.put("time", CrmRepository.now());
+          if (splitPayments) r.put("paymentLineNo", part.path("lineNo").asInt())
+              .put("receiptDate", part.path("receiptDate").asText()).put("receivedOn", part.path("receiptDate").asText());
+          else if (settlement) r.put("receivedOn", JushuitanSettlementService.receivedOn(
+              body.path("receiptVerification").path("receivedOn").asText(), entry));
+          r.put("operator", actor.name());
+          if (evidence != null) r.set("attachments", evidence.deepCopy());
+          r.set("items", productItems(entry, nextRefs.products()));
+          r.put("itemsSource", "snapshot");
+          if (approvedReceipt != null) {
+            r.put("approvalId", approvedReceipt.path("id").asText()).put("instanceCode", approvedReceipt.path("instanceCode").asText())
+                .put("receiptCategory", approvedReceipt.path("receiptCategory").asText());
+            if (!splitPayments) r.put("receiptDate", approvedReceipt.path("receiptDate").asText());
+            for (var allocation : approvedReceipt.path("allocations")) {
+              if (!entry.path("id").equals(allocation.path("orderId"))) continue;
+              var snapshots = r.putArray("items");
+              for (var source : allocation.path("items")) {
+                var item = snapshots.addObject();
+                for (String field : List.of("product", "name", "sku", "model", "qty", "price"))
+                  if (source.has(field)) item.set(field, source.path(field).deepCopy());
+              }
             }
           }
+          receipts.add(r);
         }
-        receipts.add(r);
       }
     }
     if (body.has("receiptVerification")) {
@@ -642,8 +741,9 @@ public class BusinessService {
       require(!receipts.isEmpty() && received.compareTo(allocated) == 0, "实际收款金额与本次付款合计不一致");
       require(receipts.stream().allMatch(r -> r.path("customer").asText().equals(verification.path("customer").asText())
           && (!verification.has("customerId") || r.path("customerId").asText().equals(verification.path("customerId").asText()))
-          && r.path("method").asText().equals(verification.path("method").asText())), "收款客户或收款方式不一致");
+          && (splitPayments || r.path("method").asText().equals(verification.path("method").asText()))), "收款客户或收款方式不一致");
     }
+    requireAvailableCredit(receipts, oldCustomers, approvedReceipt == null ? "" : approvedReceipt.path("id").asText());
     var balances = new HashMap<String, BigDecimal>();
     var all = new ArrayList<JsonNode>(historicalReceipts);
     all.addAll(receipts);

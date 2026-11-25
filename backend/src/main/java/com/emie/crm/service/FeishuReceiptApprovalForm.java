@@ -29,6 +29,7 @@ final class FeishuReceiptApprovalForm {
 
   static ArrayNode build(ObjectMapper mapper, JsonNode definition, JsonNode batch, String ownerOpenId) {
     var fields = fields(mapper, definition);
+    if (ReceiptPaymentDetails.hasDetails(batch)) ReceiptPaymentDetails.validateFrozen(batch);
     if (ownerOpenId == null || !ownerOpenId.matches("ou_[A-Za-z0-9_-]{1,128}"))
       throw invalid("收款登记人尚未绑定飞书账号，请核对用户资料");
     String date = text(batch.path("receiptDate"), "收款发生日期", 10);
@@ -103,11 +104,17 @@ final class FeishuReceiptApprovalForm {
   }
 
   private static String project(JsonNode batch, BigDecimal amount) {
+    boolean detailed = ReceiptPaymentDetails.hasDetails(batch);
     var text = new StringBuilder("收款申请\nCRM 收款批次：")
         .append(text(batch.path("id"), "收款批次编号", 64)).append("\n登记人：")
         .append(text(batch.hasNonNull("operatorDisplayName") ? batch.path("operatorDisplayName") : batch.path("operator"), "登记人", 191)).append("\n收款方式：")
         .append(text(batch.path("method"), "收款方式", 100)).append("\n本次收款合计：")
         .append(amount.setScale(2).toPlainString()).append(" 元");
+    if (detailed) {
+      text.append("\n收款日期汇总：").append(batch.path("receiptDate").asText())
+          .append("（取收款明细最晚日期，仅用于飞书日期字段）\n逐笔收款明细：");
+      for (var line : batch.path("paymentDetails")) appendPayment(text, line, "收款");
+    }
     var allocations = batch.path("allocations");
     if (!allocations.isArray() || allocations.isEmpty()) throw invalid("请至少选择一笔收款订单");
     var orderIds = new HashSet<String>();
@@ -125,10 +132,21 @@ final class FeishuReceiptApprovalForm {
       if (!orderNumber.equals(orderId)) text.append(" | 内部记录ID：").append(orderId);
       String owner = allocation.path("orderSnapshot").path("owner").asText().strip();
       if (!owner.isEmpty()) text.append(" | 签单人：").append(owner);
+      if (detailed) {
+        text.append("\n本订单收款明细分配：");
+        for (var part : ReceiptPaymentDetails.parts(batch, allocation)) appendPayment(text, part, "分配");
+      }
       appendProducts(text, allocation.path("items"));
     }
     if (amount.compareTo(allocated) != 0) throw invalid("实际收款金额与订单分配合计不一致");
     return text.toString();
+  }
+
+  private static void appendPayment(StringBuilder text, JsonNode line, String amountLabel) {
+    text.append("\n第").append(line.path("lineNo").asInt()).append("笔 | 收款方式：")
+        .append(text(line.path("method"), "收款方式", 100)).append(" | ").append(amountLabel).append("金额：")
+        .append(number(line.path("amount"), "收款明细金额", MAX_MONEY, 2).setScale(2).toPlainString())
+        .append(" 元 | 实际到账日期：").append(line.path("receiptDate").asText());
   }
 
   private static void appendProducts(StringBuilder text, JsonNode items) {

@@ -49,6 +49,150 @@ class BusinessServiceTest {
     return service.save(body, actor);
   }
 
+  private ArrayNode fundingRows(String secondMethod) {
+    var rows=mapper.createArrayNode();
+    rows.addObject().put("method","银行转账").put("amount",20).put("receiptDate","2026-11-20");
+    rows.addObject().put("method",secondMethod).put("amount",30).put("receiptDate","2026-11-25");
+    return rows;
+  }
+  private ObjectNode directRowsBody(ArrayNode rows,String method) {
+    var next=draft();order(next).put("paid",50).put("method",method);
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    var verification=body.putObject("receiptVerification").put("amount",50).put("customerId","c1").put("customer","客户甲").put("method",method);
+    verification.set("paymentDetails",rows);verification.putArray("allocations").addObject().put("orderId","o1").put("amount",50);
+    return body;
+  }
+  private void storedCredit() {
+    ((ObjectNode)stored.at("/customers/0")).put("balance",100);
+    history.add(mapper.createObjectNode().put("id","opening-deposit-receipt").put("order","historical-deposit")
+        .put("customerId","c1").put("customer","客户甲").put("type","预收款订单").put("amount",100).put("method","银行转账"));
+  }
+
+  @Test void directPaymentRowsAreReallocatedInUiOrderAndKeepEachRealMethodAndReceivedDate() {
+    var second=order(stored).deepCopy().put("id","o2").put("total",80);
+    ((ObjectNode)second.at("/items/0")).put("price",80);((ArrayNode)stored.path("orders")).add(second);
+    var next=draft();order(next).put("paid",30).put("method","组合收款");
+    ((ObjectNode)next.at("/orders/1")).put("paid",80).put("method","组合收款");
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    var verification=body.putObject("receiptVerification").put("amount",110).put("customerId","c1").put("customer","客户甲").put("method","组合收款");
+    var rows=verification.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",60).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","POS").put("amount",50).put("receiptDate","2026-11-25");
+    var allocations=verification.putArray("allocations");
+    allocations.addObject().put("orderId","o2").put("amount",80).putArray("paymentDetails").addObject().put("lineNo",99).put("amount",80);
+    allocations.addObject().put("orderId","o1").put("amount",30);
+    service.save(body,admin);
+    assertEquals(3,history.size());
+    var bank=history.stream().filter(r->r.path("method").asText().equals("银行转账")).findFirst().orElseThrow();
+    assertEquals("o2",bank.path("order").asText());assertEquals(60,bank.path("amount").asInt());
+    assertEquals(1,bank.path("paymentLineNo").asInt());assertEquals("2026-11-20",bank.path("receivedOn").asText());
+    for(var row:history) {
+      assertNotEquals("组合收款",row.path("method").asText());
+      assertEquals(row.path("receiptDate"),row.path("receivedOn"));
+      if(row.path("method").asText().equals("POS"))assertEquals(row.path("order").asText().equals("o2")?20:30,row.path("amount").asInt());
+    }
+    assertEquals(3,history.stream().map(r->r.path("id").asText()).distinct().count());
+    assertEquals(30,stored.at("/orders/0/paid").asInt());assertEquals(80,stored.at("/orders/1/paid").asInt());
+  }
+
+  @Test void directPaymentRowsCannotOmitDeltaAllocationsOrBypassTheRequiredApproval() {
+    var body=directRowsBody(fundingRows("POS"),"组合收款");
+    ((ObjectNode)body.at("/receiptVerification/allocations/0")).put("amount",49);
+    assertThrows(ApiException.class,()->service.save(body,admin));
+    org.springframework.test.util.ReflectionTestUtils.setField(service,"feishuReceiptApprovalCode","enabled-template");
+    var required=directRowsBody(fundingRows("POS"),"组合收款");
+    assertTrue(assertThrows(ApiException.class,()->service.save(required,admin)).getMessage().contains("飞书"));
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void mixedDirectCashAndWriteOffCreateSeparateLedgersAndOnlyDebitTheActualCreditPart() {
+    storedCredit();
+    service.save(directRowsBody(fundingRows("预收款核销"),"组合收款"),admin);
+    assertEquals(50,order(stored).path("paid").asInt());assertEquals(70,stored.at("/customers/0/balance").asInt());
+    var credit=history.stream().filter(r->r.path("method").asText().equals("预收款核销")).toList();
+    assertEquals(1,credit.size());assertEquals(30,credit.getFirst().path("amount").asInt());
+    assertEquals(2,credit.getFirst().path("paymentLineNo").asInt());assertEquals("2026-11-25",credit.getFirst().path("receivedOn").asText());
+    assertEquals(3,history.size());
+  }
+
+  @Test void mixedDirectCreditCannotSpendAnotherPendingMixedBatchReservation() throws Exception {
+    storedCredit();var second=order(stored).deepCopy().put("id","o2");((ArrayNode)stored.path("orders")).add(second);
+    var pending=mapper.createObjectNode().put("id","reserved-mixed-batch").put("status","PENDING").put("customerId","c1").put("amount",90).put("method","组合收款");
+    var rows=pending.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",10).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","预收款核销").put("amount",80).put("receiptDate","2026-11-25");
+    pending.putArray("allocations").addObject().put("orderId","o2");
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    when(db.rows(argThat(sql->sql!=null&&sql.contains("feishu_receipt_approvals")&&sql.contains("WHERE status IN"))))
+        .thenReturn(List.of(Map.of("payload",pending.toString())));
+    var body=directRowsBody(fundingRows("预收款核销"),"组合收款");
+    assertTrue(assertThrows(ApiException.class,()->service.save(body,admin)).getMessage().contains("余额"));
+    assertEquals(100,stored.at("/customers/0/balance").asInt());assertEquals(0,order(stored).path("paid").asInt());
+    assertEquals(1,history.size());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void legacyScalarWriteOffCannotSpendAnotherPendingMixedBatchReservation() throws Exception {
+    storedCredit();var second=order(stored).deepCopy().put("id","o2");((ArrayNode)stored.path("orders")).add(second);
+    var pending=mapper.createObjectNode().put("id","reserved-mixed-batch").put("status","PENDING").put("customerId","c1").put("amount",90).put("method","组合收款");
+    var rows=pending.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",10).put("receiptDate","2026-11-20");
+    rows.addObject().put("method","预收款核销").put("amount",80).put("receiptDate","2026-11-25");
+    pending.putArray("allocations").addObject().put("orderId","o2");
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    when(db.rows(argThat(sql->sql!=null&&sql.contains("feishu_receipt_approvals")&&sql.contains("WHERE status IN"))))
+        .thenReturn(List.of(Map.of("payload",pending.toString())));
+    var next=draft();order(next).put("paid",30).put("method","预收款核销");
+    assertTrue(assertThrows(ApiException.class,()->save(next,admin)).getMessage().contains("余额"));
+    assertEquals(100,stored.at("/customers/0/balance").asInt());assertEquals(0,order(stored).path("paid").asInt());
+    assertEquals(1,history.size());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void aMixedWriteOffBatchCannotIncludeAPrepaymentEvenIfItsCashPartCouldFundIt() {
+    order(stored).put("type","预收款订单");
+    var body=directRowsBody(fundingRows("预收款核销"),"组合收款");
+    assertTrue(assertThrows(ApiException.class,()->service.save(body,admin)).getMessage().contains("不能使用预收款核销"));
+    assertTrue(history.isEmpty());verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void repeatedCashMethodsOnDifferentDatesRemainSeparateReceiptRows() {
+    service.save(directRowsBody(fundingRows("银行转账"),"银行转账"),admin);
+    assertEquals(2,history.size());assertEquals(50,order(stored).path("paid").asInt());
+    assertEquals(Set.of("2026-11-20","2026-11-25"),history.stream().map(r->r.path("receivedOn").asText()).collect(java.util.stream.Collectors.toSet()));
+    assertEquals(Set.of(1,2),history.stream().map(r->r.path("paymentLineNo").asInt()).collect(java.util.stream.Collectors.toSet()));
+    assertTrue(history.stream().allMatch(r->r.path("method").asText().equals("银行转账")));
+  }
+
+  @Test void aSettlementChecksEveryPaymentDateRatherThanOnlyTheLatestBatchDate() {
+    order(stored).put("source",JushuitanDocumentService.SETTLEMENT_SOURCE);order(stored).putArray("items");
+    order(stored).putObject("settlement").put("cycle","month").put("periodStart","2026-11-21").put("periodEnd","2026-11-30");
+    var body=directRowsBody(fundingRows("POS"),"组合收款");
+    assertTrue(assertThrows(ApiException.class,()->service.save(body,admin)).getMessage().contains("到账日期"));
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+
+  @Test void aSettlementDoesNotInheritAnEarlierDateFromFundingAssignedEntirelyToAnOrdinaryOrder() {
+    order(stored).put("total",120);((ObjectNode)order(stored).at("/items/0")).put("price",120);
+    var settlement=order(stored).deepCopy().put("id","settlement-old").put("total",180).put("source",JushuitanDocumentService.SETTLEMENT_SOURCE);
+    settlement.putArray("items");settlement.putObject("settlement").put("cycle","month").put("periodStart","2026-11-01").put("periodEnd","2026-11-30");
+    ((ArrayNode)stored.path("orders")).add(settlement);
+    var next=draft();order(next).put("paid",120).put("method","银行转账");
+    ((ObjectNode)next.at("/orders/1")).put("paid",180).put("method","银行转账");
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    var verification=body.putObject("receiptVerification").put("amount",300).put("customerId","c1").put("customer","客户甲").put("method","银行转账");
+    var rows=verification.putArray("paymentDetails");
+    rows.addObject().put("method","银行转账").put("amount",120).put("receiptDate","2026-10-31");
+    rows.addObject().put("method","银行转账").put("amount",180).put("receiptDate","2026-11-02");
+    var allocations=verification.putArray("allocations");allocations.addObject().put("orderId","o1").put("amount",120);
+    allocations.addObject().put("orderId","settlement-old").put("amount",180);
+    service.save(body,admin);
+    assertEquals(2,history.size());
+    assertEquals("2026-10-31",history.stream().filter(r->r.path("order").asText().equals("o1")).findFirst().orElseThrow().path("receivedOn").asText());
+    assertEquals("2026-11-02",history.stream().filter(r->r.path("order").asText().equals("settlement-old")).findFirst().orElseThrow().path("receivedOn").asText());
+    assertEquals(120,stored.at("/orders/0/paid").asInt());assertEquals(180,stored.at("/orders/1/paid").asInt());
+  }
+
   @Test void aDraftCanKeepAnOptionalPlanningWarehouseWithoutChangingItsMoney() {
     order(stored).put("status", "草稿");
     var changed = draft(); order(changed).putObject("approvalDraft").put("warehouseId", "5").put("warehouseName", "计划仓");
@@ -279,6 +423,7 @@ class BusinessServiceTest {
   }
   @Test void ordinaryConfiguredPaymentSelectionRejectsWriteOffAndNontextValues() {
     assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(mapper.getNodeFactory().textNode("预收款核销")));
+    assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(mapper.getNodeFactory().textNode("组合收款")));
     assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(mapper.getNodeFactory().numberNode(123)));
     assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(MissingNode.getInstance()));
     assertEquals("银行转账",service.requireEnabledPaymentMethod(mapper.getNodeFactory().textNode("银行转账")));

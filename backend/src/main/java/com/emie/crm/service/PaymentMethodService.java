@@ -24,7 +24,8 @@ public class PaymentMethodService {
         "收款方式编号、名称和状态须为文本");
     String id=b.path("id").asText(""), name=b.path("name").asText().strip(), status=b.path("status").asText("启用");
     require(id.length()<=64 && id.chars().noneMatch(Character::isISOControl), "收款方式编号无效");
-    require(!name.isEmpty() && name.length()<=50 && !name.equals("预收款核销"), "名称须为1–50字，不能使用预收款核销");
+    require(!name.isEmpty() && name.length()<=50 && !name.equals("预收款核销") && !name.equals(ReceiptPaymentDetails.COMBINED),
+        "名称须为1–50字，不能使用预收款核销或组合收款");
     require(b.path("name").asText().chars().noneMatch(Character::isISOControl), "收款方式名称不能包含控制字符");
     require(List.of("启用","停用").contains(status), "状态无效");
     require(b.path("sortOrder").canConvertToInt() && b.path("sortOrder").isIntegralNumber() && b.path("sortOrder").asInt()>0, "排序须为正整数");

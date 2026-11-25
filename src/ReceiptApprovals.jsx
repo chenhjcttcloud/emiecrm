@@ -7,6 +7,7 @@ import './feishuApproval.css';
 import {approvalInstanceUrl,approvalTime} from './feishuApprovalModel';
 import {orderNumberForId} from './orderNumber';
 import {receiptApprovalActive,receiptApprovalLabels,receiptApprovalCompleted,receiptApprovalCompletionKey} from './receiptApprovalModel';
+import {allocationPaymentRows,hasReceiptPaymentDetails,paymentLineLabel,receiptPaymentRows} from './receiptPaymentDisplay';
 export {receiptApprovalActive,receiptApprovalLabels} from './receiptApprovalModel';
 
 const ROOT = 'feishu/receipt-approvals';
@@ -180,9 +181,17 @@ function ReceiptApprovalFlow({api, record}) {
   </section>;
 }
 
+function PaymentDetailsTable({rows, label}) {
+  return <div className="receipt-approval-payment-scroll"><table className="receipt-approval-payment-table" aria-label={label}>
+    <thead><tr>{['收款明细', '收款方式', '金额', '实际到账日期'].map(value => <th key={value} scope="col">{value}</th>)}</tr></thead>
+    <tbody>{rows.map((row, index) => <tr key={`${row.lineNo ?? 'unknown'}-${index}`}><td>{paymentLineLabel(row.lineNo) || '待核对'}</td><td>{row.method || '明细方式待核对'}</td><td>{row.amount == null || row.amount === '' || !Number.isFinite(Number(row.amount)) ? '—' : money(row.amount)}</td><td>{row.receiptDate || '—'}</td></tr>)}</tbody>
+  </table></div>;
+}
+
 function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose, orders}) {
   const [error, setError] = useState('');
   const busy = Boolean(approvals.busy[record.id]);
+  const detailed = hasReceiptPaymentDetails(record);
   async function act(action) {
     if (busy) return;
     if (action === 'cancel' && !window.confirm('撤回这笔收款审批？撤回后不会计入已收金额。')) return;
@@ -197,9 +206,11 @@ function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose, or
         <div className="receipt-detail-heading"><div><span>本次申请收款</span><strong>{money(record.amount)}</strong></div><Status record={record}/></div>
         <p className="receipt-approval-notice">审批通过后计入订单已收金额。收款审批不触发聚水潭发货。</p>
         {(record.message || record.bookingError) && <p className="system-error" role="status">{record.bookingError || record.message}</p>}
-        <dl className="receipt-detail-fields">{[['客户名称', record.customer], ['收款方式', record.method], ['收款发生日期', record.receiptDate], ['登记人', record.operator], ['提交时间', time(record.createdAt)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || '—'}</dd></div>)}</dl>
+        <dl className="receipt-detail-fields">{[['客户名称', record.customer], [detailed ? '收款方式汇总' : '收款方式', record.method], [detailed ? '汇总日期（最晚到账日）' : '收款发生日期', record.receiptDate], ['登记人', record.operator], ['提交时间', time(record.createdAt)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || '—'}</dd></div>)}</dl>
+        {detailed && <section className="receipt-approval-payments"><h3>逐笔收款明细</h3><p className="receipt-approval-date-note">汇总日期取明细最晚日期，实际收款方式和到账日期以每笔明细为准。</p><PaymentDetailsTable rows={receiptPaymentRows(record)} label="逐笔收款明细"/></section>}
         {record.allocations?.map(allocation => <section className="receipt-approval-allocation" key={allocation.orderId}>
           <div className="receipt-approval-allocation-heading"><h3>{allocation.orderNumber||orderNumberForId(allocation.orderId,orders)}</h3><span>本次分配 <strong>{money(allocation.amount)}</strong></span></div>
+          {detailed && <PaymentDetailsTable rows={allocationPaymentRows(record, allocation)} label={'订单 ' + (allocation.orderNumber||orderNumberForId(allocation.orderId,orders)) + ' 收款分配'}/>}
           <ReceiptProductDetails items={allocation.items || []} source="snapshot"/>
         </section>)}
         {record.note && <section><h3>备注</h3><p className="order-detail-note">{record.note}</p></section>}
@@ -228,7 +239,7 @@ export default function ReceiptApprovalPanel({approvals, api, DialogLayer, Icon,
       <div className="receipt-approval-panel-heading"><div><h2>收款审批{active > 0 && <span>{active} 笔处理中</span>}</h2><p>审批通过后入账，审批中的金额不计入下方收款流水。</p></div><button type="button" className="secondary" onClick={approvals.retry} disabled={approvals.loading}>刷新</button></div>
       {approvals.error && <p className="system-error" role="alert">{approvals.error} <button type="button" className="link-btn" onClick={approvals.retry}>重新加载</button></p>}
       <div className="table-scroll"><table className="data-table"><thead><tr>{['客户名称', '本次收款', '关联订单', '收款日期', '审批状态', '登记人', '操作'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{approvals.rows.map(record => <tr key={record.id}>
-        <td><span className="badge badge-blue">{record.customer}</span></td><td>{money(record.amount)}</td><td><span className="receipt-approval-orders">{(record.allocations || []).map(row => row.orderNumber||orderNumberForId(row.orderId,orders)).join('、')}</span></td><td>{record.receiptDate || '—'}</td><td><Status record={record}/></td><td>{record.operator || '—'}</td><td><button type="button" className="link-btn" aria-label={'查看收款审批 ' + record.id} onClick={() => setViewingId(record.id)}>查看详情</button></td>
+        <td><span className="badge badge-blue">{record.customer}</span></td><td>{money(record.amount)}{hasReceiptPaymentDetails(record)&&<small className="receipt-approval-payment-summary">{record.paymentDetails.length}笔收款</small>}</td><td><span className="receipt-approval-orders">{(record.allocations || []).map(row => row.orderNumber||orderNumberForId(row.orderId,orders)).join('、')}</span></td><td>{record.receiptDate || '—'}{hasReceiptPaymentDetails(record)&&<small className="receipt-approval-payment-summary">明细最晚日期</small>}</td><td><Status record={record}/></td><td>{record.operator || '—'}</td><td><button type="button" className="link-btn" aria-label={'查看收款审批 ' + record.id} onClick={() => setViewingId(record.id)}>查看详情</button></td>
       </tr>)}</tbody></table>{!approvals.rows.length && !approvals.error && <div className="empty" role="status">{approvals.loading ? '正在读取收款审批…' : '暂无收款审批申请'}</div>}</div>
     </section>
     {viewing && <ApprovalDetails key={viewing.id} record={viewing} api={api} approvals={approvals} orders={orders} DialogLayer={DialogLayer} Icon={Icon} onClose={() => setViewingId(null)}/>}

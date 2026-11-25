@@ -92,7 +92,8 @@ public class FeishuReceiptApprovalService {
         throw new ApiException(409, "业务数据已更新，请刷新后重新核对本次收款");
       var record = prepare(id, input, business.state(), actor).put("approvalCode", code)
           .put("openId", openId).put("uuid", UUID.randomUUID().toString());
-      record.set("form", FeishuReceiptApprovalForm.build(mapper, definition, record, openId));
+      // First send and original-UUID retries use exactly the same persisted JSON representation.
+      record.set("form", db.parse(db.encode(FeishuReceiptApprovalForm.build(mapper, definition, record, openId))));
       var evidence = FeishuApprovalEvidence.plan(mapper, definition, record.path("attachments"));
       if (evidence != null) record.set(FeishuApprovalEvidence.FIELD, evidence);
       db.audit(actor.name(), "发起飞书收款审批：" + id);
@@ -106,9 +107,13 @@ public class FeishuReceiptApprovalService {
     JsonNode customer = null;
     for (var entry : state.path("customers")) if (customerId.equals(entry.path("id").asText())) customer = entry;
     require(customer != null && !customerId.isBlank(), "请选择有效客户");
-    String method = input.path("method").asText();
-    if (!"预收款核销".equals(method)) method = business.requireEnabledPaymentMethod(input.path("method"));
-    var amount = money(input.path("amount"));
+    var paymentDetails = ReceiptPaymentDetails.read(input);
+    for (var detail : paymentDetails)
+      if (!"预收款核销".equals(detail.path("method").asText())) business.requireEnabledPaymentMethod(detail.path("method"));
+    String method = ReceiptPaymentDetails.method(paymentDetails);
+    String receiptDate = ReceiptPaymentDetails.receiptDate(paymentDetails);
+    var amount = ReceiptPaymentDetails.total(paymentDetails);
+    var credit = ReceiptPaymentDetails.creditTotal(input);
     var allocations = input.path("allocations");
     require(allocations.isArray() && !allocations.isEmpty() && allocations.size() <= 100, "请选择1至100笔收款订单");
     var orders = index(state.path("orders"));
@@ -121,20 +126,20 @@ public class FeishuReceiptApprovalService {
         """)) {
       var reservedBatch = db.parse(row.get("payload").toString());
       for (var allocation : reservedBatch.path("allocations")) reserved.add(allocation.path("orderId").asText());
-      if ("预收款核销".equals(reservedBatch.path("method").asText())
-          && customerId.equals(reservedBatch.path("customerId").asText()))
-        reservedCredit = reservedCredit.add(decimal(reservedBatch.path("amount")));
+      if (customerId.equals(reservedBatch.path("customerId").asText()))
+        reservedCredit = reservedCredit.add(ReceiptPaymentDetails.creditTotal(reservedBatch));
     }
-    if ("预收款核销".equals(method))
-      require(amount.compareTo(new BigDecimal(customer.path("balance").asText("0")).subtract(reservedCredit)) <= 0,
+    if (credit.signum() > 0)
+      require(credit.compareTo(new BigDecimal(customer.path("balance").asText("0")).subtract(reservedCredit)) <= 0,
           "客户预收款余额不足，或余额已被其他待处理核销审批占用");
     var record = db.object().put("id", id).put("customerId", customerId)
         .put("customer", customer.path("name").asText()).put("amount", amount).put("method", method)
-        .put("receiptDate", input.path("receiptDate").asText()).put("receiptCategory", FeishuReceiptCategory.SALES_INCOME)
+        .put("receiptDate", receiptDate).put("receiptCategory", FeishuReceiptCategory.SALES_INCOME)
         .put("operator", actor.name()).put("operatorRole", actor.role()).put("createdAt", CrmRepository.now()).put("booked", false);
     String note = input.path("note").asText();
     require(note.length() <= 2000, "收款备注不能超过2000字");
     record.put("note", note);
+    if (ReceiptPaymentDetails.hasDetails(input)) record.set("paymentDetails", paymentDetails);
     if (input.hasNonNull("attachments")) record.set("attachments", business.receiptEvidence(input.path("attachments")));
     var profiles = db.rows("SELECT display_name FROM user_profiles WHERE name=?", actor.name());
     record.put("operatorDisplayName", profiles.isEmpty() ? actor.name() : profiles.getFirst().get("display_name").toString());
@@ -150,10 +155,10 @@ public class FeishuReceiptApprovalService {
       if (reserved.contains(orderId)) throw new ApiException(409, "订单 " + orderId + " 已有未完成的收款审批，请先核对原申请");
       var allocated = money(allocation.path("amount"));
       var paid = order.path("paid").isMissingNode() || order.path("paid").isNull() ? BigDecimal.ZERO : decimal(order.path("paid"));
-      require(!"预收款核销".equals(method) || (!"预收款订单".equals(order.path("type").asText())
+      require(credit.signum() == 0 || (!"预收款订单".equals(order.path("type").asText())
           && !JushuitanDocumentService.isSettlement(order)), "预收款及结算补录不能使用预收款核销");
-      if (JushuitanDocumentService.isSettlement(order))
-        JushuitanSettlementService.receivedOn(input.path("receiptDate").asText(), order);
+      if (JushuitanDocumentService.isSettlement(order) && !ReceiptPaymentDetails.hasDetails(input))
+        JushuitanSettlementService.receivedOn(receiptDate, order);
       var execution = BusinessService.receiptExecutionView(db, order);
       var unpaid = decimal(execution.path("total")).subtract(decimal(execution.path("paid")));
       require(paid.compareTo(decimal(execution.path("paid"))) == 0
@@ -176,6 +181,12 @@ public class FeishuReceiptApprovalService {
       }
     }
     require(sum.compareTo(amount) == 0, "实际收款金额与分配到各订单的金额合计不一致");
+    if (ReceiptPaymentDetails.hasDetails(record)) {
+      ReceiptPaymentDetails.freezeAllocations(paymentDetails, lines);
+      for (var allocation : lines) if (JushuitanDocumentService.isSettlement(allocation.path("orderSnapshot")))
+        for (var part : ReceiptPaymentDetails.parts(record, allocation))
+          JushuitanSettlementService.receivedOn(part.path("receiptDate").asText(), allocation.path("orderSnapshot"));
+    }
     return record;
   }
 
@@ -210,11 +221,16 @@ public class FeishuReceiptApprovalService {
 
   private void requireEvidenceRetry(ObjectNode original, Actor actor) {
     // Failed file preparation released its reservations. Recheck them before resuming that UUID.
+    if (ReceiptPaymentDetails.hasDetails(original)) ReceiptPaymentDetails.validateFrozen(original);
     var checked = prepare(original.path("id").asText(), original, business.state(), actor);
     var before = original.path("allocations"); var now = checked.path("allocations");
     require(before.size() == now.size(), "原收款分配已变化，请核对后重新申请");
     for (int i = 0; i < before.size(); i++) {
       require(before.get(i).path("orderId").equals(now.get(i).path("orderId")), "原收款分配已变化，请核对后重新申请");
+      if (ReceiptPaymentDetails.hasDetails(original))
+        require(sameEvidenceValue(before.get(i).path("amount"), now.get(i).path("amount"))
+            && sameEvidenceValue(before.get(i).path("paymentDetails"), now.get(i).path("paymentDetails")),
+            "原收款明细分配已变化，请核对后重新申请");
       for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt"))
         require(sameEvidenceValue(before.get(i).path("orderSnapshot").path(field), now.get(i).path("orderSnapshot").path(field)),
             "原收款订单或已收金额已变化，请核对后重新申请");
@@ -451,7 +467,7 @@ public class FeishuReceiptApprovalService {
   private ObjectNode publicRecord(JsonNode record, Actor actor) {
     var result = db.object();
     for (String field : List.of("id", "status", "amount", "method", "customerId", "customer", "receiptDate", "receiptCategory",
-        "operator", "createdAt", "updatedAt", "instanceCode", "message", "booked", "bookedAt", "bookingError", "note", "attachments"))
+        "operator", "createdAt", "updatedAt", "instanceCode", "message", "booked", "bookedAt", "bookingError", "note", "attachments", "paymentDetails"))
       if (record.has(field)) result.set(field, record.path(field).deepCopy());
     if (recoverable(record)) result.put("status", "UNKNOWN");
     if (!record.path("operatorDisplayName").asText().isBlank())
@@ -460,6 +476,7 @@ public class FeishuReceiptApprovalService {
     for (var allocation : record.path("allocations")) {
       var line = lines.addObject().put("orderId", allocation.path("orderId").asText());
       line.set("amount", allocation.path("amount")); line.set("items", allocation.path("items").deepCopy());
+      if (allocation.has("paymentDetails")) line.set("paymentDetails", allocation.path("paymentDetails").deepCopy());
     }
     boolean initiator = canSubmitReceipt(actor)
         && client.identityReady() && openId(actor).equals(record.path("openId").asText());
