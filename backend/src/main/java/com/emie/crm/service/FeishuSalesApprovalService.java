@@ -97,8 +97,7 @@ public class FeishuSalesApprovalService {
     result.put("prepaymentMessage", prepayment.message());
     boolean receiptForm = prepayment.ready() && FeishuSalesApprovalForm.usesDedicatedPrepaymentForm(mapper, prepayment.definition());
     result.put("prepaymentReceiptForm", receiptForm);
-    result.put("prepaymentReceiptCategories", receiptForm
-        ? FeishuSalesApprovalForm.prepaymentCategories(mapper, prepayment.definition()) : List.of());
+    result.put("prepaymentReceiptCategories", receiptForm ? List.of(FeishuReceiptCategory.SALES_INCOME) : List.of());
     return result;
   }
 
@@ -110,7 +109,9 @@ public class FeishuSalesApprovalService {
     Readiness status;
     try {
       var definition = client.definition(client.approvalCode(type));
-      FeishuSalesApprovalForm.usesDedicatedPrepaymentForm(mapper, definition);
+      boolean dedicatedPrepayment = FeishuSalesApprovalForm.usesDedicatedPrepaymentForm(mapper, definition);
+      if ("预收款订单".equals(type) && dedicatedPrepayment)
+        FeishuReceiptCategory.fromDefinition(mapper, definition);
       status = new Readiness(true, "", System.currentTimeMillis() + 60000, definition);
     } catch (ApiException failure) {
       status = new Readiness(false, failure.getMessage(), System.currentTimeMillis() + 60000, null);
@@ -331,6 +332,8 @@ public class FeishuSalesApprovalService {
   private ObjectNode newSubmission(String openId, String approvalCode, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, Actor actor) {
     String orderId = order.path("id").asText();
+    if ("预收款订单".equals(order.path("type").asText()))
+      business.requireEnabledPaymentMethod(order.path("method"));
     if ("预收款订单".equals(order.path("type").asText()) && order.hasNonNull("attachments")) {
       ObjectNode snapshot = order.deepCopy();
       snapshot.set("attachments", business.receiptEvidence(order.path("attachments")));
@@ -838,7 +841,7 @@ public class FeishuSalesApprovalService {
     if (order == null) return false;
     var snapshot = record.path("orderSnapshot");
     if (!snapshot.isObject()) return false;
-    for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "note", "attachments", "approvalDraft"))
+    for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "method", "note", "attachments", "approvalDraft"))
       if (!snapshot.path(field).equals((left, right) -> left.isNumber() && right.isNumber()
           ? left.decimalValue().compareTo(right.decimalValue()) : left.equals(right) ? 0 : 1, order.path(field))) return false;
     return true;

@@ -52,13 +52,8 @@ public class FeishuReceiptApprovalService {
     if (!client.receiptReady()) return result.put("message", "收款飞书审批尚未配置完成");
     try {
       var definition = client.definition(client.receiptApprovalCode());
-      JsonNode form = definition.path("form");
-      if (form.isTextual()) form = mapper.readTree(form.asText());
-      for (var field : form) if ("收款类别".equals(field.path("name").asText()))
-        for (var option : field.path("option")) {
-          String text = option.path("text").asText();
-          if (!text.isBlank()) categories.add(text);
-        }
+      FeishuReceiptCategory.fromDefinition(mapper, definition);
+      categories.add(FeishuReceiptCategory.SALES_INCOME);
       result.put("canSubmit", canSubmitReceipt(actor) && !openId(actor).isBlank());
     } catch (Exception failure) {
       result.put("message", failure instanceof ApiException ? failure.getMessage() : "读取收款审批模板失败，请稍后重试");
@@ -112,8 +107,7 @@ public class FeishuReceiptApprovalService {
     for (var entry : state.path("customers")) if (customerId.equals(entry.path("id").asText())) customer = entry;
     require(customer != null && !customerId.isBlank(), "请选择有效客户");
     String method = input.path("method").asText();
-    require("预收款核销".equals(method) || !db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'", method).isEmpty(),
-        "请选择已启用的收款方式");
+    if (!"预收款核销".equals(method)) method = business.requireEnabledPaymentMethod(input.path("method"));
     var amount = money(input.path("amount"));
     var allocations = input.path("allocations");
     require(allocations.isArray() && !allocations.isEmpty() && allocations.size() <= 100, "请选择1至100笔收款订单");
@@ -136,7 +130,7 @@ public class FeishuReceiptApprovalService {
           "客户预收款余额不足，或余额已被其他待处理核销审批占用");
     var record = db.object().put("id", id).put("customerId", customerId)
         .put("customer", customer.path("name").asText()).put("amount", amount).put("method", method)
-        .put("receiptDate", input.path("receiptDate").asText()).put("receiptCategory", input.path("receiptCategory").asText())
+        .put("receiptDate", input.path("receiptDate").asText()).put("receiptCategory", FeishuReceiptCategory.SALES_INCOME)
         .put("operator", actor.name()).put("operatorRole", actor.role()).put("createdAt", CrmRepository.now()).put("booked", false);
     String note = input.path("note").asText();
     require(note.length() <= 2000, "收款备注不能超过2000字");

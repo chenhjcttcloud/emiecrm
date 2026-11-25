@@ -115,6 +115,95 @@ class SettlementOrderNumbersTest {
     assertThrows(ApiException.class,()->SettlementOrderNumbers.protect(empty,old,false));
   }
 
+  @Test void mixedShortAndHistoricalNumbersKeepTheirIdentitiesAndOnlyLegacyMissingNumbersAreBackfilled() throws Exception {
+    var state = state("""
+        [{"id":"S261125151751967","type":"销售订单","created":"2026-11-25"},
+         {"id":"2026-10-00000006","type":"销售订单"},
+         {"id":"N261125987654321","type":"预收款订单","status":"草稿"},
+         {"id":"JS-new-short","source":"jushuitan-settlement","orderNumber":"N2611250001","status":"审批中"},
+         {"id":"JS-old-separate","source":"jushuitan-settlement","orderNumber":"JS-2026-11-00000099","created":"2026-11-01"},
+         {"id":"JS-missing","source":"jushuitan-settlement","created":"2026-11-02"}]
+        """);
+    var shortOrdinary = order(state, "N261125987654321").deepCopy();
+    var shortSettlement = order(state, "JS-new-short").deepCopy();
+    var legacyS = order(state, "S261125151751967").deepCopy();
+    assertEquals(2, SettlementOrderNumbers.assignMissing(state, fallback));
+    assertEquals("2026-11-00000007", order(state, "JS-old-separate").path("orderNumber").asText());
+    assertEquals("2026-11-00000008", order(state, "JS-missing").path("orderNumber").asText());
+    assertEquals(shortOrdinary, order(state, "N261125987654321"));
+    assertEquals(shortSettlement, order(state, "JS-new-short"));
+    assertEquals(legacyS, order(state, "S261125151751967"));
+    var numbered = state.deepCopy();
+    assertEquals(0, SettlementOrderNumbers.assignMissing(state, YearMonth.of(2027, 1)));
+    assertEquals(numbered, state);
+  }
+
+  @Test void shortNumbersPermitNaturalSequenceGrowthAndAValidLeapDateWithoutRenumbering() throws Exception {
+    var state = state("""
+        [{"id":"N26112510000","type":"销售订单","orderNumber":"N26112510000"},
+         {"id":"JS-leap","source":"jushuitan-settlement","orderNumber":"N2402290001"},
+         {"id":"2026-11-00000009","source":"jushuitan-settlement","orderNumber":"2026-11-00000009"}]
+        """);
+    var before = state.deepCopy();
+    assertEquals(0, SettlementOrderNumbers.assignMissing(state, fallback));
+    assertEquals(before, state);
+    var adopting = state("[{\"id\":\"N2611250002\",\"source\":\"jushuitan-settlement\"}]");
+    assertEquals(1, SettlementOrderNumbers.assignMissing(adopting, fallback));
+    assertEquals("N2611250002", order(adopting, "N2611250002").path("orderNumber").asText());
+    assertEquals(0, SettlementOrderNumbers.assignMissing(adopting, fallback));
+  }
+
+  @Test void shortIdsAndBusinessNumbersUseOneCollisionSpaceIncludingStoppedRecords() throws Exception {
+    for (String rows : new String[]{
+        "[{\"id\":\"N2611250001\"},{\"id\":\"JS-other\",\"source\":\"jushuitan-settlement\",\"orderNumber\":\"N2611250001\"}]",
+        "[{\"id\":\"JS-first\",\"source\":\"jushuitan-settlement\",\"orderNumber\":\"N2611250001\"},{\"id\":\"N2611250001\"}]",
+        "[{\"id\":\"N2611250001\",\"status\":\"已取消\",\"deletedAt\":\"2026-11-25\"},{\"id\":\"JS-other\",\"source\":\"jushuitan-settlement\",\"orderNumber\":\"N2611250001\"}]",
+        "[{\"id\":\"JS-first\",\"source\":\"jushuitan-settlement\",\"orderNumber\":\"N2611250001\"},{\"id\":\"JS-other\",\"source\":\"jushuitan-settlement\",\"orderNumber\":\"N2611250001\"}]",
+        "[{\"id\":\"N2611250001\",\"orderNumber\":\"N2611250002\"},{\"id\":\"N2611250002\"}]",
+        "[{\"id\":\"N2611250001\"},{\"id\":\"N2611250001\"}]",
+        "[{\"id\":\"S261125151751967\"},{\"id\":\"S261125151751967\"}]"
+    }) {
+      var state = state(rows);
+      assertEquals(409, assertThrows(ApiException.class, () -> SettlementOrderNumbers.assignMissing(state, fallback)).status());
+    }
+  }
+
+  @Test void invalidNIdentifiersCannotBeTreatedAsOldUuidsOrBackfilledIntoOtherNumbers() throws Exception {
+    for (String number : new String[]{"N2602290001", "N2602310001", "N2613320001", "N2611000001", "N2611250000",
+        "N26112500000", "N261125001", "N2611250001junk", "N261125-0001", "N2611250001 ", "Nnot-a-short-number"}) {
+      var badNumber = state("[]");
+      badNumber.withArray("orders").addObject().put("id", "JS-invalid").put("source", "jushuitan-settlement").put("orderNumber", number);
+      assertThrows(ApiException.class, () -> SettlementOrderNumbers.assignMissing(badNumber, fallback), number);
+      assertEquals(number, order(badNumber, "JS-invalid").path("orderNumber").asText());
+      var badId = state("[]");
+      badId.withArray("orders").addObject().put("id", number).put("source", "jushuitan-settlement");
+      assertThrows(ApiException.class, () -> SettlementOrderNumbers.assignMissing(badId, fallback), number);
+      assertFalse(order(badId, number).has("orderNumber"));
+    }
+  }
+
+  @Test void anIssuedShortNumberCannotBeChangedErasedOrInjectedAndRestoreCanKeepTheOriginalAlias() throws Exception {
+    for (String source : new String[]{"ordinary", "jushuitan-settlement"}) {
+      var old = state("[]");
+      old.withArray("orders").addObject().put("id", "stable-" + source).put("source", source).put("orderNumber", "N2611250001");
+      for (boolean restoring : new boolean[]{false, true}) {
+        for (String replacement : new String[]{"", "N2611250002", "2026-11-00000001"}) {
+          var edited = old.deepCopy(); order(edited, "stable-" + source).put("orderNumber", replacement);
+          assertThrows(ApiException.class, () -> SettlementOrderNumbers.protect(old, edited, restoring));
+        }
+      }
+      var missing = old.deepCopy(); order(missing, "stable-" + source).remove("orderNumber");
+      assertThrows(ApiException.class, () -> SettlementOrderNumbers.protect(old, missing, false));
+      SettlementOrderNumbers.protect(old, missing, true);
+      assertEquals(old, missing);
+      var empty = state("[]");
+      assertThrows(ApiException.class, () -> SettlementOrderNumbers.protect(empty, old.deepCopy(), false));
+    }
+    var ordinary = state("[{\"id\":\"N2611250003\",\"type\":\"销售订单\"}]");
+    var supplied = ordinary.deepCopy(); order(supplied, "N2611250003").put("orderNumber", "N2611250003");
+    assertThrows(ApiException.class, () -> SettlementOrderNumbers.protect(ordinary, supplied, false));
+  }
+
   private ObjectNode state(String orders) throws Exception { return (ObjectNode)mapper.readTree("{\"orders\":"+orders+"}"); }
   private ObjectNode order(ObjectNode state,String id) {
     for(var order:state.path("orders")) if(id.equals(order.path("id").asText())) return (ObjectNode)order;

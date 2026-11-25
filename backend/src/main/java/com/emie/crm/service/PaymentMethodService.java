@@ -19,8 +19,13 @@ public class PaymentMethodService {
   public void save(JsonNode b, Actor actor) {
     actor.require("system.manage");
     db.state(true);
-    String id=b.path("id").asText(""), name=b.path("name").asText("").trim(), status=b.path("status").asText("启用");
+    require((b.path("id").isMissingNode() || b.path("id").isTextual())
+        && b.path("name").isTextual() && (b.path("status").isMissingNode() || b.path("status").isTextual()),
+        "收款方式编号、名称和状态须为文本");
+    String id=b.path("id").asText(""), name=b.path("name").asText().strip(), status=b.path("status").asText("启用");
+    require(id.length()<=64 && id.chars().noneMatch(Character::isISOControl), "收款方式编号无效");
     require(!name.isEmpty() && name.length()<=50 && !name.equals("预收款核销"), "名称须为1–50字，不能使用预收款核销");
+    require(b.path("name").asText().chars().noneMatch(Character::isISOControl), "收款方式名称不能包含控制字符");
     require(List.of("启用","停用").contains(status), "状态无效");
     require(b.path("sortOrder").canConvertToInt() && b.path("sortOrder").isIntegralNumber() && b.path("sortOrder").asInt()>0, "排序须为正整数");
     if(!id.isEmpty()) require(!db.rows("SELECT id FROM payment_methods WHERE id=?",id).isEmpty(), "收款方式不存在");

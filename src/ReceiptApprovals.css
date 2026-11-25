@@ -43,3 +43,4 @@
 .receipt-reserved-label{display:block;font-size:11px;color:#a17b47;margin-top:5px}
 .receipt-approval-resume{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px}
 @media(max-width:650px){.receipt-approval-panel-heading{flex-wrap:wrap}.receipt-approval-drawer .modal-footer{gap:8px}.receipt-approval-drawer .modal-footer>*{max-width:100%}}
+.receipt-approval-fields.receipt-date-only{grid-template-columns:1fr}

@@ -24,8 +24,17 @@ test('receipt allocations always submit internal IDs when settlement orders have
 });
 test('receipt approval prevents incomplete and inconsistent financial input',()=>{
   for(const change of [{amount:'30.001'},{amount:'29.99'},{payments:{o1:'100',o2:'1'}},{receiptDate:'2026-02-30'},
-    {receiptCategory:'其他类别'},{customerId:'other'},{selected:[{...orders[0],status:'审批中'}]},
+    {customerId:'other'},{selected:[{...orders[0],status:'审批中'}]},
     {selected:[{...orders[0],deletedAt:'now'}]},{method:'已停用'}])assert.throws(()=>buildReceiptApprovalRequest({...input(),...change}));
+});
+
+test('new receipt requests never require or transmit a category while preserving caller history',()=>{
+ const data=input();data.config={enabled:true,canSubmit:true};
+ const request=buildReceiptApprovalRequest(data);
+ assert.equal(Object.hasOwn(request,'receiptCategory'),false);
+ assert.equal(data.receiptCategory,'销售收入');
+ const direct=buildDirectReceiptChange({...data,db:{...data.db,orders:structuredClone(orders)},config:{enabled:false,required:false}});
+ assert.equal(Object.hasOwn(direct.verification,'receiptCategory'),false);
 });
 test('pending and unbooked approved receipts reserve their orders',()=>{
   const rows=[{id:'a',status:'PENDING',allocations:[{orderId:'o1'}]},{id:'b',status:'APPROVED',booked:false,allocations:[{orderId:'o2'}]},

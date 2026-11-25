@@ -74,6 +74,8 @@ class FeishuReceiptApprovalServiceTest {
     when(db.state(true)).thenAnswer(call -> state);
     when(db.state(false)).thenAnswer(call -> state);
     when(business.state()).thenAnswer(call -> state);
+    var configuredMethods = new BusinessService(db, mock(AssetService.class));
+    when(business.requireEnabledPaymentMethod(any())).thenAnswer(call -> configuredMethods.requireEnabledPaymentMethod(call.getArgument(0)));
     service = new FeishuReceiptApprovalService(db, client, mapper, business, manager);
   }
 
@@ -130,6 +132,28 @@ class FeishuReceiptApprovalServiceTest {
   }
 
   private JsonNode approval(JsonNode response) { return response.path("approval"); }
+
+  @Test void configurationExposesOnlySalesIncomeEvenWhenTheTemplateOffersOtherCategories() throws Exception {
+    var template=definition();
+    var category=(ObjectNode)template.at("/form/3");
+    ((ArrayNode)category.path("option")).addObject().put("text","服务收入").put("value","opaque-service");
+    when(client.definition("receipt-code")).thenReturn(template);
+    var config=service.config(submitter);
+    assertTrue(config.path("canSubmit").asBoolean());
+    assertEquals(mapper.createArrayNode().add("销售收入"),config.path("receiptCategories"));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+  }
+
+  @Test void configurationRejectsATemplateWithoutAnUnambiguousSalesIncomeOption() throws Exception {
+    var template=definition();
+    ((ObjectNode)template.at("/form/3/option/0")).put("text","服务收入").put("value","opaque-service");
+    when(client.definition("receipt-code")).thenReturn(template);
+    var config=service.config(submitter);
+    assertFalse(config.path("canSubmit").asBoolean());
+    assertTrue(config.path("message").asText().contains("销售收入"));
+    assertTrue(config.path("receiptCategories").isEmpty());
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+  }
 
   @Test void oneBatchCapturesMultipleOrdersWithoutBookingPaymentsBeforeApproval() throws Exception {
     var result = service.create(input(), submitter);
@@ -212,7 +236,8 @@ class FeishuReceiptApprovalServiceTest {
   @Test void uncertainSubmissionCanOnlyRetryTheOriginalStoredUuidFormAndDefinition() throws Exception {
     existing("UNKNOWN");
     record.remove("instanceCode");
-    record.putArray("form").addObject().put("id", "original-form");
+    record.put("receiptCategory","服务收入");
+    record.putArray("form").addObject().put("id", "original-category").put("type","radioV2").put("value","legacy-opaque-service-value");
     var saved = (ArrayNode) record.path("form").deepCopy();
     when(client.instance("original-uuid")).thenThrow(mock(FeishuApprovalClient.NotFound.class));
     when(client.receiptApprovalCode()).thenReturn("changed-template");
@@ -220,8 +245,11 @@ class FeishuReceiptApprovalServiceTest {
     assertEquals("PENDING", result.path("status").asText());
     assertEquals("original-uuid", record.path("uuid").asText());
     assertEquals("receipt-code", record.path("approvalCode").asText());
+    assertEquals("服务收入",record.path("receiptCategory").asText());
+    assertEquals("服务收入",result.path("receiptCategory").asText());
     verify(client).create(eq("receipt-code"), eq("ou_sales"), eq("original-uuid"), eq(saved));
     verify(client, never()).definition(anyString());
+    verify(business, never()).requireEnabledPaymentMethod(any());
     verify(business, never()).applyApprovedReceipt(any());
   }
 

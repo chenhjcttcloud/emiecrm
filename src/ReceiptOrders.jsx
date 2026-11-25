@@ -1,6 +1,6 @@
 import React,{useEffect,useRef,useState} from 'react';
 import PaymentMethodPicker from './PaymentMethodPicker';
-import OrderSelect from './OrderSelect';
+import {enabledPaymentMethodNames,receiptMethodChoices} from './paymentMethodModel';
 import {customerOptions} from './customerOptions';
 import {moneyCents} from './orderMoney';
 import {recordId} from './recordId';
@@ -16,17 +16,26 @@ import {canReceiveOrder,itemsFromOrder,productSummary} from './receiptProductMod
 const money=value=>'¥ '+Number(value||0).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const cents=value=>moneyCents(value)??0;
 
-export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMethods,entryOnly=false,onEntryClose,onRegistered,
+export default function ReceiptOrders({api,db,Icon,save,DialogLayer,entryOnly=false,onEntryClose,onRegistered,
   approvals,canRegister=true,attempt=null,onAttemptChange,initialOrderId,shipments={},onOpenOrder}){
   const preset=db.orders.find(order=>order.id===initialOrderId);
   const[selecting,setSelecting]=useState(entryOnly),
     [customer,setCustomer]=useState(attempt?.customerId||preset?.customerId||''),[payments,setPayments]=useState(()=>attempt?Object.fromEntries(attempt.allocations.map(row=>[row.orderId,String(row.amount)])):preset?{[preset.id]:''}:{}),
-    [received,setReceived]=useState(attempt?String(attempt.amount):''),[payMethod,setPayMethod]=useState(attempt?.method||paymentMethods[0]||''),
+    [received,setReceived]=useState(attempt?String(attempt.amount):''),[payMethod,setPayMethod]=useState(attempt?.method||''),
     [saving,setSaving]=useState(false),[formError,setFormError]=useState('');
-  const[receiptDate,setReceiptDate]=useState(attempt?.receiptDate||''),[receiptCategory,setReceiptCategory]=useState(attempt?.receiptCategory||''),[note,setNote]=useState(attempt?.note||''),
+  const[receiptDate,setReceiptDate]=useState(attempt?.receiptDate||''),[note,setNote]=useState(attempt?.note||''),
     [expandedOrder,setExpandedOrder]=useState(null),[checkingSubmission,setCheckingSubmission]=useState(Boolean(attempt)),[feedback,setFeedback]=useState('');
   const submission=useRef(attempt),submitting=useRef(false);
   const[attachments,setAttachments]=useState(()=>Array.isArray(attempt?.attachments)?attempt.attachments.map(image=>({...image})):[]),[voucherUploading,setVoucherUploading]=useState(false);
+  const[paymentMethods,setPaymentMethods]=useState([]),[methodsLoading,setMethodsLoading]=useState(!attempt),[methodsError,setMethodsError]=useState(''),[methodsVersion,setMethodsVersion]=useState(0);
+  useEffect(()=>{
+    if(!selecting||checkingSubmission)return;
+    let active=true;setMethodsLoading(true);setMethodsError('');setPaymentMethods([]);
+    api('system/payment-methods').then(rows=>{const names=enabledPaymentMethodNames(rows);if(active)setPaymentMethods(names)})
+      .catch(problem=>{if(active){setPaymentMethods([]);setMethodsError(problem.message||'读取收款方式配置失败')}})
+      .finally(()=>{if(active)setMethodsLoading(false)});
+    return()=>{active=false};
+  },[api,selecting,checkingSubmission,methodsVersion]);
   useEffect(()=>{
     const pending=submission.current;
     if(!pending||!checkingSubmission)return;
@@ -37,6 +46,8 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
   const customerOrders=eligible.filter(order=>order.customerId===customer);
   const selected=customerOrders.filter(order=>Object.hasOwn(payments,order.id));
   const reserved=reservedReceiptOrderIds(approvals.rows),methods=receiptPaymentMethods(paymentMethods,selected);
+  const methodChoices=receiptMethodChoices(methods,payMethod,checkingSubmission);
+  const methodProblem=checkingSubmission?'':methodsLoading?'正在读取收款方式配置…':methodsError?'无法读取收款方式配置，请重新加载':!methods.length?'暂无可用收款方式，请先配置':payMethod&&!methods.includes(payMethod)?'原选收款方式当前未启用，请重新选择':'';
   const needsReceivedDate=selected.some(order=>order.source==='jushuitan-settlement');
   const totals=selected.reduce((sum,order)=>({total:sum.total+cents(order.total),paid:sum.paid+cents(order.paid),unpaid:sum.unpaid+cents(order.total)-cents(order.paid),payment:sum.payment+cents(payments[order.id])}),{total:0,paid:0,unpaid:0,payment:0});
   const receivedCents=moneyCents(received),receivedValid=received!==''&&receivedCents!==null&&receivedCents>0;
@@ -54,6 +65,7 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
   }
   async function submitPayment(event){
     event.preventDefault();if(submitting.current||voucherUploading)return;setFormError('');
+    if(!submission.current&&methodProblem){setFormError(methodProblem);return}
     if(!canRegister){setFormError('当前账号没有登记收款权限');return}
     let payload=submission.current;
     if(!payload&&!approvalRequired){
@@ -70,7 +82,7 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
     if(!payload){
       if(problem){setFormError(problem);return}
       try{payload=buildReceiptApprovalRequest({requestId:recordId(''),db,customerId:customer,selected,payments,amount:received,
-        method:payMethod,receiptDate,receiptCategory,note,attachments,methods:paymentMethods,config:approvals.config,records:approvals.rows})}
+        method:payMethod,receiptDate,note,attachments,methods:paymentMethods,config:approvals.config,records:approvals.rows})}
       catch(failure){setFormError(failure.message);return}
       submission.current=payload;onAttemptChange?.(payload);
     }
@@ -87,7 +99,7 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
   function closeEntry(){if(saving||voucherUploading)return;setSelecting(false);onEntryClose?.()}
   function openEntry(){
     if(submission.current){setCheckingSubmission(true);setSelecting(true);return}
-    setCustomer('');setPayments({});setReceived('');setPayMethod(paymentMethods[0]||'');setReceiptDate('');setReceiptCategory('');setNote('');setAttachments([]);setExpandedOrder(null);setFormError('');setSelecting(true);
+    setCustomer('');setPayments({});setReceived('');setPayMethod('');setPaymentMethods([]);setMethodsLoading(true);setMethodsError('');setReceiptDate('');setNote('');setAttachments([]);setExpandedOrder(null);setFormError('');setSelecting(true);
   }
   const receiptForm=<DialogLayer kind="drawer" label="收款审批申请" open={selecting} onClose={closeEntry}><form className="drawer receipt-approval-form" onSubmit={submitPayment}>
     <div className="modal-title"><h2>{approvalRequired||checkingSubmission?'新建收款申请':'新建收款'}</h2><button type="button" disabled={saving||voucherUploading} aria-label="关闭收款申请" onClick={closeEntry}><Icon name="close"/></button></div>
@@ -106,17 +118,22 @@ export default function ReceiptOrders({api,db,Icon,save,DialogLayer,paymentMetho
         <td><input aria-label={orderNumber(order)+' 本次付款'} type="number" min="0.01" step="0.01" max={((cents(order.total)-cents(order.paid))/100).toFixed(2)} required disabled={formLocked||reserved.has(order.id)||!Object.hasOwn(payments,order.id)} placeholder="请输入金额" value={payments[order.id]??''} onChange={event=>setPayments(previous=>({...previous,[order.id]:event.target.value}))}/></td>
       </tr>{expandedOrder===order.id&&<tr className="receipt-order-product-row"><td colSpan={7}><div id={'receipt-products-'+encodeURIComponent(order.id)}><ReceiptProductDetails items={itemsFromOrder(order,db.products)}/></div></td></tr>}</React.Fragment>)}</tbody></table>{!customerOrders.length&&<div className="empty">{customer?'该客户暂无已批准且未结清的订单':'请先选择客户'}</div>}</div>
       <div className="receipt-totals">{[['所选订单总金额',totals.total],['已付金额',totals.paid],['未收金额',totals.unpaid],['本次付款合计',totals.payment]].map(([label,value])=><div key={label}><span>{label}</span><strong>{money(value/100)}</strong></div>)}</div>
-      <div className="receipt-payment-row"><div className="field"><span>收款方式 <em>*</em></span><PaymentMethodPicker options={methods} value={payMethod} onChange={setPayMethod} disabled={formLocked}/></div><label className="field"><span>{payMethod==='预收款核销'?'本次核销金额':'实际收款金额'} <em>*</em></span><input aria-label="实际收款金额" type="number" min="0.01" step="0.01" required disabled={formLocked} placeholder="请输入金额" value={received} onChange={event=>{setReceived(event.target.value);setFormError('')}}/></label></div>
+      <div className="receipt-payment-row"><div className="field"><span>收款方式 <em>*</em></span><PaymentMethodPicker options={methodChoices} value={payMethod} onChange={setPayMethod} disabled={formLocked||methodsLoading||Boolean(methodsError)}/>
+        {!checkingSubmission&&<><button type="button" className="link-btn" disabled={formLocked||methodsLoading} onClick={()=>setMethodsVersion(value=>value+1)}>{methodsLoading?'正在读取收款方式…':'刷新收款方式'}</button>
+          {methodsError&&<p className="system-error" role="status">{methodsError}，请重新加载收款方式。</p>}
+          {!methodsLoading&&!methodsError&&!paymentMethods.length&&<p className="form-hint">暂无启用的收款方式，请在“系统管理 → 收款方式”配置；符合条件的订单仍可使用预收款核销。</p>}
+          {!methodsLoading&&!methodsError&&payMethod&&!methods.includes(payMethod)&&<p className="system-error" role="status">原选方式“{payMethod}”当前未启用，请重新选择。</p>}</>}
+        {checkingSubmission&&<p className="form-hint">原申请收款方式：{payMethod}。核对时沿用原申请内容。</p>}
+      </div><label className="field"><span>{payMethod==='预收款核销'?'本次核销金额':'实际收款金额'} <em>*</em></span><input aria-label="实际收款金额" type="number" min="0.01" step="0.01" required disabled={formLocked} placeholder="请输入金额" value={received} onChange={event=>{setReceived(event.target.value);setFormError('')}}/></label></div>
       {payMethod==='预收款核销'&&<p className="receipt-approval-date-note">客户当前预收款余额 {money(balance)}；本次使用已有余额抵扣，不新增现金收款。{approvalRequired?'审批通过时再次核验余额，审批中暂不扣减。':'提交时再次核验余额。'}</p>}
-      {(approvalRequired||needsReceivedDate)&&<div className="receipt-approval-fields"><label className="field"><span>{payMethod==='预收款核销'?'核销日期':'实际到账日期'} <em>*</em></span><input type="date" aria-label={payMethod==='预收款核销'?'核销日期':'实际到账日期'} required disabled={formLocked} value={receiptDate} onChange={event=>setReceiptDate(event.target.value)}/></label>
-        {approvalRequired&&<OrderSelect label="收款类别" name="receiptCategory" required disabled={formLocked} placeholder="请选择收款类别" value={receiptCategory} options={(approvals.config?.receiptCategories||[]).map(value=>({value,label:value}))} onChange={setReceiptCategory}/>}
+      {(approvalRequired||needsReceivedDate)&&<div className="receipt-approval-fields receipt-date-only"><label className="field"><span>{payMethod==='预收款核销'?'核销日期':'实际到账日期'} <em>*</em></span><input type="date" aria-label={payMethod==='预收款核销'?'核销日期':'实际到账日期'} required disabled={formLocked} value={receiptDate} onChange={event=>setReceiptDate(event.target.value)}/></label>
       </div>}
       {needsReceivedDate&&<p className="receipt-approval-date-note">所选包含聚水潭结算单，请填写真实到账日期。结算单不支持预收款核销。</p>}
       <label className="field"><span>收款申请备注</span><textarea aria-label="收款申请备注" maxLength={2000} disabled={formLocked} value={note} onChange={event=>setNote(event.target.value)} placeholder="填写本次收款说明，不修改原订单备注"/></label>
       <ReceiptVoucherUpload value={attachments} onChange={setAttachments} disabled={saving||checkingSubmission} onBusyChange={setVoucherUploading}/>
       <div className={'receipt-reconciliation '+(received===''?'':reconciled?'is-matched':'is-mismatched')} role="status" aria-live="polite">{received===''?'请填写本次金额，与上方本次付款合计核对。':!receivedValid?'请输入大于零且最多两位小数的金额。':reconciled?'金额核对一致：本次金额与付款合计均为 '+money(totals.payment/100):'金额不一致：本次金额 '+money(Number(received))+'，付款合计 '+money(totals.payment/100)+'，'+(difference>0?'多收 ':'少收 ')+money(Math.abs(difference)/100)}</div>
       {formError&&<p className="system-error" role="alert">{formError}</p>}
-    </div><div className="modal-footer"><button className="secondary" type="button" disabled={saving||voucherUploading} onClick={closeEntry}>{checkingSubmission?'关闭并保留申请':'取消'}</button><button className="primary" type="submit" disabled={saving||voucherUploading||!canRegister||(!checkingSubmission&&(Boolean(problem)||!selected.length||!reconciled))}>{saving?'正在提交…':voucherUploading?'正在上传凭证…':checkingSubmission?'核对原收款申请':approvalRequired?'提交并发起审批':'确认收款'}</button></div>
+    </div><div className="modal-footer"><button className="secondary" type="button" disabled={saving||voucherUploading} onClick={closeEntry}>{checkingSubmission?'关闭并保留申请':'取消'}</button><button className="primary" type="submit" disabled={saving||voucherUploading||!canRegister||(!checkingSubmission&&(Boolean(problem)||Boolean(methodProblem)||!selected.length||!reconciled))}>{saving?'正在提交…':voucherUploading?'正在上传凭证…':checkingSubmission?'核对原收款申请':approvalRequired?'提交并发起审批':'确认收款'}</button></div>
   </form></DialogLayer>;
   if(entryOnly)return receiptForm;
   return <>

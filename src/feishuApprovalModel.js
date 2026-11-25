@@ -117,7 +117,7 @@ export function approvalDraftValues(config, order, fields) {
     }
   }
   if (order.type === '预收款订单' && config?.prepaymentReceiptForm)
-    for (const key of ['receiptDate', 'receiptCategory']) result[key] = String(fields?.get(key) ?? '');
+    result.receiptDate = String(fields?.get('receiptDate') ?? '');
   return result;
 }
 
@@ -274,13 +274,10 @@ export function approvalDetails(config, order, fields) {
   }
   if (order.type !== '预收款订单' || !config?.prepaymentReceiptForm) return {};
   const receiptDate = input.receiptDate.trim();
-  const receiptCategory = input.receiptCategory.trim();
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(receiptDate) ? new Date(receiptDate + 'T00:00:00Z') : null;
   if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== receiptDate)
     throw Error('请选择有效的收款发生日期');
-  if (!receiptCategory || !(config.prepaymentReceiptCategories ?? []).includes(receiptCategory))
-    throw Error('请选择飞书审批模板支持的收款类别');
-  return {receiptDate, receiptCategory};
+  return {receiptDate};
 }
 
 export function approvalTime(value) {

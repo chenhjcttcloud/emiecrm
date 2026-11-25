@@ -94,6 +94,34 @@ class FeishuSalesApprovalDatabaseTest {
     verify(client).create(eq("fixture-template"), eq("ou_sales"), eq(savedUuid), any(ArrayNode.class));
   }
 
+  @ParameterizedTest @ValueSource(strings={"销售订单", "预收款订单"})
+  void reservedShortNumberIsClaimedAndFrozenIntoTheNativeApprovalWithoutCreatingCash(String type) throws Exception {
+    var numbering = new OrderNumberService(db, manager);
+    var reserved = numbering.reserve("short-number-native-fixture", writer);
+    String number = reserved.path("orderNumber").asText();
+    assertTrue(OrderNumberService.isShortNumber(number));
+    var input = request();
+    order(input.path("data")).put("id", number).put("type", type);
+    if ("预收款订单".equals(type)) {
+      jdbc.update("INSERT INTO payment_methods(id,name,status) VALUES('custom','测试配置方式','启用')");
+      order(input.path("data")).put("method", "测试配置方式");
+    }
+    service.createAndSubmit(number, input, writer);
+    var before = db.parse(jdbc.queryForObject("SELECT payload FROM feishu_order_approvals WHERE order_id=?", String.class, number));
+    assertEquals(number, before.path("orderSnapshot").path("id").asText());
+    assertTrue(before.path("form").toString().contains(number));
+    runWorkers();
+    var persisted = db.parse(jdbc.queryForObject("SELECT payload FROM feishu_order_approvals WHERE order_id=?", String.class, number));
+    assertEquals("PENDING", persisted.path("status").asText());
+    assertEquals(before.path("uuid"), persisted.path("uuid"));
+    assertEquals(number, numbering.reserve("short-number-native-fixture", writer).path("orderNumber").asText());
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM receipts", Integer.class));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM jst_shipments", Integer.class));
+    var retryBody = input.deepCopy();
+    service.createAndSubmit(number, retryBody, writer);
+    verify(client, times(1)).create(eq("fixture-template"), eq("ou_sales"), eq(before.path("uuid").asText()), any(ArrayNode.class));
+  }
+
   @Test void independentCreditIntentCommitsBeforeNativeApprovalAndCannotBeErasedByRestore() throws Exception {
     var request=request();
     order(request.path("data")).putObject("approvalDraft").put("creditFulfillment",true).put("shopId","15").put("shopName","店铺")
@@ -515,8 +543,10 @@ class FeishuSalesApprovalDatabaseTest {
   @Test void actualPrepaymentTemplateUsesTheBoundOwnerAndDoesNotRecordAReceipt() throws Exception {
     when(client.definition("fixture-template")).thenReturn(FeishuDomesticApprovalTemplateTest.definition("prepayment"));
     jdbc.update("INSERT INTO user_profiles(name,display_name,status) VALUES('sales','销售员','启用')");
-    var input = request(); order(input.path("data")).put("type", "预收款订单").put("total", 60).putArray("items");
-    input.putObject("approval").put("receiptDate", "2026-11-23").put("receiptCategory", "销售收入");
+    jdbc.update("INSERT INTO payment_methods(id,name,status) VALUES('custom','自定义对公账户','启用')");
+    var input = request(); order(input.path("data")).put("type", "预收款订单").put("total", 60)
+        .put("method", "自定义对公账户").putArray("items");
+    input.putObject("approval").put("receiptDate", "2026-11-23");
     service.createAndSubmit("o1", input, writer); runWorkers();
     when(client.instance("fixture-instance")).thenReturn(instance(record(), "APPROVED"));
     service.sync("o1", writer);
@@ -524,6 +554,10 @@ class FeishuSalesApprovalDatabaseTest {
     assertEquals(60, currentOrder().path("total").asInt());
     assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM receipts", Integer.class));
     assertTrue(record().path("orderSnapshot").path("items").isEmpty());
+    assertEquals("自定义对公账户", record().path("orderSnapshot").path("method").asText());
+    var forms = org.mockito.ArgumentCaptor.forClass(ArrayNode.class);
+    verify(client).create(eq("fixture-template"), eq("ou_sales"), anyString(), forms.capture());
+    assertTrue(forms.getValue().toString().contains("收款方式：自定义对公账户"));
   }
 
   @Test void schedulerResumesExpiredClaimsUsingThePersistedUuid() throws Exception {
@@ -603,6 +637,7 @@ class FeishuSalesApprovalDatabaseTest {
   }
 
   private ObjectNode prepaymentVoucherRequest(int count) throws Exception {
+    jdbc.update("INSERT INTO payment_methods(id,name,status) VALUES('bank','银行转账','启用')");
     var assets = new AssetService(db);
     business = new BusinessService(db, assets);
     service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor);
@@ -610,7 +645,7 @@ class FeishuSalesApprovalDatabaseTest {
     definition.withArray("form").addObject().put("id","voucher").put("name","收款凭证").put("type","attachmentV2").put("required",false);
     when(client.definition("fixture-template")).thenReturn(definition);
     var input = request(); var draft = order(input.path("data"));
-    draft.put("type","预收款订单").put("total",60);
+    draft.put("type","预收款订单").put("total",60).put("method","银行转账");
     var images=draft.putArray("attachments");
     for(int i=0;i<count;i++) {
       byte[] png={(byte)137,80,78,71,13,10,26,10,(byte)i};
@@ -642,6 +677,26 @@ class FeishuSalesApprovalDatabaseTest {
     verify(client,times(1)).uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class));
   }
 
+  @ParameterizedTest @ValueSource(strings={"missing", "disabled", "unconfigured", "writeoff", "number"})
+  void newPrepaymentsRequireAnExplicitEnabledConfiguredPaymentMethod(String invalid) throws Exception {
+    var input = prepaymentVoucherRequest(0);
+    var draft = order(input.path("data"));
+    switch (invalid) {
+      case "missing" -> draft.remove("method");
+      case "disabled" -> jdbc.update("UPDATE payment_methods SET status='停用' WHERE id='bank'");
+      case "unconfigured" -> draft.put("method", "未配置方式");
+      case "writeoff" -> draft.put("method", "预收款核销");
+      case "number" -> draft.put("method", 123);
+    }
+    var before = db.state(false).deepCopy();
+    assertTrue(assertThrows(ApiException.class, () -> service.createAndSubmit("o1", input, writer))
+        .getMessage().contains("收款方式"));
+    assertEquals(before, db.state(false));
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM feishu_order_approvals", Integer.class));
+    verify(client, never()).create(any(), any(), any(), any());
+    verify(client, never()).uploadFile(anyString(), anyString(), anyString(), any(byte[].class));
+  }
+
   @Test void partialVoucherUploadFailureCanRetryTheSamePrepaymentWithoutReuploadingSuccessfulImages() throws Exception {
     var input=prepaymentVoucherRequest(2);
     when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
@@ -663,7 +718,7 @@ class FeishuSalesApprovalDatabaseTest {
     assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM receipts",Integer.class));
   }
 
-  @ParameterizedTest @ValueSource(strings={"amount", "voucher", "note"})
+  @ParameterizedTest @ValueSource(strings={"amount", "voucher", "note", "method"})
   void failedVoucherPreparationCannotApproveChangedPrepaymentContentsUsingTheOldForm(String changed) throws Exception {
     var input=prepaymentVoucherRequest(1);
     when(client.uploadFile(anyString(),anyString(),anyString(),any(byte[].class))).thenThrow(new ApiException("isolated upload failure"));
@@ -673,6 +728,7 @@ class FeishuSalesApprovalDatabaseTest {
     var edited=stateBody();
     if(changed.equals("amount"))order(edited.path("data")).put("total",61);
     else if(changed.equals("voucher"))order(edited.path("data")).putArray("attachments");
+    else if(changed.equals("method"))order(edited.path("data")).put("method","修改后的收款方式");
     else order(edited.path("data")).put("note","新申请说明");
     new TransactionTemplate(manager).executeWithoutResult(tx->business.save(edited,writer));
     assertFalse(service.list(writer).getFirst().path("canRetryOriginal").asBoolean());
@@ -691,6 +747,7 @@ class FeishuSalesApprovalDatabaseTest {
     service.createAndSubmit("o1",input,writer);var uuid=record().path("uuid").asText();runWorkers();
     assertEquals("UNKNOWN",record().path("status").asText());
     var form=record().path("form").deepCopy();var evidence=record().path(FeishuApprovalEvidence.FIELD).deepCopy();
+    jdbc.update("UPDATE payment_methods SET status='停用',name='已改名方式' WHERE id='bank'");
     service.submit("o1",mapper.createObjectNode().put("retryOriginal",true).put("originalVersion",uuid),writer);
     assertEquals("PENDING",record().path("status").asText());
     assertEquals(evidence,record().path(FeishuApprovalEvidence.FIELD));
@@ -702,7 +759,7 @@ class FeishuSalesApprovalDatabaseTest {
 
   @Test void optionalPrepaymentProductsStayIndependentAndNewPaymentsSaveSnapshots() throws Exception {
     jdbc.update("INSERT INTO payment_methods(id,name,status) VALUES('bank','银行转账','启用')");
-    var request = request(); order(request.path("data")).put("type", "预收款订单").put("total", 60);
+    var request = request(); order(request.path("data")).put("type", "预收款订单").put("total", 60).put("method", "银行转账");
     service.createAndSubmit("o1", request, writer); runWorkers();
     when(client.instance("fixture-instance")).thenReturn(instance(record(), "APPROVED")); service.sync("o1", writer);
     var payment = stateBody(); order(payment.path("data")).put("paid", 20).put("method", "银行转账");

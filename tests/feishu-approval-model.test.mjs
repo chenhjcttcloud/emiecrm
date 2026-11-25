@@ -114,15 +114,19 @@ test('Feishu links only accept instance IDs and timestamps render in Shanghai', 
   assert.equal(approvalTime('bad'), '');
 });
 
-test('receipt style prepayment fields use explicit valid user choices', () => {
+test('prepayment requests keep the date and omit the server-managed receipt category', () => {
   const config = {...configured, prepaymentReceiptForm: true, prepaymentReceiptCategories: ['销售收入', '其他收入']};
   const deposit = {...order, type: '预收款订单'};
   const fields = values => new Map(Object.entries(values));
   assert.throws(() => approvalDetails(config, deposit, fields({})), /发生日期/);
   assert.throws(() => approvalDetails(config, deposit, fields({receiptDate: '2026-02-30', receiptCategory: '销售收入'})), /发生日期/);
-  assert.throws(() => approvalDetails(config, deposit, fields({receiptDate: '2026-11-23', receiptCategory: '未配置类别'})), /收款类别/);
+  assert.deepEqual(approvalDetails(config, deposit, fields({receiptDate: '2026-11-23'})), {receiptDate: '2026-11-23'});
   assert.deepEqual(approvalDetails(config, deposit, fields({receiptDate: '2026-11-23', receiptCategory: '销售收入'})),
-    {receiptDate: '2026-11-23', receiptCategory: '销售收入'});
+    {receiptDate: '2026-11-23'});
+  const historical={...deposit,approvalDraft:{receiptCategory:'历史原始类别'}};
+  const saved=approvalDraftValues(config,historical,fields({receiptDate:'2026-11-23'}));
+  assert.deepEqual(saved,{receiptDate:'2026-11-23'});
+  assert.equal(historical.approvalDraft.receiptCategory,'历史原始类别');
   assert.deepEqual(approvalDetails(config, order, fields({})), {});
   assert.deepEqual(approvalDetails(configured, deposit, fields({})), {});
 });

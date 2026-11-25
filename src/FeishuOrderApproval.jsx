@@ -1,6 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
 import recipientRegions from './chinaAdministrativeRegions.json';
-import OrderSelect from './OrderSelect';
 import {approvalInstanceUrl, approvalLabels, approvalStatus, approvalTime, canSubmitApproval,
   completedApproval, isApprovalOrder, isCreditSalesOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
 import './feishuApproval.css';
@@ -196,10 +195,7 @@ export function ApprovalFormFields({order, config, disabled, customer, products 
       <input type="date" name="receiptDate" aria-label="收款发生日期" required disabled={disabled}
         value={draft.receiptDate || ''} onChange={event => change('receiptDate', event.target.value)}/>
     </label>
-    <OrderSelect name="receiptCategory" label="收款类别" required disabled={disabled} placeholder="请选择收款类别"
-      value={draft.receiptCategory || ''} onChange={value => change('receiptCategory', value)}
-      options={(config.prepaymentReceiptCategories ?? []).map(value => ({value, label: value}))}/>
-    <p className="form-hint">请确认本次审批的发生日期和类别，审批通过后仍需登记实际到账。</p>
+    <p className="form-hint">请确认本次审批的发生日期，审批通过后仍需登记实际到账。</p>
   </div>;
 }
 

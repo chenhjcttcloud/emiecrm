@@ -36,7 +36,7 @@ class FeishuPrepaymentApprovalFormTest {
         ]}
         """);
     order = (ObjectNode) mapper.readTree("""
-        {"id":"deposit-1","type":"预收款订单","owner":"订单签单人","customer":"客户甲","total":300,
+        {"id":"deposit-1","type":"预收款订单","owner":"订单签单人","customer":"客户甲","total":300,"method":"配置项：国内对公账户",
          "items":[{"product":"p1","qty":1,"price":1000},{"product":"p2","qty":1,"price":200}],"note":"客户定金"}
         """);
     products = mapper.readTree("""
@@ -65,6 +65,7 @@ class FeishuPrepaymentApprovalFormTest {
     assertEquals("income-sales", field(form, "category").path("value").asText());
     var project = field(form, "project").path("value").asText();
     assertTrue(project.contains("预收款金额：300.00"));
+    assertTrue(project.contains("收款方式：配置项：国内对公账户"));
     assertTrue(project.contains("商品合计：1200.00"));
     assertTrue(project.contains("SKU-1") && project.contains("SKU-2") && project.contains("白色"));
     assertEquals("ou_bound_owner", field(form, "owner").path("open_ids").get(0).asText());
@@ -84,11 +85,22 @@ class FeishuPrepaymentApprovalFormTest {
   }
 
   @Test void ignoresClientSuppliedMoneyCustomerAndOwnerInFavorOfSavedOrderAndBinding() {
-    input.put("total", 999).put("customer", "伪造客户").put("ownerOpenId", "ou_forged");
+    input.put("total", 999).put("customer", "伪造客户").put("ownerOpenId", "ou_forged").put("method", "伪造收款方式");
     var form = build();
     assertEquals(300, field(form, "amount").path("value").asInt());
     assertEquals("客户甲", field(form, "customer").path("value").asText());
     assertEquals("ou_bound_owner", field(form, "owner").path("open_ids").get(0).asText());
+    assertTrue(field(form, "project").path("value").asText().contains("收款方式：配置项：国内对公账户"));
+    assertFalse(form.toString().contains("伪造收款方式"));
+  }
+
+  @Test void displaysTheSavedConfiguredPaymentMethodAndKeepsMissingLegacyMethodsUnspecified() {
+    order.put("method", "自定义配置的收款账户");
+    assertTrue(field(build(), "project").path("value").asText().contains("收款方式：自定义配置的收款账户"));
+    order.remove("method");
+    assertFalse(field(build(), "project").path("value").asText().contains("收款方式："));
+    order.putObject("method").put("name", "不能隐式读取对象");
+    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("收款方式"));
   }
 
   @Test void allowsAnUnspecifiedProductListWithoutInventingAProduct() {
@@ -99,13 +111,27 @@ class FeishuPrepaymentApprovalFormTest {
     assertFalse(project.contains("\n商品合计："));
   }
 
-  @Test void validatesTheExplicitBusinessDateAndCategory() {
+  @Test void validatesTheExplicitBusinessDateWithoutRequiringAClientCategory() {
     input.put("receiptDate", "2026-02-30");
     assertEquals(422, assertThrows(ApiException.class, this::build).status());
     input.put("receiptDate", "2026-11-18").put("receiptCategory", "不支持的类别");
-    assertEquals(422, assertThrows(ApiException.class, this::build).status());
+    assertEquals("income-sales", field(build(), "category").path("value").asText());
     input.remove("receiptCategory");
-    assertEquals(422, assertThrows(ApiException.class, this::build).status());
+    assertEquals("income-sales", field(build(), "category").path("value").asText());
+    input.putObject("receiptCategory").put("forged", "其他收入");
+    assertEquals("income-sales", field(build(), "category").path("value").asText());
+  }
+
+  @Test void automaticSalesCategoryUsesTheCurrentTemplateValueAndDoesNotMutateInput() {
+    var options = ((ObjectNode) field(definition.path("form"), "category")).withArray("option");
+    var sales = (ObjectNode) options.remove(0);
+    options.add(sales.put("value", "$i18n-sales-current/value"));
+    input.put("receiptCategory", "其他收入");
+    var originalInput = input.deepCopy(); var originalOrder = order.deepCopy();
+    assertEquals("$i18n-sales-current/value", field(build(), "category").path("value").asText());
+    assertEquals(originalInput, input); assertEquals(originalOrder, order);
+    options.remove(1);
+    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("销售收入"));
   }
 
   @Test void requiresTheAuthoritativeOwnerBinding() {

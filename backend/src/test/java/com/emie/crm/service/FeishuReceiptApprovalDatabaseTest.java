@@ -146,6 +146,26 @@ class FeishuReceiptApprovalDatabaseTest {
     return input;
   }
 
+  @ParameterizedTest @ValueSource(strings={"omit","服务收入","forged-client-value"})
+  void aNewReceiptAlwaysUsesTheRealSalesIncomeOptionRegardlessOfTheClientCategory(String requested) throws Exception {
+    var template=definition();
+    var options=((ObjectNode)template.at("/form/3")).putArray("option");
+    options.addObject().put("text","服务收入").put("value","opaque-native-service-v8");
+    options.addObject().put("text","销售收入").put("value","opaque-native-sales-v8");
+    when(client.definition(CODE)).thenReturn(template);
+    String id="automatic-receipt-category";var input=input(id,false);
+    if(requested.equals("omit"))input.remove("receiptCategory");else input.put("receiptCategory",requested);
+    var result=first.create(input,finance).path("approval");
+    assertEquals("PENDING",result.path("status").asText());
+    assertEquals("销售收入",result.path("receiptCategory").asText());assertEquals("销售收入",record(id).path("receiptCategory").asText());
+    var captured=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client).create(eq(CODE),eq("ou_finance"),eq(record(id).path("uuid").asText()),captured.capture());
+    JsonNode category=null;
+    for(var field:captured.getValue())if(field.path("id").asText().equals("category"))category=field;
+    assertNotNull(category);assertEquals("opaque-native-sales-v8",category.path("value").asText());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
   private ObjectNode record(String id) {
     return (ObjectNode) db.parse(jdbc.queryForObject("SELECT payload FROM feishu_receipt_approvals WHERE id=?", String.class, id));
   }
@@ -498,6 +518,74 @@ class FeishuReceiptApprovalDatabaseTest {
     verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
     verify(client,never()).create(anyString(),anyString(),anyString(),any());
     assertTrue(db.documents("receipts",false,0).isEmpty());
+  }
+
+  private void changeBankConfiguration(String change) {
+    var input=mapper.createObjectNode().put("id","bank").put("name",change.equals("rename")?"新收款账户":"银行转账")
+        .put("status",change.equals("disable")?"停用":"启用").put("sortOrder",1);
+    var admin=new Actor("admin","管理员",Set.of("system.manage"));
+    new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(status->
+        new PaymentMethodService(db).save(input,admin));
+  }
+
+  @ParameterizedTest @ValueSource(strings={"rename","disable"})
+  void aVerifiedPendingReceiptBooksItsFrozenMethodAfterTheConfigurationChanges(String change) {
+    String id="pending-before-method-change";
+    var input=input(id,false).put("amount",40);((ObjectNode)input.at("/allocations/0")).put("amount",40);
+    assertEquals("PENDING",first.create(input,finance).at("/approval/status").asText());
+    var pending=record(id);changeBankConfiguration(change);
+    assertEquals("银行转账",record(id).path("method").asText());
+    when(client.instance(pending.path("instanceCode").asText())).thenReturn(approvedInstance(pending));
+    var approved=second.sync(id,reader).path("approval");
+    assertTrue(approved.path("booked").asBoolean(),approved.path("bookingError").asText());
+    var ledger=db.documents("receipts",false,0);assertEquals(1,ledger.size());
+    assertEquals("银行转账",ledger.getFirst().path("method").asText());assertEquals(40,ledger.getFirst().path("amount").asInt());
+    assertEquals(40,db.state(false).at("/orders/0/paid").asInt());
+    var next=input("new-old-method",false).put("amount",20);((ObjectNode)next.at("/allocations/0")).put("amount",20);
+    clearInvocations(client);
+    assertThrows(ApiException.class,()->first.create(next,finance));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    assertEquals(1,db.documents("receipts",false,0).size());assertEquals(40,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  @ParameterizedTest @ValueSource(strings={"rename","disable"})
+  void anUnsentFailedReceiptMustRevalidateCurrentEnabledMethodsBeforeResumingItsFiles(String change) throws Exception {
+    String id="method-changed-during-file-failure";var input=voucherRequest(id,1);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
+        .thenThrow(new ApiException("isolated file failure"));
+    assertEquals("FAILED",first.create(input,finance).at("/approval/status").asText());
+    var failed=record(id).deepCopy();changeBankConfiguration(change);clearInvocations(client);
+    assertThrows(ApiException.class,()->second.retry(id,finance));
+    assertEquals(failed,record(id));
+    verify(client,never()).uploadFile(anyString(),anyString(),anyString(),any(byte[].class));
+    verify(client,never()).create(anyString(),anyString(),anyString(),any());
+    assertTrue(db.documents("receipts",false,0).isEmpty());assertEquals(0,db.state(false).at("/orders/0/paid").asInt());
+  }
+
+  @Test void legacyFailedVoucherPreparationKeepsItsOriginalCategoryAndOpaqueFormWhenResumed() throws Exception {
+    String id="legacy-category-file-retry";var input=voucherRequest(id,1);
+    when(client.uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class)))
+        .thenThrow(new ApiException("isolated upload failure"));
+    assertEquals("FAILED",first.create(input,finance).at("/approval/status").asText());
+    var legacy=record(id);legacy.put("receiptCategory","服务收入");
+    for(var field:legacy.path("form"))if(field.path("id").asText().equals("category"))
+      ((ObjectNode)field).put("value","legacy-opaque-service-v1");
+    jdbc.update("UPDATE feishu_receipt_approvals SET payload=? WHERE id=?",db.encode(legacy),id);
+    var original=record(id);String uuid=original.path("uuid").asText();
+    var expectedForm=(com.fasterxml.jackson.databind.node.ArrayNode)original.path("form").deepCopy();
+    for(var field:expectedForm)if(field.path("id").asText().equals("voucher"))
+      ((ObjectNode)field).putArray("value").add("file-legacy-preserved");
+    doReturn("file-legacy-preserved").when(client).uploadFile(anyString(),eq("attachment"),eq("image/png"),any(byte[].class));
+    clearInvocations(client);
+    when(client.definition(anyString())).thenThrow(new ApiException("must not rebuild the original template"));
+    var resumed=second.retry(id,finance).path("approval");
+    assertEquals("PENDING",resumed.path("status").asText());assertEquals("服务收入",resumed.path("receiptCategory").asText());
+    assertEquals(uuid,record(id).path("uuid").asText());assertEquals("服务收入",record(id).path("receiptCategory").asText());
+    var captured=org.mockito.ArgumentCaptor.forClass(com.fasterxml.jackson.databind.node.ArrayNode.class);
+    verify(client).create(eq(CODE),eq("ou_finance"),eq(uuid),captured.capture());assertEquals(expectedForm,captured.getValue());
+    assertEquals(original.path("attachments"),record(id).path("attachments"));
+    verify(client,never()).definition(anyString());
+    assertEquals(0,db.state(false).at("/orders/0/paid").asInt());assertTrue(db.documents("receipts",false,0).isEmpty());
   }
 
   private void creditFixture() {

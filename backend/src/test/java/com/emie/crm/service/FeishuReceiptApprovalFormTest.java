@@ -106,12 +106,23 @@ class FeishuReceiptApprovalFormTest {
     assertEquals("updated-sales-option", field(build(), "category").path("value").asText());
   }
 
-  @Test void rejectsMissingUnsupportedOrAmbiguousCategories() {
+  @Test void ignoresMissingOrForgedClientCategoriesButRejectsAmbiguousTemplateCategories() {
     batch.put("receiptCategory", "其他收入");
-    assertEquals(422, assertThrows(ApiException.class, this::build).status());
-    batch.put("receiptCategory", "销售收入");
+    assertEquals("sales", field(build(), "category").path("value").asText());
+    batch.remove("receiptCategory");
+    assertEquals("sales", field(build(), "category").path("value").asText());
+    batch.putArray("receiptCategory").add("服务收入");
+    var original = batch.deepCopy();
+    assertEquals("sales", field(build(), "category").path("value").asText());
+    assertEquals(original, batch);
     ((ArrayNode) widget("category").path("option")).addObject().put("text", "销售收入").put("value", "duplicate-sales");
     assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("重复"));
+  }
+
+  @Test void aTemplateWithoutSalesIncomeCannotSilentlyUseItsFirstOrDefaultCategory() {
+    widget("category").withArray("option").remove(1);
+    widget("category").put("enable_default_value", true).put("widget_default_value", "services");
+    assertTrue(assertThrows(ApiException.class, this::build).getMessage().contains("销售收入"));
   }
 
   @Test void validatesTheBusinessDateStrictly() {

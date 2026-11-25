@@ -41,6 +41,24 @@ public class BusinessService {
 
   ArrayNode receiptEvidence(JsonNode value) { return ReceiptEvidence.validate(assets, value); }
 
+  /** New cash proposals use configured choices; a write-off remains its own financial operation. */
+  String requireEnabledPaymentMethod(JsonNode value) {
+    String method = paymentMethodName(value);
+    require(!"预收款核销".equals(method)
+        && !db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'", method).isEmpty(),
+        "请选择已启用的收款方式");
+    return method;
+  }
+
+  private static String paymentMethodName(JsonNode value) {
+    require(value.isTextual() && !value.asText().isBlank() && value.asText().length() <= 50
+        && value.asText().chars().noneMatch(Character::isISOControl), "请选择有效的收款方式");
+    return value.asText();
+  }
+
+  /** Constructed only after locking and matching the complete persisted APPROVED receipt batch. */
+  private record VerifiedReceipt(JsonNode batch) {}
+
   public JsonNode state() {
     var state = db.state(false);
     if (!state.isNull()) normalizeOrders(state, state);
@@ -355,7 +373,7 @@ public class BusinessService {
     body.set("receiptVerification", db.object().put("amount", allocated).put("customerId", batch.path("customerId").asText())
         .put("customer", batch.path("customer").asText()).put("method", batch.path("method").asText()));
     ((ObjectNode) body.path("receiptVerification")).put("receivedOn", batch.path("receiptDate").asText());
-    return save(body, actor, false, "", batch);
+    return save(body, actor, false, "", new VerifiedReceipt(verified));
   }
 
   private boolean sameReceiptExecution(JsonNode current, JsonNode snapshot) {
@@ -405,9 +423,10 @@ public class BusinessService {
     return save(body, actor, migration, submittingOrderId, null);
   }
 
-  private JsonNode save(JsonNode body, Actor actor, boolean migration, String submittingOrderId, JsonNode approvedReceipt) {
+  private JsonNode save(JsonNode body, Actor actor, boolean migration, String submittingOrderId, VerifiedReceipt verifiedReceipt) {
     actor.require("business.read");
     actor.require("business.write");
+    JsonNode approvedReceipt = verifiedReceipt == null ? null : verifiedReceipt.batch();
     var old = db.state(true);
     if (!old.isNull() && !same(body.path("revision"), old.path("revision")))
       throw new ApiException(409, "数据已由其他操作更新，请刷新后重试");
@@ -418,6 +437,7 @@ public class BusinessService {
         ? body.path("receiptVerification").path("attachments") : approvedReceipt.path("attachments");
     ArrayNode evidence = receiptImages.isMissingNode() || receiptImages.isNull() ? null : receiptEvidence(receiptImages);
     SettlementOrderNumbers.protect(old, next, false);
+    OrderNumberService.requireNewNumbers(db, old, next, actor);
     require(next.path("products").equals(old.path("products")) || (old.isNull() && next.path("products").isEmpty()),
         "商品资料由聚水潭管理，请使用同步商品，不能在CRM新增、编辑或删除");
     // Catalog ownership and synchronization metadata cannot be replaced through a state save.
@@ -572,9 +592,12 @@ public class BusinessService {
               || !historical.path("customer").asText().equals(entry.path("customer").asText()),
               "该客户有待确认归属的历史收款，请先核对流水");
         require(entry.path("status").asText().equals("已批准"), "订单需先批准");
-        String method = entry.path("method").asText("银行转账");
+        String method = paymentMethodName(entry.path("method"));
         if (settlement) require(!method.equals("预收款核销"), "结算补录须登记实际到账的收款方式");
-        require(method.equals("预收款核销") || !db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'", method).isEmpty(), "请选择已启用的收款方式");
+        if (!method.equals("预收款核销")) {
+          if (verifiedReceipt == null) requireEnabledPaymentMethod(entry.path("method"));
+          else require(entry.path("method").equals(approvedReceipt.path("method")), "收款方式与已审批的原申请不一致");
+        }
         require(
             !(entry.path("type").asText().equals("预收款订单") && method.equals("预收款核销")),
             "预收款订单不能使用核销方式");
@@ -820,6 +843,7 @@ public class BusinessService {
     protectShipmentRestore(body);
     ObjectNode next = body.path("state").deepCopy();
     SettlementOrderNumbers.protect(old, next, true);
+    OrderNumberService.requireRestoredNumbers(db, next);
     protectLegacyRestore(old, next, body.path("receipts"));
     var restoredOrders = index(next.path("orders"));
     protectCanceledOrders(index(old.path("orders")), restoredOrders, true);
@@ -1142,6 +1166,8 @@ public class BusinessService {
       if (!Set.of("QUEUED", "SUBMITTING", "UNKNOWN", "PENDING", "APPROVED").contains(row.get("status").toString())) continue;
       for (String field : APPROVAL_FIELDS)
         require(same(previous.path(field), next.path(field)), "有飞书审批记录的订单不能修改审批状态及提交内容");
+      if (!"APPROVED".equals(row.get("status").toString()) && "预收款订单".equals(previous.path("type").asText()))
+        require(same(previous.path("method"), next.path("method")), "预收款审批尚未完成，不能修改已提交的收款方式");
     }
   }
 

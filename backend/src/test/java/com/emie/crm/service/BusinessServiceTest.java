@@ -114,6 +114,39 @@ class BusinessServiceTest {
     assertEquals("原地址", order(saved).path("approvalDraft").path("recipientAddress").asText());
   }
 
+  @ParameterizedTest @ValueSource(strings={"QUEUED","SUBMITTING","UNKNOWN","PENDING"})
+  void anActivePrepaymentApprovalKeepsItsSubmittedMethodThroughSaveAndRestore(String status) {
+    order(stored).put("type","预收款订单").put("status","审批中").put("method","银行转账");
+    when(db.rows("SELECT order_id,status FROM feishu_order_approvals"))
+        .thenReturn(List.of(Map.of("order_id","o1","status",status)));
+    var changed=draft();order(changed).put("method","另一个账户");
+    assertTrue(assertThrows(ApiException.class,()->save(changed,admin)).getMessage().contains("收款方式"));
+    var backup=mapper.createObjectNode().put("version",1);backup.set("state",changed);backup.putArray("receipts");
+    assertTrue(assertThrows(ApiException.class,()->service.restore(backup,admin)).getMessage().contains("收款方式"));
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+    assertEquals("银行转账",order(stored).path("method").asText());
+  }
+
+  @Test void anApprovedPrepaymentCanRecordActualCashUsingAnotherConfiguredMethod() {
+    order(stored).put("type","预收款订单").put("method","银行转账");
+    when(db.rows("SELECT order_id,status FROM feishu_order_approvals"))
+        .thenReturn(List.of(Map.of("order_id","o1","status","APPROVED")));
+    var changed=draft();order(changed).put("method","另一个账户").put("paid",10);
+    var saved=save(changed,admin);
+    assertEquals("另一个账户",order(saved).path("method").asText());assertEquals(10,order(saved).path("paid").asInt());
+    assertEquals(1,history.size());assertEquals("另一个账户",history.getFirst().path("method").asText());
+    assertEquals(10,saved.at("/customers/0/balance").asInt());
+  }
+
+  @Test void aFailedPrepaymentCanChooseAnotherMethodBeforeANewSubmission() {
+    order(stored).put("type","预收款订单").put("status","草稿").put("method","银行转账");
+    when(db.rows("SELECT order_id,status FROM feishu_order_approvals"))
+        .thenReturn(List.of(Map.of("order_id","o1","status","FAILED")));
+    var changed=draft();order(changed).put("method","另一个账户");
+    assertEquals("另一个账户",order(save(changed,sales)).path("method").asText());
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+  }
+
   @Test void catalogCannotBeOverwrittenThroughBusinessSave() {
     var next=draft();((ObjectNode)next.path("products").get(0)).put("name","伪造商品");
     var error=assertThrows(ApiException.class,()->save(next,admin));
@@ -226,6 +259,29 @@ class BusinessServiceTest {
     assertThrows(ApiException.class,()->service.save(body,admin));
     assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
     verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+  @Test void aCashReceiptCannotSilentlyDefaultItsMissingMethodToBankTransfer() {
+    var next=draft();order(next).put("paid",10);order(next).remove("method");
+    assertThrows(ApiException.class,()->save(next,admin));
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+  @Test void aClientCannotForgeAnApprovedReceiptToUseADisabledPaymentMethod() {
+    when(db.rows("SELECT id FROM payment_methods WHERE name=? AND status='启用'","旧POS")).thenReturn(List.of());
+    var next=draft();order(next).put("paid",10).put("method","旧POS");
+    var body=mapper.createObjectNode().put("revision",next.path("revision").asLong());body.set("data",next);
+    body.putObject("approvedReceipt").put("status","APPROVED").put("method","旧POS");
+    body.putObject("receiptVerification").put("amount",10).put("customerId","c1").put("customer","客户甲")
+        .put("method","旧POS").putObject("verifiedReceipt").put("status","APPROVED");
+    assertThrows(ApiException.class,()->service.save(body,admin));
+    assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
+    verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
+  }
+  @Test void ordinaryConfiguredPaymentSelectionRejectsWriteOffAndNontextValues() {
+    assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(mapper.getNodeFactory().textNode("预收款核销")));
+    assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(mapper.getNodeFactory().numberNode(123)));
+    assertThrows(ApiException.class,()->service.requireEnabledPaymentMethod(MissingNode.getInstance()));
+    assertEquals("银行转账",service.requireEnabledPaymentMethod(mapper.getNodeFactory().textNode("银行转账")));
   }
   @Test void backupCannotRemoveOrAlterVouchersOnAnExistingDirectReceipt() {
     order(stored).put("paid",10);

@@ -35,6 +35,21 @@ CREATE TABLE IF NOT EXISTS jst_document_purchases(
   PRIMARY KEY(environment,order_id,po_id)
 ) ENGINE=InnoDB;
 INSERT IGNORE INTO state(id,payload) VALUES(1,NULL);
+CREATE TABLE IF NOT EXISTS order_number_reservations(
+  actor_name VARCHAR(191) COLLATE utf8mb4_bin NOT NULL,
+  scope VARCHAR(16) COLLATE utf8mb4_bin NOT NULL,
+  request_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL,
+  number_day DATE NOT NULL,
+  sequence_no BIGINT NOT NULL,
+  order_number VARCHAR(32) COLLATE utf8mb4_bin NOT NULL,
+  order_id VARCHAR(191) COLLATE utf8mb4_bin NOT NULL,
+  consumed BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY(actor_name,scope,request_id),
+  UNIQUE KEY order_number_unique(order_number),
+  UNIQUE KEY order_number_day_sequence(number_day,sequence_no),
+  UNIQUE KEY order_number_order_id(order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS receipts(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(64) NOT NULL UNIQUE,payload LONGTEXT NOT NULL) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS users(name VARCHAR(191) PRIMARY KEY,salt VARCHAR(64) NOT NULL,password VARCHAR(128) NOT NULL,role VARCHAR(32) NOT NULL) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS audit(seq BIGINT AUTO_INCREMENT PRIMARY KEY,id VARCHAR(64) NOT NULL UNIQUE,payload LONGTEXT NOT NULL) ENGINE=InnoDB;

@@ -39,15 +39,7 @@ final class FeishuReceiptApprovalForm {
     } catch (DateTimeParseException error) {
       throw invalid("请选择有效的收款发生日期");
     }
-    String category = text(batch.path("receiptCategory"), "收款类别", 50);
-    String categoryValue = null;
-    for (var option : fields.get("收款类别").path("option")) {
-      if (!category.equals(option.path("text").asText())) continue;
-      if (categoryValue != null) throw invalid("飞书收款审批模板的收款类别重复");
-      categoryValue = option.path("value").asText();
-    }
-    if (categoryValue == null || categoryValue.isBlank())
-      throw invalid("飞书收款审批模板不支持所选收款类别");
+    String categoryValue = FeishuReceiptCategory.salesIncomeValue(fields.get("收款类别"));
     boolean cny = false;
     for (var currency : fields.get("收款金额（元）").path("option").path("currencyRange"))
       cny |= "CNY".equals(currency.asText());

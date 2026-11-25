@@ -113,6 +113,7 @@ public class JushuitanSettlementService {
           .put("status", "审批中").put("created", now).put("updated", now);
       order.putArray("items");
       order.set("settlement", period);
+      order.put("orderNumber", OrderNumberService.reserveForSettlement(db, state, requestId, id, actor));
       next.withArray("orders").insert(0, order);
       SettlementOrderNumbers.assignMissing(next);
       next.put("revision", state.path("revision").asLong() + 1);

@@ -206,12 +206,43 @@ class FeishuSalesApprovalServiceTest {
     assertEquals(true, config.get("salesRecipientRequired"));
     assertEquals(true, config.get("salesDiscountRequired"));
   }
-  @Test void configRecognizesTheActualPrepaymentFormAndAllCategories() throws Exception {
+  @Test void configRecognizesTheActualPrepaymentFormWithItsServerChosenCategory() throws Exception {
     when(client.enabled("预收款订单")).thenReturn(true);
     when(client.definition("template")).thenReturn(FeishuDomesticApprovalTemplateTest.definition("prepayment"));
     var config = service.config(writer);
     assertEquals(true, config.get("prepaymentReceiptForm"));
-    assertEquals(List.of("服务收入", "其他收入", "销售收入"), config.get("prepaymentReceiptCategories"));
+    assertEquals(List.of("销售收入"), config.get("prepaymentReceiptCategories"));
+  }
+  @Test void aPrepaymentTemplateWithoutSalesIncomeIsUnavailableBeforeSubmission() throws Exception {
+    when(client.enabled("预收款订单")).thenReturn(true);
+    var definition = FeishuDomesticApprovalTemplateTest.definition("prepayment");
+    for (var widget : definition.path("form")) if ("收款类别".equals(widget.path("name").asText()))
+      for (var option : widget.path("option")) if ("销售收入".equals(option.path("text").asText()))
+        ((ObjectNode) option).put("text", "服务收入2");
+    when(client.definition("template")).thenReturn(definition);
+    var config = service.config(writer);
+    assertEquals(false, config.get("prepaymentReady"));
+    assertEquals(false, config.get("prepaymentCanSubmit"));
+    assertTrue(config.get("prepaymentMessage").toString().contains("销售收入"));
+  }
+  @Test void legacyPrepaymentTemplateWithoutAReceiptCategoryRemainsAvailable() throws Exception {
+    when(client.enabled("预收款订单")).thenReturn(true);
+    when(client.definition("template")).thenReturn(FeishuApprovalFixtures.definition());
+    var config = service.config(writer);
+    assertEquals(true, config.get("prepaymentReady"));
+    assertEquals(false, config.get("prepaymentReceiptForm"));
+  }
+  @Test void malformedSalesTemplateDoesNotPreventUsingTheValidPrepaymentConfiguration() throws Exception {
+    when(client.enabled(anyString())).thenReturn(true);
+    when(client.approvalCode("销售订单")).thenReturn("broken-sales");
+    when(client.approvalCode("预收款订单")).thenReturn("valid-prepayment");
+    when(client.definition("broken-sales")).thenReturn(mapper.createObjectNode().put("form", "not JSON"));
+    when(client.definition("valid-prepayment")).thenReturn(FeishuDomesticApprovalTemplateTest.definition("prepayment"));
+    var config = service.config(writer);
+    assertEquals(false, config.get("salesReady"));
+    assertEquals(false, config.get("salesCanSubmit"));
+    assertEquals(true, config.get("prepaymentReady"));
+    assertEquals(true, config.get("prepaymentCanSubmit"));
   }
   @Test void flowResolvesUnboundApproversThroughTheDirectory() {
     var remote = instance("PENDING");

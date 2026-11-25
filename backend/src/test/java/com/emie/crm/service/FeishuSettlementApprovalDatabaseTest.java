@@ -99,7 +99,7 @@ class FeishuSettlementApprovalDatabaseTest {
     assertEquals("QUEUED", response.path("approval").path("status").asText());
     assertEquals("审批中", currentOrder().path("status").asText());
     assertEquals("jushuitan-settlement", currentOrder().path("source").asText());
-    assertTrue(currentOrder().path("orderNumber").asText().matches("[0-9]{4}-[0-9]{2}-00000001"));
+    assertEquals(shortPrefix()+"0001", currentOrder().path("orderNumber").asText());
     assertEquals(orderId, currentOrder().path("id").asText());
     assertTrue(currentOrder().path("items").isEmpty());
     assertEquals(1, count("jst_document_sales"));
@@ -246,7 +246,7 @@ class FeishuSettlementApprovalDatabaseTest {
     assertEquals(saved,db.state(false));assertEquals(audits,count("audit"));
     var next=request();next.withArray("sales").removeAll().addObject().put("shopId","7").put("oId","12");
     var response=settlements.create(next,writer);
-    assertTrue(response.path("state").path("orders").get(0).path("orderNumber").asText().endsWith("00000002"));
+    assertEquals(shortPrefix()+"0001",response.path("state").path("orders").get(0).path("orderNumber").asText());
     assertEquals(id,response.path("state").path("orders").get(1).path("id").asText());
   }
 
@@ -288,23 +288,26 @@ class FeishuSettlementApprovalDatabaseTest {
     }
     var numbers=new java.util.HashSet<String>();
     for(var order:db.state(false).path("orders")) numbers.add(order.path("orderNumber").asText());
-    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
-    assertEquals(Set.of(prefix+"00000001",prefix+"00000002"),numbers);
+    String prefix=shortPrefix();
+    assertEquals(Set.of(prefix+"0001",prefix+"0002"),numbers);
     assertEquals(2,count("feishu_order_approvals"));assertEquals(2,count("jst_document_sales"));
   }
 
   @Test void ordinaryOrdersAndSupplementsUseOneSharedNumberSequence() throws Exception {
-    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
-    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000006"),writer));
+    String prefix=shortPrefix();
+    var numbering=new OrderNumberService(db,manager);
+    String firstNumber=numbering.reserve("ordinary-number-request-1",writer).path("orderNumber").asText();
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(firstNumber),writer));
     var first=settlements.create(request(),writer);
-    assertEquals(prefix+"00000007",first.path("state").path("orders").get(0).path("orderNumber").asText());
-    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000008"),writer));
+    assertEquals(prefix+"0002",first.path("state").path("orders").get(0).path("orderNumber").asText());
+    String thirdNumber=numbering.reserve("ordinary-number-request-3",writer).path("orderNumber").asText();
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(thirdNumber),writer));
     var second=request().put("approvalRequestId","42144215-6dfe-4987-8e9b-fc90da4fb346");
     second.withArray("sales").removeAll().addObject().put("shopId","7").put("oId","12");
     settlements.create(second,writer);
     var numbers=new java.util.HashSet<String>();
     for(var order:db.state(false).path("orders")) numbers.add(OrderNumbers.display(order));
-    assertEquals(Set.of(prefix+"00000006",prefix+"00000007",prefix+"00000008",prefix+"00000009"),numbers);
+    assertEquals(Set.of(prefix+"0001",prefix+"0002",prefix+"0003",prefix+"0004"),numbers);
   }
 
   @Test void anOrdinaryOrderCannotUseAnAlreadyAssignedSupplementNumber() throws Exception {
@@ -315,9 +318,12 @@ class FeishuSettlementApprovalDatabaseTest {
   }
 
   @Test void concurrentOrdinaryAndSupplementCreationCannotCommitTheSameNumber() throws Exception {
-    String prefix=java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai"))+"-";
-    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000006"),writer));
-    var ordinary=ordinaryBody(prefix+"00000007");
+    String prefix=shortPrefix();
+    var numbering=new OrderNumberService(db,manager);
+    String firstNumber=numbering.reserve("ordinary-concurrent-request-1",writer).path("orderNumber").asText();
+    new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(firstNumber),writer));
+    String secondNumber=numbering.reserve("ordinary-concurrent-request-2",writer).path("orderNumber").asText();
+    var ordinary=ordinaryBody(secondNumber);
     int ordinaryStatus;
     try(var pool=Executors.newFixedThreadPool(2)) {
       var start=new CountDownLatch(1);
@@ -330,10 +336,15 @@ class FeishuSettlementApprovalDatabaseTest {
       start.countDown();ordinaryStatus=a.get(20,TimeUnit.SECONDS);b.get(20,TimeUnit.SECONDS);
     }
     assertTrue(ordinaryStatus==200||ordinaryStatus==409);
-    if(ordinaryStatus==409) new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(prefix+"00000008"),writer));
+    if(ordinaryStatus==409) new TransactionTemplate(manager).executeWithoutResult(tx->business.save(ordinaryBody(secondNumber),writer));
     var numbers=new java.util.HashSet<String>();
     for(var order:db.state(false).path("orders")) assertTrue(numbers.add(OrderNumbers.display(order)));
-    assertEquals(Set.of(prefix+"00000006",prefix+"00000007",prefix+"00000008"),numbers);
+    assertEquals(Set.of(prefix+"0001",prefix+"0002",prefix+"0003"),numbers);
+  }
+
+  private String shortPrefix() {
+    return "N"+java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"))
+        .format(java.time.format.DateTimeFormatter.ofPattern("yyMMdd"));
   }
 
   @Test void obsoleteSeparateNumbersMigrateWithoutRewritingAnExistingExternalApproval() throws Exception {

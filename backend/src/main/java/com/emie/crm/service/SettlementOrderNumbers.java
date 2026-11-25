@@ -11,7 +11,7 @@ import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Pattern;
 
-/** Supplements share the ordinary order sequence; financial and ERP references retain their original IDs. */
+/** Preserves issued short numbers and the historical supplement backfill sequence without changing link IDs. */
 final class SettlementOrderNumbers {
   private static final ZoneId SHANGHAI = ZoneId.of("Asia/Shanghai");
   private static final Pattern FORMAT = Pattern.compile("([0-9]{4}-[0-9]{2})-([0-9]{8,})");
@@ -21,31 +21,38 @@ final class SettlementOrderNumbers {
 
   static int assignMissing(ObjectNode state) { return assignMissing(state, YearMonth.now(SHANGHAI)); }
 
-  /** Call while holding the state row lock, sharing all standard IDs and assigned business numbers. */
+  /** Call while holding the state row lock, reserving internal IDs and assigned business numbers. */
   static int assignMissing(ObjectNode state, YearMonth fallbackMonth) {
     BigInteger maximum = BigInteger.ZERO;
-    var used = new HashSet<String>();
+    var used = new HashMap<String, JsonNode>();
     var missing = new ArrayList<ObjectNode>();
     var adopting = new ArrayList<ObjectNode>();
     for (var order : state.path("orders")) {
       String id = order.path("id").asText();
+      boolean shortId = id.length() <= 191 && OrderNumberService.isShortNumber(id);
+      require(!id.startsWith("N") || shortId, "订单短编号格式无效");
+      reserve(used, id, order);
       var idMatch = FORMAT.matcher(id);
       boolean standardId = idMatch.matches();
       if (standardId) maximum = maximum.max(new BigInteger(idMatch.group(2)));
       String number = order.path("orderNumber").asText();
       require(!order.has("orderNumber") || order.path("orderNumber").isTextual(), "订单业务编号格式无效");
       boolean settlement = JushuitanDocumentService.isSettlement(order);
+      if (number.startsWith("N")) {
+        require(number.length() <= 191 && OrderNumberService.isShortNumber(number), "订单短编号格式无效");
+        reserve(used, number, order);
+        continue;
+      }
       var legacy = LEGACY_FORMAT.matcher(number);
       if (number.isEmpty() || legacy.matches()) {
         require(number.isEmpty() || settlement, "仅结算补录可迁移旧业务编号");
-        if (settlement && number.isEmpty() && standardId && validMonth(idMatch.group(1))
-            && new BigInteger(idMatch.group(2)).signum() > 0) {
-          reserve(used, id);
+        if (settlement && number.isEmpty() && (shortId || standardId && validMonth(idMatch.group(1))
+            && new BigInteger(idMatch.group(2)).signum() > 0)) {
           adopting.add((ObjectNode) order);
         } else if (settlement) {
           if (!number.isEmpty()) require(validMonth(legacy.group(1)), "订单编号月份无效");
           missing.add((ObjectNode) order);
-        } else if (standardId) reserve(used, id);
+        }
         continue;
       }
       require(settlement, "普通订单沿用现有订单编号");
@@ -54,7 +61,7 @@ final class SettlementOrderNumbers {
       require(validMonth(match.group(1)), "订单编号月份无效");
       var sequence = new BigInteger(match.group(2));
       require(sequence.signum() > 0, "订单业务编号流水无效");
-      reserve(used, number);
+      reserve(used, number, order);
       maximum = maximum.max(sequence);
     }
     missing.sort(Comparator.comparing(SettlementOrderNumbers::createdAt).thenComparing(o -> o.path("id").asText()));
@@ -65,7 +72,7 @@ final class SettlementOrderNumbers {
       String digits = maximum.toString();
       String number = month + "-" + "0".repeat(Math.max(0, 8 - digits.length())) + digits;
       require(number.length() <= 191, "订单编号流水已超出范围");
-      reserve(used, number);
+      reserve(used, number, order);
       order.put("orderNumber", number);
     }
     for (var order : adopting) order.put("orderNumber", order.path("id").asText());
@@ -77,8 +84,10 @@ final class SettlementOrderNumbers {
     catch (DateTimeParseException failure) { return false; }
   }
 
-  private static void reserve(Set<String> used, String number) {
-    if (!used.add(number)) throw new com.emie.crm.common.exception.ApiException(409, "订单编号已被其他订单使用，请刷新后重新创建");
+  private static void reserve(Map<String, JsonNode> used, String number, JsonNode owner) {
+    var previous = used.putIfAbsent(number, owner);
+    if (previous != null && previous != owner)
+      throw new com.emie.crm.common.exception.ApiException(409, "订单编号已被其他订单使用，请刷新后重新创建");
   }
 
   static void protect(JsonNode old, ObjectNode next, boolean restoring) {

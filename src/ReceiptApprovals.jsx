@@ -197,7 +197,7 @@ function ApprovalDetails({record, api, approvals, DialogLayer, Icon, onClose, or
         <div className="receipt-detail-heading"><div><span>本次申请收款</span><strong>{money(record.amount)}</strong></div><Status record={record}/></div>
         <p className="receipt-approval-notice">审批通过后计入订单已收金额。收款审批不触发聚水潭发货。</p>
         {(record.message || record.bookingError) && <p className="system-error" role="status">{record.bookingError || record.message}</p>}
-        <dl className="receipt-detail-fields">{[['客户名称', record.customer], ['收款方式', record.method], ['收款发生日期', record.receiptDate], ['收款类别', record.receiptCategory], ['登记人', record.operator], ['提交时间', time(record.createdAt)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || '—'}</dd></div>)}</dl>
+        <dl className="receipt-detail-fields">{[['客户名称', record.customer], ['收款方式', record.method], ['收款发生日期', record.receiptDate], ['登记人', record.operator], ['提交时间', time(record.createdAt)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || '—'}</dd></div>)}</dl>
         {record.allocations?.map(allocation => <section className="receipt-approval-allocation" key={allocation.orderId}>
           <div className="receipt-approval-allocation-heading"><h3>{allocation.orderNumber||orderNumberForId(allocation.orderId,orders)}</h3><span>本次分配 <strong>{money(allocation.amount)}</strong></span></div>
           <ReceiptProductDetails items={allocation.items || []} source="snapshot"/>

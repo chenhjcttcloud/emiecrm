@@ -31,7 +31,7 @@ export function validReceiptDate(value) {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
 }
 export function buildReceiptApprovalRequest({requestId, db, customerId, selected, payments, amount, method,
-  receiptDate, receiptCategory, note = '', attachments, methods, config, records = []}) {
+  receiptDate, note = '', attachments, methods, config, records = []}) {
   if (!config?.enabled) throw Error('收款审批尚未配置');
   const problem = receiptApprovalProblem(config);
   if (problem) throw Error(problem);
@@ -43,7 +43,6 @@ export function buildReceiptApprovalRequest({requestId, db, customerId, selected
   if (selected.some(order => reserved.has(order.id))) throw Error('所选订单已有未完成的收款审批，请先核对原申请');
   if (!receiptPaymentMethods(methods,selected).includes(method)) throw Error('请选择有效收款方式；预收款和聚水潭结算单不能使用预收款核销');
   if (!validReceiptDate(receiptDate)) throw Error('请选择有效的实际到账日期');
-  if (!(config.receiptCategories || []).includes(receiptCategory)) throw Error('请选择飞书模板支持的收款类别');
   const total = moneyCents(amount);
   if (total === null || total <= 0) throw Error('实际收款金额须大于零且最多两位小数');
   let allocated = 0;
@@ -57,7 +56,7 @@ export function buildReceiptApprovalRequest({requestId, db, customerId, selected
   if (!Number.isSafeInteger(allocated) || allocated !== total) throw Error('实际收款金额必须与本次付款合计一致');
   if (method === '预收款核销' && (moneyCents(customer.balance) ?? 0) < total) throw Error('客户预收款余额不足');
   const vouchers=copyReceiptVouchers(attachments);
-  return {requestId,revision:db.revision,customerId,amount:total / 100,method,receiptDate,receiptCategory,
+  return {requestId,revision:db.revision,customerId,amount:total / 100,method,receiptDate,
     note:String(note).trim(),allocations,...(vouchers.length?{attachments:vouchers}:{})};
 }
 
@@ -67,8 +66,8 @@ export function buildDirectReceiptChange(input) {
   const settlement=input.selected.some(order=>order.source==='jushuitan-settlement');
   if(settlement&&!validReceiptDate(input.receiptDate))throw Error('请填写结算单的实际到账日期');
   const details=buildReceiptApprovalRequest({...input,requestId:'direct-validation-only',
-    receiptDate:input.receiptDate||'2000-01-01',receiptCategory:'direct-validation-only',
-    config:{enabled:true,required:true,canSubmit:true,receiptCategories:['direct-validation-only']}});
+    receiptDate:input.receiptDate||'2000-01-01',
+    config:{enabled:true,required:true,canSubmit:true}});
   const amounts=new Map(details.allocations.map(line=>[line.orderId,line.amount]));
   const views=new Map(input.selected.map(order=>[order.id,order]));
   return {
