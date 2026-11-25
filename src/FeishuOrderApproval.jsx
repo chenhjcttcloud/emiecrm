@@ -1,5 +1,7 @@
-import React, {useEffect, useId, useRef, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import recipientRegions from './chinaAdministrativeRegions.json';
+import RecipientRegionPicker from './RecipientRegionPicker';
+import {recipientRegionOptions,changeRegion} from './recipientRegionModel';
 import {approvalInstanceUrl, approvalLabels, approvalStatus, approvalTime, canSubmitApproval,
   completedApproval, isApprovalOrder, isCreditSalesOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, submissionProblem} from './feishuApprovalModel';
 import './feishuApproval.css';
@@ -130,35 +132,28 @@ export function ApprovalActions({order, approvals, onSubmit, onMessage, canWrite
 }
 
 export function RecipientAddressFields({draft = {}, disabled, onChange, split = false, regions = recipientRegions}) {
-  const lists = useId();
   const change = (key, value) => onChange?.({...draft, [key]: value});
   if (!split) return <label className="field"><span>收货地址 <em>*</em></span>
     <textarea name="recipientAddress" aria-label="收货地址" required maxLength={500} disabled={disabled}
       value={draft.recipientAddress ?? ''} onChange={event => change('recipientAddress', event.target.value)} placeholder="请输入完整收货地址"/>
   </label>;
   const legacy = draft.recipientAddress && !['recipientProvince', 'recipientCity', 'recipientDistrict'].some(key => draft[key]);
-  const province = regions.find(row => row.name === String(draft.recipientProvince ?? '').trim());
-  const city = province?.children?.find(row => row.name === String(draft.recipientCity ?? '').trim());
-  const suggestions = [regions.map(row => row.name), province?.children?.map(row => row.name) ?? [], city?.children ?? []];
-  const changeRegion = (key, value) => {
-    if (value === draft[key]) return;
-    const reset = key === 'recipientProvince' ? {recipientCity: '', recipientDistrict: ''} : key === 'recipientCity' ? {recipientDistrict: ''} : {};
-    onChange?.({...draft, ...reset, [key]: value});
-  };
+  const options = recipientRegionOptions(draft,regions);
+  const suggestions = [options.provinces,options.cities,options.districts];
   return <>
     {legacy && <p className="form-hint feishu-legacy-address">原收货地址未拆分：{draft.recipientAddress}。请手动核对省、市、区；详细地址暂沿用原文，请检查是否重复填写地区。</p>}
     <div className="feishu-address-regions">
       {[['recipientProvince', '省份'], ['recipientCity', '城市'], ['recipientDistrict', '区 / 县']].map(([key, label], index) =>
-        <label className="field" key={key}><span>{label} <em>*</em></span><input type="text" name={key} aria-label={label} list={lists + '-' + key} required maxLength={50} disabled={disabled}
-          value={draft[key] ?? ''} placeholder={'请选择或填写' + label} autoComplete="off" onChange={event => changeRegion(key, event.target.value)}/>
-          <datalist id={lists + '-' + key}>{suggestions[index].map(name => <option key={name} value={name}/>)}</datalist></label>)}
+        <RecipientRegionPicker key={key} name={key} label={label} value={draft[key] ?? ''} options={suggestions[index]} required disabled={disabled}
+          parentHint={index>0&&!String(draft.recipientProvince??'').trim()?'请先选择省份':index===2&&!String(draft.recipientCity??'').trim()?'请先选择城市':''}
+          onChange={value=>onChange?.(changeRegion(draft,key,value,regions))}/>)}
     </div>
     <label className="field"><span>详细地址 <em>*</em></span><input type="text" name="recipientAddress" aria-label="详细地址" required maxLength={200} disabled={disabled}
       value={draft.recipientAddress ?? ''} onChange={event => change('recipientAddress', event.target.value)} placeholder="街道、楼栋、门牌号，例如：万科星火online10栋"/></label>
   </>;
 }
 
-export function ApprovalFormFields({order, config, disabled, customer, products = [], onChange, onDiscountChange}) {
+export function ApprovalFormFields({order, config, disabled, customer, products = [], onChange, onDiscountChange,prepaymentDetails=false}) {
   const draft = order.approvalDraft ?? {};
   const change = (key, value) => onChange?.({...draft, [key]: value});
   const credit = isCreditSalesOrder(order) && draft.creditFulfillment !== false;
@@ -189,7 +184,7 @@ export function ApprovalFormFields({order, config, disabled, customer, products 
       <p className="form-hint">折扣仅填写到飞书审批，不影响CRM订单总额；订单总额仍按数量和销售价计算。</p>
     </>}
   </section>;
-  if (order.type !== '预收款订单' || !config?.prepaymentReceiptForm) return null;
+  if (order.type !== '预收款订单' || !config?.prepaymentReceiptForm || prepaymentDetails || Object.hasOwn(order,'paymentDetails')) return null;
   return <div className="feishu-approval-extra" key={order.id || 'new'}>
     <label className="field"><span>收款发生日期 <em>*</em></span>
       <input type="date" name="receiptDate" aria-label="收款发生日期" required disabled={disabled}

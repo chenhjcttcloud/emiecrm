@@ -231,7 +231,7 @@ public class FeishuReceiptApprovalService {
         require(sameEvidenceValue(before.get(i).path("amount"), now.get(i).path("amount"))
             && sameEvidenceValue(before.get(i).path("paymentDetails"), now.get(i).path("paymentDetails")),
             "原收款明细分配已变化，请核对后重新申请");
-      for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt"))
+      for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt", "paymentDetails"))
         require(sameEvidenceValue(before.get(i).path("orderSnapshot").path(field), now.get(i).path("orderSnapshot").path(field)),
             "原收款订单或已收金额已变化，请核对后重新申请");
       for (String field : List.of("items", "total", "paid"))

@@ -26,13 +26,13 @@ public class BusinessService {
   private final AssetService assets;
   @Value("${CRM_FEISHU_RECEIPT_APPROVAL_CODE:}") private String feishuReceiptApprovalCode = "";
   private static final List<String> RECEIPT_APPROVAL_FIELDS =
-      List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt");
+      List.of("id", "type", "customerId", "customer", "owner", "items", "total", "status", "paid", "deletedAt", "paymentDetails");
   private static final String ACTIVE_RECEIPT_APPROVALS = """
       SELECT payload FROM feishu_receipt_approvals
       WHERE status IN ('QUEUED','SUBMITTING','UNKNOWN','PENDING')
          OR (status='APPROVED' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload,'$.booked')),'false')<>'true')
       """;
-  private static final List<String> APPROVAL_FIELDS = List.of("status", "type", "owner", "customerId", "customer", "items", "total", "approvalRequestId", "approvalDraft");
+  private static final List<String> APPROVAL_FIELDS = List.of("status", "type", "owner", "customerId", "customer", "items", "total", "approvalRequestId", "approvalDraft", "paymentDetails");
 
   public BusinessService(CrmRepository db, AssetService assets) {
     this.db = db;
@@ -210,9 +210,32 @@ public class BusinessService {
   }
 
   private boolean coreChanged(JsonNode order, JsonNode prior) {
-    for (String key : List.of("total", "customerId", "type", "items"))
+    for (String key : List.of("total", "customerId", "type", "items", "paymentDetails"))
       if (!same(order.path(key), prior.path(key))) return true;
     return !OrderWarehouse.same(order, prior) || !JushuitanCreditPushPolicy.samePlan(order, prior);
+  }
+
+  private void normalizePrepaymentPaymentDetails(Map<String, JsonNode> before, Map<String, JsonNode> after) {
+    if (after.values().stream().noneMatch(PrepaymentPaymentDetails::hasDetails)) return;
+    var frozen = new HashSet<String>();
+    for (var row : db.rows("SELECT order_id,status FROM feishu_order_approvals"))
+      if (Set.of("QUEUED", "SUBMITTING", "UNKNOWN", "PENDING", "APPROVED").contains(row.get("status").toString()))
+        frozen.add(row.get("order_id").toString());
+    for (var entry : after.entrySet()) {
+      var order = entry.getValue();
+      if (!PrepaymentPaymentDetails.hasDetails(order)) continue;
+      var prior = before.get(entry.getKey());
+      boolean locked = prior != null && (frozen.contains(entry.getKey()) || "已批准".equals(prior.path("status").asText())
+          || money(prior.path("paid"), true).signum() > 0);
+      if (locked) {
+        require(same(prior.path("paymentDetails"), order.path("paymentDetails")), "已提交的预收款明细不能修改或移除");
+        PrepaymentPaymentDetails.validateRows(order);
+        continue;
+      }
+      PrepaymentPaymentDetails.normalize((ObjectNode) order);
+      if (prior == null || !same(prior.path("paymentDetails"), order.path("paymentDetails")))
+        for (var line : order.path("paymentDetails")) requireEnabledPaymentMethod(line.path("method"));
+    }
   }
 
   private void validateTotal(JsonNode order, JsonNode products) {
@@ -541,6 +564,7 @@ public class BusinessService {
     normalizeOrders(next, old.isNull() ? next : old);
     var oldOrders = index(old.path("orders"));
     var nextOrders = index(next.path("orders"));
+    normalizePrepaymentPaymentDetails(oldOrders, nextOrders);
     JsonNode paymentBatch = approvedReceipt;
     if (approvedReceipt == null && hasPaymentDetails(body.path("receiptVerification"))) {
       require(feishuReceiptApprovalCode.isBlank(), "收款须通过飞书审批后入账");
@@ -662,7 +686,7 @@ public class BusinessService {
               && paid.compareTo(total) <= 0,
           "订单金额或收款金额无效");
       if (before.signum() > 0)
-        for (String key : List.of("total", "customerId", "type", "items")) {
+        for (String key : List.of("total", "customerId", "type", "items", "paymentDetails")) {
           if (key.equals("customerId") && prior.path(key).asText().isBlank() && resolved)
             actor.require("payment.write"); // Explicitly repair a legacy association; never infer ambiguous ownership.
           else require(same(entry.path(key), prior.path(key)), "已有收款的订单不可更改金额、产品、客户或类型");
@@ -1004,6 +1028,7 @@ public class BusinessService {
     }
     var restoredCustomers = index(next.path("customers"));
     for (var order : next.path("orders")) {
+      if (PrepaymentPaymentDetails.hasDetails(order)) PrepaymentPaymentDetails.validateRows(order);
       BigDecimal total = money(order.path("total"), false), paid = money(order.path("paid"), true);
       require(paid.compareTo(total) <= 0, "备份中订单已付金额超过订单总额");
       if (JushuitanDocumentService.isSettlement(order)) {
@@ -1238,7 +1263,7 @@ public class BusinessService {
 
   private boolean onlyLegacyCustomerAssociationChanged(JsonNode next, JsonNode prior) {
     if (prior == null || !prior.path("customerId").asText().isBlank() || next.path("customerId").asText().isBlank()) return false;
-    for (String field : List.of("status", "total", "type", "items", "paid", "owner"))
+    for (String field : List.of("status", "total", "type", "items", "paid", "owner", "paymentDetails"))
       if (!same(next.path(field), prior.path(field))) return false;
     return OrderWarehouse.same(next, prior) && JushuitanCreditPushPolicy.samePlan(next, prior);
   }

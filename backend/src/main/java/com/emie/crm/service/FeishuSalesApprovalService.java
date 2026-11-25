@@ -332,8 +332,13 @@ public class FeishuSalesApprovalService {
   private ObjectNode newSubmission(String openId, String approvalCode, JsonNode definition, JsonNode order, JsonNode products,
       JsonNode input, Actor actor) {
     String orderId = order.path("id").asText();
-    if ("预收款订单".equals(order.path("type").asText()))
-      business.requireEnabledPaymentMethod(order.path("method"));
+    JsonNode approval = input;
+    if ("预收款订单".equals(order.path("type").asText())) {
+      approval = PrepaymentPaymentDetails.approval(order, input);
+      if (PrepaymentPaymentDetails.hasDetails(order)) {
+        for (var line : order.path("paymentDetails")) business.requireEnabledPaymentMethod(line.path("method"));
+      } else business.requireEnabledPaymentMethod(order.path("method"));
+    }
     if ("预收款订单".equals(order.path("type").asText()) && order.hasNonNull("attachments")) {
       ObjectNode snapshot = order.deepCopy();
       snapshot.set("attachments", business.receiptEvidence(order.path("attachments")));
@@ -351,12 +356,12 @@ public class FeishuSalesApprovalService {
       }
       order = snapshot;
     }
-    JsonNode approval = input;
     String ownerOpenId = FeishuSalesApprovalForm.requiresOwnerIdentity(mapper, definition) ? ownerOpenId(order) : "";
     var form = FeishuSalesApprovalForm.build(mapper, definition, order, products, approval, ownerOpenId);
     var record = db.object().put("orderId", orderId).put("orderType", order.path("type").asText()).put("approvalCode", approvalCode)
         .put("uuid", UUID.randomUUID().toString()).put("openId", openId).put("createdAt", CrmRepository.now());
-    record.set("form", form);
+    // New multi-row proposals send the durable JSON number representation on their first call as well.
+    record.set("form", PrepaymentPaymentDetails.hasDetails(order) ? db.parse(db.encode(form)) : form);
     record.set("orderSnapshot", order.deepCopy());
     if ("预收款订单".equals(order.path("type").asText())) {
       var evidence = FeishuApprovalEvidence.plan(mapper, definition, order.path("attachments"));
@@ -841,7 +846,7 @@ public class FeishuSalesApprovalService {
     if (order == null) return false;
     var snapshot = record.path("orderSnapshot");
     if (!snapshot.isObject()) return false;
-    for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "method", "note", "attachments", "approvalDraft"))
+    for (String field : List.of("id", "type", "customerId", "customer", "owner", "items", "total", "method", "note", "attachments", "approvalDraft", "paymentDetails"))
       if (!snapshot.path(field).equals((left, right) -> left.isNumber() && right.isNumber()
           ? left.decimalValue().compareTo(right.decimalValue()) : left.equals(right) ? 0 : 1, order.path(field))) return false;
     return true;

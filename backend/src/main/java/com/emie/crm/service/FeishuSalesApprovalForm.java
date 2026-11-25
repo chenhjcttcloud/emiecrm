@@ -56,6 +56,7 @@ public final class FeishuSalesApprovalForm {
       return buildSettlement(mapper, definition, order, ownerOpenId);
     boolean prepayment = "预收款订单".equals(order.path("type").asText());
     require(prepayment || Set.of("销售订单", "海外提货单").contains(order.path("type").asText()), "仅销售订单、海外提货单和预收款可发起飞书审批");
+    if (prepayment) input = PrepaymentPaymentDetails.approval(order, input);
     if (prepayment && usesDedicatedPrepaymentForm(mapper, definition))
       return FeishuPrepaymentApprovalForm.build(mapper, definition, order, products, input, ownerOpenId);
     var widgets = widgets(mapper, definition);
@@ -73,6 +74,8 @@ public final class FeishuSalesApprovalForm {
     }
     require(mapped.containsAll(Set.of("customer", "total")) && (mapped.contains("id") || mapped.contains("note"))
         && (prepayment || mapped.contains("items")), "飞书审批模板须包含客户、订单金额、订单编号或备注及产品明细，请管理员核对模板");
+    if (prepayment && PrepaymentPaymentDetails.hasDetails(order))
+      require(mapped.contains("note"), "预收款明细需在飞书审批备注中完整展示，请管理员核对模板");
     var warehouse = OrderWarehouse.planned(order);
     if (warehouse.selected()) {
       require(mapped.contains("note"), "所选计划发货仓库需在飞书审批备注中展示，请管理员核对模板");
@@ -179,6 +182,7 @@ public final class FeishuSalesApprovalForm {
                 + "；收货电话：" + order.path("approvalDraft").path("recipientPhone").asText().strip()
                 + "\n收货地址：" + JushuitanCreditPushPolicy.fullAddress(order.path("approvalDraft"))
                 + "\nERP结算口径：账期挂账（非实收），ERP付款状态显示已付；CRM实收与应收按真实收款独立记录，挂账不计入实收。" : "")
+            + (prepayment && PrepaymentPaymentDetails.hasDetails(order) ? PrepaymentPaymentDetails.description(order) : "")
             + (order.path("note").asText().isBlank() ? "" : "\n" + order.path("note").asText()));
         case "recipientName", "recipientPhone", "recipientAddress" -> {
           String entered = (credit ? order.path("approvalDraft") : input).path(key).asText().strip();

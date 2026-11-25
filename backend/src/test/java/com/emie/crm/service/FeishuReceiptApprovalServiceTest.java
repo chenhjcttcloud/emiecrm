@@ -133,6 +133,23 @@ class FeishuReceiptApprovalServiceTest {
 
   private JsonNode approval(JsonNode response) { return response.path("approval"); }
 
+  @Test void failedActualReceiptVoucherRetryCannotUseChangedPrepaymentProposalRows() throws Exception {
+    var prepayment = (ObjectNode) state.path("orders").get(1);
+    var rows = prepayment.putArray("paymentDetails");
+    rows.addObject().put("lineNo", 1).put("method", "银行转账").put("amount", 200).put("receiptDate", "2026-11-17");
+    rows.addObject().put("lineNo", 2).put("method", "银行转账").put("amount", 200).put("receiptDate", "2026-11-18");
+    existing("FAILED");
+    record.putArray("form").addObject().put("id", "original-field").put("type", "textarea").put("value", "原收款申请");
+    record.putObject(FeishuApprovalEvidence.FIELD).put("preparationFailed", true).put("createAttempted", false);
+    var original = record.deepCopy();
+    ((ObjectNode) rows.get(0)).put("receiptDate", "2026-11-16");
+    assertTrue(assertThrows(ApiException.class, () -> service.retry("batch-1", submitter)).getMessage().contains("原收款订单"));
+    assertEquals(original, record);
+    verify(client, never()).uploadFile(anyString(), anyString(), anyString(), any(byte[].class));
+    verify(client, never()).create(anyString(), anyString(), anyString(), any());
+    verify(business, never()).applyApprovedReceipt(any());
+  }
+
   @Test void configurationExposesOnlySalesIncomeEvenWhenTheTemplateOffersOtherCategories() throws Exception {
     var template=definition();
     var category=(ObjectNode)template.at("/form/3");

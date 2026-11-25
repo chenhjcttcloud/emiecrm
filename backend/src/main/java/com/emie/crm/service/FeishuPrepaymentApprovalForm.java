@@ -31,6 +31,7 @@ final class FeishuPrepaymentApprovalForm {
       JsonNode input, String ownerOpenId) {
     if (!"预收款订单".equals(order.path("type").asText()))
       throw invalid("仅预收款可使用预收款审批表单");
+    input = PrepaymentPaymentDetails.approval(order, input);
     var fields = fields(mapper, definition);
     if (ownerOpenId == null || !ownerOpenId.matches("ou_[A-Za-z0-9_-]{1,128}"))
       throw invalid("预收款签单人尚未唯一绑定飞书账号，请核对签单人");
@@ -111,6 +112,7 @@ final class FeishuPrepaymentApprovalForm {
       if (!method.isTextual()) throw invalid("请填写有效的收款方式");
       if (!method.asText().isBlank()) text.append("\n收款方式：").append(text(method, "收款方式", 100));
     }
+    if (PrepaymentPaymentDetails.hasDetails(order)) text.append(PrepaymentPaymentDetails.description(order));
     var lines = order.path("items");
     if (lines.isMissingNode() || lines.isNull() || (lines.isArray() && lines.isEmpty()))
       return text.append("\n商品明细：未填写").toString();

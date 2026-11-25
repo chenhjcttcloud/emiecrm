@@ -101,6 +101,46 @@ class FeishuSalesApprovalServiceTest {
     assertEquals("APPROVED", service.sync("o1", reader).path("status").asText());
     verify(client, never()).create(any(), any(), any(), any());
   }
+
+  @ParameterizedTest @ValueSource(booleans={false, true})
+  void originalPrepaymentRetryNeverRebuildsRowsOrRechecksDisabledMethods(boolean detailed) {
+    var order = (ObjectNode) state.path("orders").get(0);
+    order.put("type", "预收款订单").put("total", 300).put("method", detailed ? "组合收款" : "旧账户");
+    if (detailed) {
+      var rows = order.putArray("paymentDetails");
+      rows.addObject().put("method", "银行转账").put("amount", 100).put("receiptDate", "2026-11-17");
+      rows.addObject().put("method", "POS").put("amount", 200).put("receiptDate", "2026-11-18");
+      PrepaymentPaymentDetails.normalize(order);
+    }
+    var before = order.deepCopy();
+    record.put("status", "UNKNOWN").remove("instanceCode");
+    var frozen = mapper.createArrayNode(); frozen.addObject().put("id", "old-field").put("type", "textarea").put("value", "原类别/原明细/原金额");
+    record.set("form", frozen.deepCopy()); record.set("orderSnapshot", order.deepCopy());
+    when(client.create(eq("template"), eq("ou_actor"), eq("uuid"), any(com.fasterxml.jackson.databind.node.ArrayNode.class))).thenReturn("instance");
+    doThrow(new ApiException("方式已停用")).when(business).requireEnabledPaymentMethod(any());
+    var result = service.submit("o1", mapper.createObjectNode().put("retryOriginal", true).put("originalVersion", "uuid"), writer);
+    assertEquals("PENDING", result.path("status").asText());
+    verify(client).create("template", "ou_actor", "uuid", frozen);
+    verify(client, never()).definition(anyString()); verify(business, never()).requireEnabledPaymentMethod(any());
+    assertEquals(before, order); assertEquals(detailed, order.has("paymentDetails"));
+    verify(db, never()).receipt(any());
+  }
+
+  @Test void approvingAPrepaymentProposalOnlyChangesApprovalStatusAndNeverCreatesCash() {
+    var order = (ObjectNode) state.path("orders").get(0);
+    order.put("type", "预收款订单").put("method", "组合收款").put("total", 300);
+    var rows = order.putArray("paymentDetails");
+    rows.addObject().put("method", "银行转账").put("amount", 100).put("receiptDate", "2026-11-17");
+    rows.addObject().put("method", "POS").put("amount", 200).put("receiptDate", "2026-11-18");
+    PrepaymentPaymentDetails.normalize(order);
+    var originalRows = order.path("paymentDetails").deepCopy();
+    when(client.instance("instance")).thenReturn(instance("APPROVED"));
+    assertEquals("APPROVED", service.sync("o1", reader).path("status").asText());
+    assertEquals("已批准", order.path("status").asText()); assertEquals(0, order.path("paid").asInt());
+    assertEquals(originalRows, order.path("paymentDetails"));
+    assertEquals(0, state.path("customers").get(0).path("balance").asInt());
+    verify(db, never()).receipt(any());
+  }
   @ParameterizedTest @ValueSource(strings={"QUEUED","SUBMITTING","PENDING","UNKNOWN","APPROVED"})
   void repeatedSaveAndSubmitReturnsTheExistingSubmission(String status) {
     record.put("status", status).put("leaseUntil", Long.MAX_VALUE);

@@ -116,16 +116,32 @@ export function approvalDraftValues(config, order, fields) {
       }
     }
   }
-  if (order.type === '预收款订单' && config?.prepaymentReceiptForm)
-    result.receiptDate = String(fields?.get('receiptDate') ?? '');
+  if (order.type === '预收款订单') {
+    const rows = explicitPrepaymentDetails(order, fields);
+    if (rows !== undefined) result.receiptDate = canonicalPrepaymentPaymentDetails(rows).receiptDate;
+    else if (config?.prepaymentReceiptForm) result.receiptDate = String(fields?.get('receiptDate') ?? '');
+  }
   return result;
+}
+
+// Only an explicitly edited draft supplies rows. Never upgrade a legacy frozen
+// approval while reading its date or retrying its original request.
+function explicitPrepaymentDetails(order, fields) {
+  const hasField = fields?.has?.('prepaymentPaymentDetails') || fields?.get?.('prepaymentPaymentDetails') != null;
+  if (hasField) {
+    const value = fields.get('prepaymentPaymentDetails');
+    if (typeof value !== 'string') throw Error('预收款明细格式无效');
+    try { return JSON.parse(value); }
+    catch { throw Error('预收款明细格式无效'); }
+  }
+  return Object.hasOwn(order, 'paymentDetails') ? order.paymentDetails ?? null : undefined;
 }
 
 // Old full addresses remain unchanged; structured regions are only added by explicit entry.
 export function recipientAddressText(draft = {}) {
   const [province, city, district, address] = ['recipientProvince', 'recipientCity', 'recipientDistrict', 'recipientAddress']
     .map(key => String(draft?.[key] ?? '').trim());
-  const grouping = ['市辖区', '县', '省直辖县级行政区划', '自治区直辖县级行政区划', '省直辖行政单位', '自治区直辖行政单位'];
+  const grouping = ['市辖区', '县', '省直辖县', '省直辖县级行政区划', '自治区直辖县级行政区划', '省直辖行政单位', '自治区直辖行政单位'];
   return [province, city === province || grouping.includes(city) ? '' : city, district, address].filter(Boolean).join('');
 }
 
@@ -272,7 +288,13 @@ export function approvalDetails(config, order, fields) {
     if (config?.salesDiscountRequired) result.discounts = (order.items ?? []).map((item, index) => approvalDiscount(fields?.get('approvalDiscount-' + index) ?? (credit ? item.approvalDiscount : undefined)));
     return result;
   }
-  if (order.type !== '预收款订单' || !config?.prepaymentReceiptForm) return {};
+  if (order.type !== '预收款订单') return {};
+  const rows = explicitPrepaymentDetails(order, fields);
+  if (rows !== undefined) {
+    const {receiptDate, paymentDetails} = canonicalPrepaymentPaymentDetails(rows);
+    return {receiptDate, paymentDetails};
+  }
+  if (!config?.prepaymentReceiptForm) return {};
   const receiptDate = input.receiptDate.trim();
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(receiptDate) ? new Date(receiptDate + 'T00:00:00Z') : null;
   if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== receiptDate)
@@ -291,3 +313,4 @@ export function approvalTime(value) {
 }
 import {moneyCents} from './orderMoney.js';
 import {logisticsDetails,logisticsDraftValues} from './orderLogisticsModel.js';
+import {canonicalPrepaymentPaymentDetails} from './prepaymentPaymentDetailsModel.js';

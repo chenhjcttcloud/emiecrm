@@ -155,6 +155,22 @@ class JushuitanCreditPushPolicyTest {
     assertEquals(10,mapped.path("pay").path("amount").asInt());
   }
 
+  @Test void fullAddressOmitsExistingDirectoryCountyGroupingWithoutChangingTheFrozenDraft() {
+    for (String grouping : new String[]{"省直辖县", "省直辖县级行政区划", "省直辖行政单位"}) {
+      var draft = mapper.createObjectNode().put("recipientProvince", "湖北省").put("recipientCity", grouping)
+          .put("recipientDistrict", "仙桃市").put("recipientAddress", "测试路10号");
+      var before = draft.deepCopy();
+      assertEquals("湖北省仙桃市测试路10号", JushuitanCreditPushPolicy.fullAddress(draft));
+      assertEquals(before, draft);
+    }
+    var legacy = mapper.createObjectNode().put("recipientAddress", "湖北省省直辖县仙桃市测试路10号");
+    assertEquals(legacy.path("recipientAddress").asText(), JushuitanCreditPushPolicy.fullAddress(legacy));
+    assertEquals(1, legacy.size());
+    var ordinary = mapper.createObjectNode().put("recipientProvince", "广东省").put("recipientCity", "东莞市")
+        .put("recipientDistrict", "松山湖").put("recipientAddress", "测试路10号");
+    assertEquals("广东省东莞市松山湖测试路10号", JushuitanCreditPushPolicy.fullAddress(ordinary));
+  }
+
   @Test void logisticsPlansAreFrozenAndIncompleteCarrierDraftsCannotBeSubmitted() throws Exception {
     var order=order();var draft=(ObjectNode)order.path("approvalDraft");draft.put("logisticsMode","CARRIER");
     assertDoesNotThrow(()->JushuitanCreditPushPolicy.validateDraft(order));

@@ -3,6 +3,7 @@ import BusinessImage from './BusinessImage';
 import OrderChangeLog from './OrderChangeLog';
 import CreditOrderPush from './CreditOrderPush';
 import {ReceiptVoucherGallery} from './ReceiptVoucherUpload';
+import {PrepaymentPaymentSummary} from './PrepaymentPaymentDetails';
 import OrderLogistics from './OrderLogistics';
 import {plannedLogistics} from './orderLogisticsModel';
 import {ApprovalFlow, ApprovalStatus} from './FeishuOrderApproval';
@@ -80,6 +81,7 @@ export default function OrderDetails({order, customer, products, approvals, ship
           ['已收款', execution.paid], ['待收款', execution.unpaid]].map(([label, value]) =>
           <div key={label}><dt>{label}</dt><dd>{money(value)}</dd></div>)}</dl>
         {execution.effective && <p className="order-products-caption">当前执行金额以上方为准，原订单总额为 {money(order.total)}。</p>}
+        {prepayment&&<PrepaymentPaymentSummary order={order}/>}
         {creditPush&&<section className="order-credit-push-status" aria-label="聚水潭账期订单推送">
           <h3>聚水潭推送</h3><Badge tone={creditPush.tone==='success'?'green':creditPush.tone==='info'?'cyan':'warning'}>{creditPush.label}</Badge>
           <p role={['warning','error'].includes(creditPush.tone)?'status':undefined}>{creditPush.message}</p>

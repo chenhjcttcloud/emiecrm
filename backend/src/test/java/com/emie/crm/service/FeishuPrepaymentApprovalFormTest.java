@@ -56,6 +56,44 @@ class FeishuPrepaymentApprovalFormTest {
     return null;
   }
 
+  private void detailedProposal() {
+    order.put("method", "组合收款");
+    var rows = order.putArray("paymentDetails");
+    rows.addObject().put("method", "银行转账").put("amount", 100).put("receiptDate", "2026-11-17");
+    rows.addObject().put("method", "POS").put("amount", 200).put("receiptDate", "2026-11-18");
+    PrepaymentPaymentDetails.normalize(order);
+    input.set("paymentDetails", order.path("paymentDetails").deepCopy());
+  }
+
+  @Test void displaysEveryProposedPaymentRowAndUsesTheLatestDateWithoutReplacingProductOrMoneySemantics() {
+    detailedProposal(); var before = order.deepCopy(); var form = build();
+    var project = field(form, "project").path("value").asText();
+    assertTrue(project.contains("预收款金额：300.00"));
+    assertTrue(project.contains("第1笔 | 收款方式：银行转账 | 预收款金额：100.00 元 | 发生日期：2026-11-17"));
+    assertTrue(project.contains("第2笔 | 收款方式：POS | 预收款金额：200.00 元 | 发生日期：2026-11-18"));
+    assertTrue(project.contains("明细最晚日期"));
+    assertTrue(project.contains("商品合计：1200.00"));
+    assertEquals("2026-11-18T00:00:00+08:00", field(form, "date").path("value").asText());
+    assertEquals(300, field(form, "amount").path("value").asInt());
+    assertEquals(before, order);
+    assertTrue(field(form, "note").path("value").asText().contains("不代表已登记实际收款"));
+  }
+
+  @Test void fiftyPaymentRowsAreNotTruncatedAndMismatchedApprovalInputIsRejected() {
+    order.put("method", "组合收款").put("total", 50);
+    var rows = order.putArray("paymentDetails");
+    for (int i = 1; i <= 50; i++) rows.addObject().put("method", "配置账户" + "甲".repeat(44) + (i < 10 ? "0" : "") + i)
+        .put("amount", 1).put("receiptDate", "2026-11-18");
+    ((ObjectNode) products.get(0)).put("name", "甲".repeat(500));
+    ((ObjectNode) products.get(1)).put("name", "乙".repeat(500));
+    PrepaymentPaymentDetails.normalize(order); input.set("paymentDetails", order.path("paymentDetails").deepCopy());
+    var project = field(build(), "project").path("value").asText();
+    assertTrue(project.length() > 5000); assertTrue(project.contains("第50笔"));
+    assertEquals(50, project.lines().filter(line -> line.contains(" | 预收款金额：1.00 元")).count());
+    ((ObjectNode) input.path("paymentDetails").get(0)).put("amount", 2);
+    assertThrows(ApiException.class, this::build);
+  }
+
   @Test void mapsTheDedicatedFormWithoutReplacingTheDepositWithGoodsValue() {
     var form = build();
     assertEquals(300, field(form, "amount").path("value").asInt());

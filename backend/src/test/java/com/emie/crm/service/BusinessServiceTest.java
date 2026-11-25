@@ -291,6 +291,57 @@ class BusinessServiceTest {
     assertEquals(0,order(stored).path("paid").asInt());assertTrue(history.isEmpty());
   }
 
+  @Test void newPrepaymentRowsAreCanonicalProposalsAndNeverCreateReceiptOrCredit() {
+    order(stored).put("type", "预收款订单").put("status", "草稿").put("total", 50).put("method", "组合收款");
+    var next = draft(); order(next).set("paymentDetails", fundingRows("POS"));
+    var saved = save(next, sales);
+    assertEquals(2, order(saved).path("paymentDetails").size());
+    assertEquals(1, order(saved).path("paymentDetails").get(0).path("lineNo").asInt());
+    assertEquals("2026-11-25", order(saved).path("approvalDraft").path("receiptDate").asText());
+    assertEquals("组合收款", order(saved).path("method").asText());
+    assertEquals(50, order(saved).path("total").asInt()); assertEquals(0, order(saved).path("paid").asInt());
+    assertEquals(0, saved.at("/customers/0/balance").asInt());
+    assertTrue(history.isEmpty()); verify(db, never()).receipt(any());
+  }
+
+  @ParameterizedTest @ValueSource(strings={"QUEUED", "SUBMITTING", "UNKNOWN", "PENDING", "APPROVED"})
+  void submittedPrepaymentRowsCannotChangeAtTheSameTotalOrDisappear(String status) {
+    var source = order(stored).put("type", "预收款订单").put("status", status.equals("APPROVED") ? "已批准" : "审批中")
+        .put("total", 50).put("method", "组合收款");
+    source.set("paymentDetails", fundingRows("POS")); PrepaymentPaymentDetails.normalize(source);
+    when(db.rows("SELECT order_id,status FROM feishu_order_approvals")).thenReturn(List.of(Map.of("order_id", "o1", "status", status)));
+    var changed = draft();
+    ((ObjectNode) order(changed).path("paymentDetails").get(0)).put("amount", 10);
+    ((ObjectNode) order(changed).path("paymentDetails").get(1)).put("amount", 40);
+    assertThrows(ApiException.class, () -> save(changed, admin));
+    var removed = draft(); order(removed).remove("paymentDetails");
+    assertThrows(ApiException.class, () -> save(removed, admin));
+    var backup = mapper.createObjectNode().put("version", 1); backup.set("state", changed); backup.putArray("receipts");
+    assertThrows(ApiException.class, () -> service.restore(backup, admin));
+    verify(db, never()).state(any(JsonNode.class)); verify(db, never()).receipt(any());
+  }
+
+  @Test void actualPrepaymentCashKeepsOriginalProposalRowsAndCanUseAnotherEnabledMethod() {
+    var source = order(stored).put("type", "预收款订单").put("total", 50).put("method", "组合收款");
+    source.set("paymentDetails", fundingRows("POS")); PrepaymentPaymentDetails.normalize(source);
+    var originalRows = source.path("paymentDetails").deepCopy();
+    when(db.rows("SELECT order_id,status FROM feishu_order_approvals")).thenReturn(List.of(Map.of("order_id", "o1", "status", "APPROVED")));
+    var changed = draft(); order(changed).put("paid", 10).put("method", "实际到账账户");
+    var saved = save(changed, admin);
+    assertEquals(originalRows, order(saved).path("paymentDetails"));
+    assertEquals("实际到账账户", order(saved).path("method").asText());
+    assertEquals(10, saved.at("/customers/0/balance").asInt());
+    assertEquals(1, history.size()); assertEquals("实际到账账户", history.getFirst().path("method").asText());
+  }
+
+  @Test void repairingALegacyCustomerCannotAlsoDeleteApprovedPrepaymentRows() {
+    var source = order(stored).put("type", "预收款订单").put("customer", "未匹配旧客户").put("total", 50).put("method", "组合收款");
+    source.remove("customerId"); source.set("paymentDetails", fundingRows("POS")); PrepaymentPaymentDetails.normalize(source);
+    var changed = draft(); order(changed).put("customerId", "c1").remove("paymentDetails");
+    assertThrows(ApiException.class, () -> save(changed, admin));
+    assertTrue(order(stored).has("paymentDetails")); verify(db, never()).state(any(JsonNode.class));
+  }
+
   @Test void catalogCannotBeOverwrittenThroughBusinessSave() {
     var next=draft();((ObjectNode)next.path("products").get(0)).put("name","伪造商品");
     var error=assertThrows(ApiException.class,()->save(next,admin));

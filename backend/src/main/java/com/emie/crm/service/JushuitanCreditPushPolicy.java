@@ -125,7 +125,7 @@ final class JushuitanCreditPushPolicy {
     String previous = "";
     for (String field : List.of("recipientProvince", "recipientCity", "recipientDistrict")) {
       String value = draft.path(field).asText().strip();
-      if (field.equals("recipientCity") && Set.of("市辖区", "县", "省直辖县级行政区划", "自治区直辖县级行政区划", "省直辖行政单位", "自治区直辖行政单位").contains(value)) continue;
+      if (field.equals("recipientCity") && Set.of("市辖区", "县", "省直辖县", "省直辖县级行政区划", "自治区直辖县级行政区划", "省直辖行政单位", "自治区直辖行政单位").contains(value)) continue;
       if (!value.isEmpty() && !value.equals(previous)) result.append(value);
       if (!value.isEmpty()) previous = value;
     }

@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {activeBusinessOrders, approvalDetails, approvalDiscount, approvalDraftValues, approvalInstanceUrl, approvalLocksOrder, approvalSettings, approvalStatus, approvalTime,
-  canCancelOrder, canDeleteOrder, canSubmitApproval, isApprovalOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, isSettlementApprovalOrder, orderExecutionView, submissionProblem, visibleBusinessOrders} from '../src/feishuApprovalModel.js';
+  canCancelOrder, canDeleteOrder, canSubmitApproval, isApprovalOrder, isLegacyApprovedSettlement, isSalesApprovalOrder, isSettlementApprovalOrder, orderExecutionView, recipientAddressText, submissionProblem, visibleBusinessOrders} from '../src/feishuApprovalModel.js';
 
 const order = {id: '2026-11-00000001', type: '销售订单', status: '审批中'};
 const configured = {required: true, salesEnabled: true, salesCanSubmit: true};
@@ -131,6 +131,72 @@ test('prepayment requests keep the date and omit the server-managed receipt cate
   assert.deepEqual(approvalDetails(configured, deposit, fields({})), {});
 });
 
+test('explicit prepayment rows determine the latest draft date and complete frozen approval input', () => {
+  const config = {...configured,prepaymentReceiptForm:true};
+  const paymentDetails = [
+    {lineNo:8,method:'现金',amount:'0.01',receiptDate:'2026-11-23'},
+    {lineNo:8,method:'银行转账',amount:'1.99',receiptDate:'2026-11-25'},
+  ];
+  const deposit = {...order,type:'预收款订单',total:2,method:'组合收款',paymentDetails,
+    approvalDraft:{receiptDate:'2026-01-01',receiptCategory:'历史类别'}};
+  const before = structuredClone(deposit);
+  const fields = new Map([['receiptDate','2026-01-02'],['receiptCategory','伪造类别']]);
+  assert.deepEqual(approvalDraftValues(config,deposit,fields),{receiptDate:'2026-11-25'});
+  assert.deepEqual(approvalDetails(config,deposit,fields),{
+    receiptDate:'2026-11-25',paymentDetails:[
+      {lineNo:1,method:'现金',amount:0.01,receiptDate:'2026-11-23'},
+      {lineNo:2,method:'银行转账',amount:1.99,receiptDate:'2026-11-25'},
+    ],
+  });
+  assert.deepEqual(deposit,before);
+  assert.deepEqual(approvalDetails(configured,deposit,fields),approvalDetails(config,deposit,fields));
+});
+
+test('explicit prepayment rows also accompany generic or unavailable template configurations while legacy scalar stays unchanged', () => {
+  const paymentDetails=[{lineNo:1,method:'现金',amount:20,receiptDate:'2026-11-25'}];
+  const legacy={...order,type:'预收款订单',total:20,method:'现金'};
+  const deposit={...legacy,paymentDetails};
+  const fields=new Map([['receiptDate','2026-01-01']]);
+  for(const config of [configured,{prepaymentReceiptForm:false},undefined,null]) {
+    assert.deepEqual(approvalDraftValues(config,deposit,fields),{receiptDate:'2026-11-25'});
+    assert.deepEqual(approvalDetails(config,deposit,fields),{receiptDate:'2026-11-25',paymentDetails});
+    assert.deepEqual(approvalDraftValues(config,legacy,fields),{});
+    assert.deepEqual(approvalDetails(config,legacy,fields),{});
+    const hidden=new Map([...fields,['prepaymentPaymentDetails',JSON.stringify(paymentDetails)]]);
+    assert.deepEqual(approvalDetails(config,legacy,hidden),{receiptDate:'2026-11-25',paymentDetails});
+  }
+});
+
+test('editable prepayment form rows take precedence over stale controlled rows without mutating a legacy order', () => {
+  const config = {...configured,prepaymentReceiptForm:true};
+  const legacy = {...order,type:'预收款订单',method:'旧方式',total:100,
+    approvalDraft:{receiptDate:'2026-11-20'}};
+  const before = structuredClone(legacy);
+  const rows = [{method:'现金',amount:'20.00',receiptDate:'2026-11-24'}];
+  const fields = new Map([['prepaymentPaymentDetails',JSON.stringify(rows)],['receiptDate','2026-01-01']]);
+  const expected = {receiptDate:'2026-11-24',paymentDetails:[{lineNo:1,method:'现金',amount:20,receiptDate:'2026-11-24'}]};
+  assert.deepEqual(approvalDetails(config,legacy,fields),expected);
+  assert.deepEqual(approvalDraftValues(config,legacy,fields),{receiptDate:'2026-11-24'});
+  assert.deepEqual(approvalDetails(config,{...legacy,paymentDetails:[{method:'无效'}]},fields),expected);
+  assert.deepEqual(legacy,before);
+  assert.equal(Object.hasOwn(legacy,'paymentDetails'),false);
+});
+
+test('malformed or invalid explicit prepayment rows cannot silently fall back to a legacy receipt date', () => {
+  const config = {...configured,prepaymentReceiptForm:true};
+  const legacy = {...order,type:'预收款订单',method:'现金',total:100};
+  const fields = new Map([['receiptDate','2026-11-25']]);
+  for (const paymentDetails of [undefined,null,{},'bad',[],[{method:'预收款核销',amount:1,receiptDate:'2026-11-25'}],
+    [{method:'现金',amount:1,receiptDate:'2026-02-30'}]]) {
+    assert.throws(()=>approvalDetails(config,{...legacy,paymentDetails},fields),/明细|核销|日期/);
+    assert.throws(()=>approvalDraftValues(config,{...legacy,paymentDetails},fields),/明细|核销|日期/);
+  }
+  for(const raw of ['', 'not-json', 'null', '{}', '[]']) {
+    const invalid = new Map([...fields,['prepaymentPaymentDetails',raw]]);
+    assert.throws(()=>approvalDetails(config,legacy,invalid),/明细/);
+  }
+});
+
 test('real sales template recipient fields are explicit, trimmed and retained in draft snapshots', () => {
   const config = {...configured, salesRecipientRequired: true, salesDiscountRequired: true};
   const sales = {...order, items: [{product: 'p1', qty: '2', price: '10'}, {product: 'p2', qty: '1', price: '15'}]};
@@ -146,6 +212,20 @@ test('real sales template recipient fields are explicit, trimmed and retained in
   fields.set('recipientAddress', 'a'.repeat(501));
   assert.throws(() => approvalDetails(config, sales, fields), /最多500/);
   assert.deepEqual(sales.items.map(item => item.price), ['10', '15']);
+});
+
+test('display omits existing county grouping labels without rewriting structured or legacy address fields', () => {
+  for (const grouping of ['省直辖县', '省直辖县级行政区划', '省直辖行政单位']) {
+    const draft = {recipientProvince: '湖北省', recipientCity: grouping, recipientDistrict: '仙桃市', recipientAddress: '测试路10号'};
+    const before = structuredClone(draft);
+    assert.equal(recipientAddressText(draft), '湖北省仙桃市测试路10号');
+    assert.deepEqual(draft, before);
+  }
+  const legacy = {recipientAddress: '湖北省省直辖县仙桃市测试路10号'};
+  assert.equal(recipientAddressText(legacy), legacy.recipientAddress);
+  assert.deepEqual(Object.keys(legacy), ['recipientAddress']);
+  assert.equal(recipientAddressText({recipientProvince: '广东省', recipientCity: '东莞市', recipientDistrict: '松山湖', recipientAddress: '测试路10号'}), '广东省东莞市松山湖测试路10号');
+  assert.equal(recipientAddressText({recipientProvince: '北京市', recipientCity: '北京市', recipientDistrict: '朝阳区', recipientAddress: '测试路10号'}), '北京市朝阳区测试路10号');
 });
 
 test('approval discounts validate exact decimal limits without changing CRM prices', () => {

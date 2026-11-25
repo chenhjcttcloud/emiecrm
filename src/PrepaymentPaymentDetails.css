@@ -1,0 +1,15 @@
+.prepayment-payment-details{margin:22px 0;padding:18px;border:1px solid #e3e9f3;border-radius:10px;background:#fbfcff}
+.prepayment-payment-details-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.prepayment-payment-details-heading h3{font-size:14px;margin:0;color:#405475}
+.prepayment-payment-details-heading .secondary{display:flex;align-items:center;gap:5px}
+.prepayment-payment-detail-row{display:grid;grid-template-columns:24px minmax(150px,1.3fr) minmax(100px,1fr) minmax(140px,1fr) 44px;align-items:start;gap:10px;padding:14px 0;border-bottom:1px solid #e7edf5}
+.prepayment-payment-detail-row .field{min-width:0;margin:0}
+.prepayment-payment-detail-row .field>span{font-size:12px}
+.prepayment-payment-detail-row .field input{width:100%;box-sizing:border-box;min-width:0}
+.prepayment-payment-detail-row .field small{display:block;margin-top:7px;line-height:1.6}
+.prepayment-payment-detail-number{padding-top:29px;color:#91a0b8;font-variant-numeric:tabular-nums}
+.prepayment-payment-detail-row .prepayment-remove-detail{padding:28px 0 0;display:flex;align-items:center;justify-content:center;gap:2px;font-size:11px}
+.prepayment-payment-detail-total,.prepayment-payment-summary-total{display:flex;align-items:center;justify-content:space-between;padding-top:18px;font-size:13px;color:#647593}
+.prepayment-payment-detail-total output,.prepayment-payment-summary-total strong{font-size:20px;font-weight:600;color:#405b91;font-variant-numeric:tabular-nums}
+.prepayment-payment-method-note{display:block;margin-top:5px;max-width:210px;white-space:normal;font-size:11px;color:#95a2b8;line-height:1.6}
+@media(max-width:650px){.prepayment-payment-details{padding:12px}.prepayment-payment-detail-row{grid-template-columns:20px minmax(0,1fr) 44px;gap:10px 8px}.prepayment-payment-detail-number{grid-column:1;grid-row:1;padding-top:29px}.prepayment-payment-detail-row .field{grid-column:2}.prepayment-payment-detail-row .prepayment-remove-detail{grid-column:3;grid-row:1}.prepayment-payment-details-heading .secondary{font-size:11px;padding:7px 9px}}

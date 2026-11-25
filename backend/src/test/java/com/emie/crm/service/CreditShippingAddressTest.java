@@ -32,6 +32,47 @@ class CreditShippingAddressTest {
     assertTrue(CreditShippingAddress.valid(structured("澳门特别行政区","澳门半岛","花地玛堂区","测试路1号")));
   }
 
+  @Test void existingDirectoryCountyGroupsAndSpecialRegionsAcceptStructuredInputWithoutRewritingIt() {
+    for (String[] path : new String[][]{
+        {"河南省", "省直辖县", "济源市"}, {"湖北省", "省直辖县", "仙桃市"},
+        {"海南省", "省直辖县", "琼海市"}, {"重庆市", "县", "奉节县"},
+        {"澳门特别行政区", "离岛", "嘉模堂区"}, {"台湾省", "金门县", "金城镇"},
+        {"台湾省", "南投县", "南投市"}, {"台湾省", "连江县", "南竿乡"}}) {
+      var recipient = structured(path[0], path[1], path[2], "测试路10号");
+      var before = recipient.deepCopy();
+      assertTrue(CreditShippingAddress.valid(recipient), String.join("/", path));
+      assertEquals(before, recipient);
+    }
+    // The county-shaped city exception is limited to the Taiwan branch of the existing directory.
+    assertFalse(CreditShippingAddress.valid(structured("福建省", "金门县", "金城镇", "测试路10号")));
+    assertFalse(CreditShippingAddress.valid(structured("台湾省", "金门", "金城镇", "测试路10号")));
+    assertFalse(CreditShippingAddress.valid(structured("香港特别行政区", "离岛", "嘉模堂区", "测试路10号")));
+  }
+
+  @Test void nonstandardDirectoryDistrictNamesAreAllowedOnlyAtTheirExactParentPath() {
+    for (String[] path : new String[][]{
+        {"河北省", "保定市", "保定白沟新城"}, {"内蒙古自治区", "锡林郭勒盟", "乌拉盖管委会"},
+        {"广东省", "东莞市", "松山湖"}, {"广东省", "东莞市", "东莞港"},
+        {"广东省", "东莞市", "东莞生态园"}, {"广东省", "中山市", "火炬开发区街道办事处"},
+        {"海南省", "儋州市", "华南热作学院"}, {"青海省", "海西蒙古族藏族自治州", "大柴旦行政委员会"},
+        {"台湾省", "宜兰县", "钓鱼台"}, {"台湾省", "花莲县", "太鲁阁"}}) {
+      var recipient = structured(path[0], path[1], path[2], "测试路10号");
+      var before = recipient.deepCopy();
+      assertTrue(CreditShippingAddress.valid(recipient), String.join("/", path));
+      assertEquals(before, recipient);
+      assertFalse(CreditShippingAddress.valid(structured(path[0], "错误市", path[2], "测试路10号")), path[2]);
+      String otherProvince = "广东省".equals(path[0]) ? "河北省" : "广东省";
+      assertFalse(CreditShippingAddress.valid(structured(otherProvince, path[1], path[2], "测试路10号")), path[2]);
+      assertFalse(CreditShippingAddress.valid(structured(path[0], path[1], path[2] + "ABC", "测试路10号")), path[2]);
+      assertFalse(CreditShippingAddress.valid(structured(path[0], path[1], path[2].substring(0, 1) + "\n" + path[2].substring(1), "测试路10号")), path[2]);
+    }
+    assertFalse(CreditShippingAddress.valid(structured("广东省", "东莞市", "任意地点", "测试路10号")));
+    assertFalse(CreditShippingAddress.valid(structured("广东省", "东莞市", "ASCII", "测试路10号")));
+    assertFalse(CreditShippingAddress.valid(structured("广东省", "东莞市", "松山湖", "路".repeat(201))));
+    // These are structured-field compatibility cases; no new free-form full-address guessing is introduced.
+    assertFalse(CreditShippingAddress.valid(full("广东省东莞市松山湖测试路10号")));
+  }
+
   @Test void incompleteFullAddressesAndSpecialRegionFallbacksRequireExplicitAdministrativeFields() {
     for(String address:new String[]{"万科星火", "完整收货地址", "测试勿投递", "广东省深圳市万科星火online10栋",
         "深圳市龙岗区万科星火online10栋", "广东省龙岗区万科星火online10栋", "广东省深圳市南山区",
