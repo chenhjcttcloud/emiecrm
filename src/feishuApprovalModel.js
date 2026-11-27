@@ -172,7 +172,7 @@ export function suggestedCreditShop(shops, owner) {
 }
 
 export function jstNativeStatusLabel(status) {
-  return {WaitPay: '聚水潭待付款 / 账期待处理', WaitConfirm: '聚水潭待审核',
+  return {WaitPay: '聚水潭待付款 / 账期待处理', WaitConfirm: '聚水潭待销售审核',
     WaitFConfirm: '聚水潭待财务审核', Delivering: '聚水潭发货中', WaitOuterSent: '等待外仓发货',
     Sent: '聚水潭已发货', Cancelled: '聚水潭已取消', Question: '聚水潭订单异常'}[status] || '';
 }
@@ -189,7 +189,7 @@ export function creditPushView(order, approval, shipment) {
   if ((order.deletedAt || order.status === '已取消') && !accepted && !shipment) return null;
   const statuses = {QUEUED: ['待自动推送', 'info'], BLOCKED: ['自动推送需补充资料', 'warning'],
     SUBMITTING: ['正在推送聚水潭', 'info'], UNKNOWN: ['聚水潭推送结果待核对', 'warning'],
-    FAILED: ['聚水潭推送失败', 'error'], ACCEPTED: ['聚水潭已接单 / 待核对审核进度', 'info'],
+    FAILED: ['聚水潭推送失败', 'error'], ACCEPTED: ['聚水潭已接单', 'info'],
     PARTIAL: ['聚水潭部分发货', 'success'], SHIPPED: ['聚水潭已发货', 'success']};
   statuses.EXCEPTION = ['聚水潭订单异常', 'error'];
   statuses.CANCELLED = ['聚水潭订单已取消', 'warning'];
@@ -197,8 +197,9 @@ export function creditPushView(order, approval, shipment) {
   const draftOnly = !push && !shipment && order.status === '草稿';
   const [label, tone] = statuses[status] || [draftOnly ? '草稿未推送' : '正式提交后推送', 'info'];
   const nativeMessage = {WaitPay: '聚水潭返回待付款状态，请核对账期挂账资料；CRM实收按实际入账记录。',
-    WaitConfirm: '聚水潭原单待审核，财务直接在聚水潭审核；审核和发货进度以聚水潭回传为准。',
-    WaitFConfirm: '聚水潭原单等待财务审核，审核后继续发货流程。'}[nativeStatus];
+    WaitConfirm: '尚未进入待财务审核，需在聚水潭完成销售审核；账期挂账已付不代表审核通过。',
+    WaitFConfirm: '聚水潭原单已客审，等待财务审核放行；后续发货进度以聚水潭回传为准。',
+    Sent: '聚水潭已返回发货状态，仅表示已发货；不据此推定销售审核或财务审核履历。'}[nativeStatus];
   const issue = accepted && !['CANCELLED'].includes(actual) && nativeStatus !== 'Cancelled'
     && (['FAILED', 'REJECTED', 'CANCELED', 'DELETED', 'UNKNOWN'].includes(approval?.status) || order.status === '已取消' || order.deletedAt);
   const shippedWhilePending = accepted && (['PARTIAL', 'SHIPPED'].includes(actual) || nativeStatus === 'Sent')
@@ -207,7 +208,8 @@ export function creditPushView(order, approval, shipment) {
     : shippedWhilePending ? '飞书审批并行处理中' : '';
   const actualLabel = ['PARTIAL', 'SHIPPED'].includes(actual) ? label : jstNativeStatusLabel(nativeStatus) || label;
   return {label: actualLabel, tone: nativeStatus === 'WaitPay' ? 'warning' : ['WaitConfirm', 'WaitFConfirm'].includes(nativeStatus) ? 'info' : tone,
-    message: nativeMessage || shipment?.message || push?.message || (draftOnly ? '保存草稿不会推送聚水潭。' : '正式提交即并行发起飞书审批并推送聚水潭，财务在聚水潭审核。'),
+    message: nativeMessage || shipment?.message || push?.message || (draftOnly ? '保存草稿不会推送聚水潭。' : accepted && !nativeStatus
+      ? '聚水潭已接单，尚未回传审核状态，请在聚水潭核对进度。' : '正式提交即并行发起飞书审批并推送聚水潭，审核和发货进度以聚水潭回传为准。'),
     approvalWarning: issue ? approvalAttentionLabel + '，请核对聚水潭原单。驳回或撤回不会自动取消聚水潭订单；重新发起飞书审批继续沿用原单。'
       : shippedWhilePending ? '飞书审批并行处理中，聚水潭已发货或部分发货，请核对原单。' : '',
     approvalAttentionLabel,

@@ -10,6 +10,8 @@ import java.util.*;
 
 /** Converts an authoritative CRM order, with explicit SKU mapping and recipient data. */
 public class JushuitanOrderMapper {
+  static final String CRM_SOURCE_LABEL = "亿觅CRM推送";
+
   static String buyerAccount(String customerName) {
     require(customerName != null && !customerName.isBlank(), "请先确认客户名称，聚水潭买家账号使用客户名称");
     String name = customerName.strip();
@@ -72,6 +74,7 @@ public class JushuitanOrderMapper {
     out.put("wms_co_id", input.path("warehouseId").asLong());
     out.put("shop_id", input.path("shopId").asLong()).put("so_id", soId)
         .put("shop_buyer_id", buyerAccount(order.path("customer").asText())).put("shop_status", "WAIT_SELLER_SEND_GOODS")
+        .put("labels", CRM_SOURCE_LABEL)
         .put("order_date", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
         .put("pay_amount", total).put("freight", 0)
         .put("remark", warehouseRemark(order.path("note"), sandbox, 1000));

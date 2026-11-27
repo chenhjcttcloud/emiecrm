@@ -63,8 +63,8 @@ export default function OrderWarehousePicker({api,value={},disabled=false,logist
  return <section className="order-warehouse-picker" aria-label="订单发货仓库">
   {credit&&<><div className="order-credit-policy"><strong>{terms.mode==='ON_ACCOUNT_TENDER'?'账期挂账（非实收） · 提交即推送聚水潭':terms.mode==='NATIVE_CREDIT'?'原生授信账期 · 提交即推送聚水潭':'账期发货 · 待确认推送设置'}</strong>
    {terms.description&&<p>{terms.description}</p>}
-   {terms.mode==='ON_ACCOUNT_TENDER'&&<p>聚水潭将按“账期挂账（非实收）”处理为已付以放行；CRM 已收金额仍按实际到账记录。</p>}
-   <p>正式提交即并行发起飞书审批并推送聚水潭，财务直接在聚水潭审核；保存草稿不推送。</p>
+   {terms.mode==='ON_ACCOUNT_TENDER'&&<p>账期挂账只满足聚水潭支付节点，不代表销售或财务审核通过；CRM 已收金额仍按实际到账记录。</p>}
+   <p>正式提交即并行发起飞书审批并推送聚水潭，聚水潭销售审核、财务审核与飞书审批分别处理；保存草稿不推送。</p>
    <p>请确认店铺、仓库和收货资料。推送不登记收款，已收金额仍以实际入账为准。</p></div>
    <OrderSelect label="聚水潭店铺" required value={shopId} options={[{value:'',label:'请选择聚水潭店铺'},
     ...shops.map(row=>({value:row.id,label:row.name,detail:'编号 '+row.id})),

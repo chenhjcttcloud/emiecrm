@@ -293,7 +293,7 @@ public class JushuitanService {
         prior.put("status", "SUBMITTING").put("busy", true).put("startedAt", Instant.now().toEpochMilli());
         event(prior, "重新提交原始订单，沿用原聚水潭订单号"); store(prior); return prior;
       }
-      String soId = "CRM-" + UUID.randomUUID().toString().replace("-", "");
+      String soId = JushuitanOrderIdentity.create(order);
       var request = JushuitanOrderMapper.build(mapper, order, state.path("products"), input, soId, sandbox);
       var next = db.object().put("orderId", orderId).put("soId", soId).put("environment", sandbox ? "sandbox" : "production")
           .put("status", "SUBMITTING").put("busy", true).put("startedAt", Instant.now().toEpochMilli())
@@ -308,6 +308,7 @@ public class JushuitanService {
     try {
       var request = (ObjectNode) record.path("request");
       validateSkus(request);
+      JushuitanOrderIdentity.requireUnused(client, mapper, request);
       tx.executeWithoutResult(s -> { record.set("request", request); store(record); });
       uploading = true;
       record.put("upstreamAttempted", true);

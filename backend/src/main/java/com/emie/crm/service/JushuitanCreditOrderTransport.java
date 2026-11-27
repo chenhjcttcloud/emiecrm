@@ -59,6 +59,8 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
       if (prepared.frozen() && !validated.equals(record.path("request")))
         throw new ApiException("原订单曾被聚水潭明确拒绝，但商品校验结果已变化；不能修改冻结请求，请人工核对原单");
       if (!prepared.frozen()) record.set("request", canonicalRequest(validated));
+      // Human-readable numbers can already belong to another ERP order. Never adopt or overwrite that order.
+      JushuitanOrderIdentity.requireUnused(client, mapper, record.path("request"));
     } catch (RuntimeException failure) {
       finish(record, "FAILED", "账期推单资料校验未通过，请核对店铺、仓库及商品", record.path("upstreamAttempted").asBoolean());
       throw new JushuitanCreditPushService.Blocked(failure instanceof ApiException ? failure.getMessage()
@@ -143,7 +145,7 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
     boolean submitted = onSubmission(submission);
     if (!environment.equals(submission.environment()) || !MODE.equals(submission.input().path("accountingMode").asText())
         || submission.orderId().isBlank() || !submission.orderId().equals(submission.orderSnapshot().path("id").asText())
-        || !submission.soId().matches("CRM-[a-f0-9]{32}") || submission.attemptId().isBlank()
+        || !JushuitanOrderIdentity.valid(submission.soId(), submission.orderSnapshot()) || submission.attemptId().isBlank()
         || (submitted ? submission.submissionId().isBlank() : submission.policyVersion() != 1
             || !"APPROVAL_RESULT".equals(submission.trigger())
             || submission.approvalUuid().isBlank() || submission.instanceCode().isBlank()))
@@ -206,6 +208,7 @@ public class JushuitanCreditOrderTransport implements JushuitanCreditPushService
 
   private void requireIdentity(JsonNode record, JushuitanCreditPushService.Submission submission) {
     if (!submission.orderId().equals(record.path("orderId").asText()) || !submission.soId().equals(record.path("soId").asText())
+        || !JushuitanOrderIdentity.valid(record.path("soId").asText(), record.path("snapshot"))
         || (onSubmission(submission)
             ? record.path("policyVersion").asInt() != 2 || !"ORDER_SUBMISSION".equals(record.path("trigger").asText())
                 || !submission.submissionId().equals(record.path("submissionId").asText())

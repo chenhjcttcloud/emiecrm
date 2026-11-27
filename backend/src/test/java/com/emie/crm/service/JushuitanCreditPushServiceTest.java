@@ -67,6 +67,52 @@ class JushuitanCreditPushServiceTest {
         .put("status",status).put("message","隔离接口结果").put("upstreamAttempted",true);
   }
 
+  private void numberFrozenOrder(String soId) {
+    ((ObjectNode) state.path("orders").get(0)).put("orderNumber", "N2611260001");
+    ((ObjectNode) approval.path("orderSnapshot")).put("orderNumber", "N2611260001");
+    ((ObjectNode) push().path("orderSnapshot")).put("orderNumber", "N2611260001");
+    push().put("soId", soId);
+  }
+
+  @Test void aNewNumberedTaskUsesItsFrozenBusinessNumberAndAnUnknownTaskOnlyReconcilesIt() {
+    numberFrozenOrder("N2611260001"); when(transport.ready()).thenReturn(true);
+    when(transport.push(any())).thenAnswer(call -> {
+      var submission = call.getArgument(0, JushuitanCreditPushService.Submission.class);
+      assertEquals("N2611260001", submission.soId()); assertTrue(service.renew(submission));
+      return response(submission, "UNKNOWN");
+    });
+    service.process("o1"); assertEquals("UNKNOWN", push().path("status").asText());
+    when(transport.reconcile(any())).thenAnswer(call -> {
+      var submission = call.getArgument(0, JushuitanCreditPushService.Submission.class);
+      assertEquals("N2611260001", submission.soId()); return response(submission, "ACCEPTED");
+    });
+    service.retry("o1", operator); service.process("o1");
+    assertEquals("ACCEPTED", push().path("status").asText());
+    assertEquals("N2611260001", push().path("soId").asText());
+    verify(transport, times(1)).push(any()); verify(transport, times(1)).reconcile(any());
+    verify(db, never()).receipt(any());
+  }
+
+  @Test void aForeignBusinessNumberCannotAuthorizeTheFrozenTask() {
+    numberFrozenOrder("N2611260002"); when(transport.ready()).thenReturn(true);
+    service.process("o1");
+    assertEquals("BLOCKED", push().path("status").asText());
+    verify(transport, never()).push(any()); verify(transport, never()).reconcile(any());
+  }
+
+  @Test void anOldCrmIdentityOnANumberedOrderIsNotRekeyedDuringRecovery() {
+    String legacy = push().path("soId").asText(); numberFrozenOrder(legacy);
+    push().put("status", "UNKNOWN").put("attempted", true);
+    when(transport.ready()).thenReturn(true);
+    when(transport.reconcile(any())).thenAnswer(call -> {
+      var submission = call.getArgument(0, JushuitanCreditPushService.Submission.class);
+      assertEquals(legacy, submission.soId()); return response(submission, "ACCEPTED");
+    });
+    service.process("o1");
+    assertEquals("ACCEPTED", push().path("status").asText()); assertEquals(legacy, push().path("soId").asText());
+    verify(transport, never()).push(any()); verify(transport, times(1)).reconcile(any());
+  }
+
   @Test void unavailableTransportLeavesTheTrueApprovalAndMoneyIntact() {
     service.process("o1");
     assertEquals("APPROVED",approval.path("status").asText());

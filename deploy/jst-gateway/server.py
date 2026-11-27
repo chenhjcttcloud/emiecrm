@@ -1,9 +1,11 @@
 """Private fixed-egress JST gateway. No open proxy, no warehouse shipment actions."""
 from contextlib import closing
+from datetime import date
 import hashlib
 import hmac
 import json
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -21,6 +23,21 @@ READ_PATHS = {'/open/wms/partner/query', '/open/shops/query', '/open/logisticsco
 WRITE_PATHS = {'/open/jushuitan/orderaddress/update', '/open/jushuitan/order/remark/upload',
                '/open/jushuitan/orderbyoid/cancel'}
 DATABASE = os.getenv('GATEWAY_DATABASE', '/data/audit.sqlite3')
+
+
+def valid_external_order_number(value):
+    if not isinstance(value, str):
+        return False
+    # Retain the gateway's historical CRM-prefix contract for already frozen requests.
+    if value.startswith('CRM-'):
+        return len(value) <= 41
+    if len(value) > 32 or re.fullmatch(r'N[0-9]{6}[0-9]{4,}', value) is None:
+        return False
+    try:
+        date(2000 + int(value[1:3]), int(value[3:5]), int(value[5:7]))
+        return 0 < int(value[7:]) <= 9223372036854775807
+    except ValueError:
+        return False
 
 
 def configured():
@@ -224,8 +241,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError()
                 order = body[0]
                 if (not isinstance(order.get('shop_id'), int) or order['shop_id'] <= 0 or
-                    not isinstance(order.get('so_id'), str) or not order['so_id'].startswith('CRM-') or
-                    len(order['so_id']) > 41 or order.get('shop_status') != 'WAIT_SELLER_SEND_GOODS' or
+                    not valid_external_order_number(order.get('so_id')) or order.get('shop_status') != 'WAIT_SELLER_SEND_GOODS' or
                     not isinstance(order.get('items'), list) or not order['items']):
                     raise ValueError()
                 path = '/open/jushuitan/orders/upload'

@@ -1013,7 +1013,8 @@ public class BusinessService {
         String id = shipment.path("orderId").asText();
         var order = orderIndex.get(id);
         require(order != null && shipmentIds.add(id) && id.length() <= 191
-            && shipment.path("soId").asText().matches("CRM-[a-f0-9]{32}")
+            && JushuitanOrderIdentity.valid(shipment.path("soId").asText(), order)
+            && JushuitanOrderIdentity.valid(shipment.path("soId").asText(), shipment.path("snapshot"))
             && shipment.path("soId").equals(shipment.path("request").path("so_id"))
             && List.of("sandbox", "production").contains(shipment.path("environment").asText())
             && !coreChanged(order, shipment.path("snapshot"))

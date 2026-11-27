@@ -94,6 +94,60 @@ class FeishuSalesApprovalDatabaseTest {
     verify(client).create(eq("fixture-template"), eq("ou_sales"), eq(savedUuid), any(ArrayNode.class));
   }
 
+  @ParameterizedTest @ValueSource(strings={"unified", "legacy"})
+  void numberedOrderOutboxAndFrozenShipmentKeepTheirIdentityThroughRetryAndRestore(String mode) throws Exception {
+    var catalogState = (ObjectNode) db.state(false);
+    ((ObjectNode) catalogState.path("products").get(0)).put("jstEnvironment", "sandbox");
+    db.state(catalogState);
+    var directory = mock(JushuitanService.class);
+    when(directory.warehouses()).thenReturn(mapper.readTree("[{\"id\":5,\"name\":\"可信发货仓\"}]"));
+    service = new FeishuSalesApprovalService(db, client, mapper, manager, business, executor, directory);
+    String number = new OrderNumberService(db, manager).reserve("unified-so-fixture", writer).path("orderNumber").asText();
+    var input = request();
+    order(input.path("data")).put("id", number).putObject("approvalDraft")
+        .put("creditFulfillment", true).put("shopId", "15").put("shopName", "隔离店铺")
+        .put("warehouseId", "5").put("warehouseName", "可信发货仓").put("logisticsMode", "WAREHOUSE")
+        .put("recipientName", "隔离收件人").put("recipientPhone", "00000000000")
+        .put("recipientProvince", "广东省").put("recipientCity", "深圳市").put("recipientDistrict", "龙岗区")
+        .put("recipientAddress", "隔离测试路10号");
+    input.withObject("approval").put("warehouseId", "5").put("warehouseName", "可信发货仓");
+    service.createAndSubmit(number, input, writer);
+    var task = (ObjectNode) db.parse(jdbc.queryForObject("SELECT payload FROM jst_credit_pushes WHERE order_id=?", String.class, number));
+    assertEquals(number, task.path("soId").asText());
+    String soId = "legacy".equals(mode) ? "CRM-" + "a".repeat(32) : number;
+    if ("legacy".equals(mode)) {
+      task.put("soId", soId);
+      jdbc.update("UPDATE jst_credit_pushes SET payload=? WHERE order_id=?", db.encode(task), number);
+    }
+    String frozenTask = jdbc.queryForObject("SELECT payload FROM jst_credit_pushes WHERE order_id=?", String.class, number);
+    var response = service.createAndSubmit(number, input.deepCopy(), writer);
+    assertEquals("QUEUED", response.path("approval").path("status").asText());
+    assertEquals(frozenTask, jdbc.queryForObject("SELECT payload FROM jst_credit_pushes WHERE order_id=?", String.class, number));
+    var snapshot = currentOrder().deepCopy();
+    var request = JushuitanOrderMapper.buildSubmittedCredit(mapper, snapshot, db.state(false).path("products"),
+        task.path("input"), soId, true);
+    assertEquals(soId, request.path("so_id").asText());
+    assertEquals(soId + "-1", request.path("items").get(0).path("outer_oi_id").asText());
+    assertEquals(soId + "-PAY", request.path("pay").path("outer_pay_id").asText());
+    var shipment = mapper.createObjectNode().put("orderId", number).put("soId", soId)
+        .put("status", "UNKNOWN").put("environment", "sandbox").put("creditFulfillment", true)
+        .put("accountingMode", "ON_ACCOUNT_TENDER").put("upstreamAttempted", true).put("busy", false);
+    shipment.set("snapshot", snapshot); shipment.set("request", request);
+    jdbc.update("INSERT INTO jst_shipments(order_id,payload) VALUES(?,?)", number, db.encode(shipment));
+    String frozenRequest = db.parse(jdbc.queryForObject("SELECT payload FROM jst_shipments WHERE order_id=?", String.class, number)).path("request").toString();
+    var backup = (ObjectNode) mapper.valueToTree(business.backup());
+    new TransactionTemplate(manager).executeWithoutResult(tx -> business.restore(backup, writer));
+    var restored = db.parse(jdbc.queryForObject("SELECT payload FROM jst_shipments WHERE order_id=?", String.class, number));
+    assertEquals(soId, restored.path("soId").asText());
+    assertEquals(frozenRequest, restored.path("request").toString());
+    assertEquals(soId, db.parse(jdbc.queryForObject("SELECT payload FROM jst_credit_pushes WHERE order_id=?", String.class, number)).path("soId").asText());
+    assertEquals(0, currentOrder().path("paid").asInt());
+    assertEquals(0, db.state(false).path("customers").get(0).path("balance").asInt());
+    assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM receipts", Integer.class));
+    verify(client, never()).create(any(), any(), any(), any());
+    verify(directory, times(1)).warehouses();
+  }
+
   @ParameterizedTest @ValueSource(strings={"销售订单", "预收款订单"})
   void reservedShortNumberIsClaimedAndFrozenIntoTheNativeApprovalWithoutCreatingCash(String type) throws Exception {
     var numbering = new OrderNumberService(db, manager);

@@ -148,7 +148,9 @@ test('credit push states show unknown and native waiting-payment honestly withou
  assert.match(creditPushView(sale,{creditPush:{status:'BLOCKED',message:'请补店铺'}}).message,/请补店铺/);
  assert.match(creditPushView(sale,{creditPush:{status:'UNKNOWN'}}).label,/结果待核对/);
  const accepted=creditPushView(sale,{creditPush:{status:'ACCEPTED',soId:'CRM-credit',oId:20}});
- assert.equal(accepted.label,'聚水潭已接单 / 待核对审核进度');
+ assert.equal(accepted.label,'聚水潭已接单');
+ assert.match(accepted.message,/尚未回传审核状态/);
+ assert.doesNotMatch(accepted.message,/已客审|等待财务审核放行/);
  assert.equal(accepted.oId,20);
  assert.equal(accepted.soId,'CRM-credit');
  const native=creditPushView(sale,{creditPush:{status:'ACCEPTED'}},{creditFulfillment:true,status:'ACCEPTED',nativeStatus:'WaitPay',oId:20});
@@ -166,11 +168,12 @@ test('formal submission tracks ERP independently of Feishu outcome and retains t
  const queued=creditPushView(sale,{status:'SUBMITTING',creditPush:{status:'QUEUED',trigger:'ORDER_SUBMISSION',orderSubmissionId:'submit-1'}});
  assert.equal(queued.label,'待自动推送');assert.equal(queued.trigger,'ORDER_SUBMISSION');assert.equal(queued.orderSubmissionId,'submit-1');
  assert.doesNotMatch(queued.message,/审批通过后/);
- const waiting=creditPushView(sale,{status:'PENDING'},shipment);assert.equal(waiting.label,'聚水潭待审核');assert.match(waiting.message,/财务直接在聚水潭审核/);assert.equal(waiting.approvalWarning,'');
- assert.equal(creditPushView(sale,{status:'PENDING'},{...shipment,nativeStatus:'WaitFConfirm'}).label,'聚水潭待财务审核');
+ const waiting=creditPushView(sale,{status:'PENDING'},shipment);assert.equal(waiting.label,'聚水潭待销售审核');assert.match(waiting.message,/尚未进入待财务审核/);assert.match(waiting.message,/需在聚水潭完成销售审核/);assert.match(waiting.message,/账期挂账已付不代表审核通过/);assert.equal(waiting.approvalWarning,'');
+ const waitingFinance=creditPushView(sale,{status:'PENDING'},{...shipment,nativeStatus:'WaitFConfirm'});
+ assert.equal(waitingFinance.label,'聚水潭待财务审核');assert.match(waitingFinance.message,/已客审，等待财务审核放行/);
  for(const status of ['FAILED','REJECTED','CANCELED','DELETED']){
   const result=creditPushView({...sale,status:'草稿'},{status},shipment);
-  assert.equal(result.label,'聚水潭待审核');assert.match(result.approvalWarning,/飞书审批异常，请核对聚水潭原单/);
+  assert.equal(result.label,'聚水潭待销售审核');assert.match(result.approvalWarning,/飞书审批异常，请核对聚水潭原单/);
   assert.match(result.approvalWarning,/不会自动取消/);assert.match(result.approvalWarning,/继续沿用原单/);assert.equal(result.soId,'CRM-original');
  }
  const pendingShipped=creditPushView(sale,{status:'PENDING'},{...shipment,status:'SHIPPED',nativeStatus:'Sent'});
@@ -180,6 +183,11 @@ test('formal submission tracks ERP independently of Feishu outcome and retains t
  assert.doesNotMatch(uncertain.approvalWarning,/审批异常/);
  const rejectedShipped=creditPushView({...sale,status:'草稿'},{status:'REJECTED'},{...shipment,status:'SHIPPED',nativeStatus:'Sent'});
  assert.equal(rejectedShipped.label,'聚水潭已发货');assert.match(rejectedShipped.approvalWarning,/飞书审批异常/);
+ for(const result of [pendingShipped,rejectedShipped]){
+  assert.match(result.message,/仅表示已发货/);
+  assert.match(result.message,/不据此推定销售审核或财务审核履历/);
+  assert.doesNotMatch(result.message,/已客审|已完成.*审核|已通过.*审核/);
+ }
  assert.equal(creditPushView({...sale,status:'已取消'},{status:'CANCELED'},shipment).soId,'CRM-original');
  assert.equal(orderExecutionView({...sale,status:'已取消'},shipment).unpaid,12200);
  assert.equal(creditPushView({...sale,status:'草稿'},null).label,'草稿未推送');

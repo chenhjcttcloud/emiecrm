@@ -625,6 +625,60 @@ class BusinessServiceTest {
     }
     verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
   }
+  private ObjectNode shortNumberShipment(String soId) {
+    String number="N2611260001";order(stored).put("id",number);
+    var shipment=mapper.createObjectNode().put("orderId",number).put("soId",soId).put("oId",123)
+        .put("environment","production").put("status","SUBMITTING").put("busy",true).put("upstreamAttempted",true);
+    shipment.set("snapshot",order(stored).deepCopy());
+    shipment.putObject("request").put("so_id",soId).put("shop_id",1).put("wms_co_id",10048859);
+    return shipment;
+  }
+  private void shipmentBackupMocks() throws Exception {
+    when(db.parse(anyString())).thenAnswer(call->mapper.readTree(call.getArgument(0,String.class)));
+    when(db.encode(any())).thenAnswer(call->mapper.writeValueAsString(call.getArgument(0)));
+    when(db.rows(contains("order_number_reservations"),anyString())).thenReturn(List.of());
+  }
+  @ParameterizedTest
+  @ValueSource(strings={"N2611260001","CRM-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+  void shipmentBackupRestoresTheExactFrozenBusinessOrLegacyExternalIdentity(String soId) throws Exception {
+    var shipment=shortNumberShipment(soId);shipmentBackupMocks();
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    var assets=mock(AssetService.class);when(assets.backup(any())).thenReturn(Map.of());service=new BusinessService(db,assets);
+    var backup=(ObjectNode)mapper.valueToTree(service.backup());
+    assertEquals(shipment,backup.path("jstShipments").get(0));
+    service.restore(backup,admin);
+    var encoded=org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(db.jdbc()).update(eq("INSERT IGNORE INTO jst_shipments(order_id,payload) VALUES(?,?)"),eq("N2611260001"),encoded.capture());
+    var restored=mapper.readTree(encoded.getValue());
+    assertEquals(soId,restored.path("soId").asText());assertEquals(shipment.path("request"),restored.path("request"));
+    assertEquals(shipment.path("snapshot"),restored.path("snapshot"));assertEquals("UNKNOWN",restored.path("status").asText());
+    assertFalse(restored.path("busy").asBoolean());assertEquals(0,order(stored).path("paid").asInt());
+    verify(db,never()).receipt(any());
+  }
+  @Test void restoredShortExternalNumberMustMatchBothCurrentBusinessNumberAndFrozenSnapshot() throws Exception {
+    shipmentBackupMocks();
+    for(boolean forgeFrozenHeader:List.of(false,true)) {
+      var shipment=shortNumberShipment(forgeFrozenHeader?"N2611260001":"N2611260002");
+      ((ObjectNode)shipment.path("snapshot")).put("orderNumber","N2611260002");
+      var backup=mapper.createObjectNode().put("version",1);backup.set("state",draft());backup.putArray("receipts");
+      backup.putArray("jstShipments").add(shipment);
+      var failure=assertThrows(ApiException.class,()->service.restore(backup,admin));
+      assertTrue(failure.getMessage().contains("发货备份与订单不匹配"),failure.getMessage());
+    }
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
+  @Test void existingShortShipmentCannotBeRenamedOrReboundThroughRestore() throws Exception {
+    var shipment=shortNumberShipment("N2611260001");shipmentBackupMocks();
+    when(db.rows("SELECT payload FROM jst_shipments")).thenReturn(List.of(Map.of("payload",shipment.toString())));
+    var changed=shipment.deepCopy().put("soId","N2611260002");
+    ((ObjectNode)changed.path("request")).put("so_id","N2611260002");
+    ((ObjectNode)changed.path("snapshot")).put("orderNumber","N2611260002");
+    var backup=mapper.createObjectNode().put("version",1);backup.set("state",draft());backup.putArray("receipts");
+    backup.putArray("jstShipments").add(changed);
+    var failure=assertThrows(ApiException.class,()->service.restore(backup,admin));
+    assertTrue(failure.getMessage().contains("备份早于现有聚水潭变更"));
+    verify(db,never()).state(any(JsonNode.class));verify(db,never()).receipt(any());
+  }
   @Test void effectiveAndPendingShipmentProductsCannotBeDeleted() throws Exception {
     ((ArrayNode)stored.path("products")).addObject().put("id","p2").put("name","变更新商品");
     var shipment=json("{\"orderId\":\"o1\",\"effectiveOrder\":{\"items\":[{\"product\":\"p2\"}]}}");

@@ -401,6 +401,7 @@ public class JushuitanCreditPushService {
         || !submission.environment().equals(task.path("environment").asText())
         || !submission.attemptId().equals(task.path("attemptId").asText())
         || !submission.soId().equals(task.path("soId").asText())
+        || !JushuitanOrderIdentity.valid(task.path("soId").asText(), task.path("orderSnapshot"))
         || !"SUBMITTING".equals(task.path("status").asText())) return false;
     if (JushuitanCreditPushPolicy.isParallelJob(task))
       return JushuitanCreditPushPolicy.SUBMISSION_TRIGGER.equals(submission.trigger())
@@ -416,7 +417,7 @@ public class JushuitanCreditPushService {
     if (task == null || !JushuitanCreditPushPolicy.ordinary(order)
         || !Set.of("草稿", "审批中", "已批准").contains(order.path("status").asText())
         || !task.path("orderId").asText().equals(order.path("id").asText())
-        || !task.path("soId").asText().matches("CRM-[a-f0-9]{32}")
+        || !JushuitanOrderIdentity.valid(task.path("soId").asText(), task.path("orderSnapshot"))
         || !JushuitanCreditPushPolicy.ACCOUNTING_MODE.equals(task.path("accountingMode").asText())
         || !JushuitanCreditPushPolicy.sameApprovedContents(task.path("orderSnapshot"), order)) return false;
     if (JushuitanCreditPushPolicy.isParallelJob(task)) return JushuitanCreditPushPolicy.optedIn(task.path("orderSnapshot"));

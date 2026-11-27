@@ -163,7 +163,7 @@ final class JushuitanCreditPushPolicy {
     ObjectNode order = snapshot.deepCopy();
     if (!parallel) order.put("status", "已批准");
     var push = JSON.objectNode().put("policyVersion", parallel ? SUBMISSION_VERSION : VERSION).put("orderId", approval.path("orderId").asText())
-        .put("soId", "CRM-" + UUID.randomUUID().toString().replace("-", ""))
+        .put("soId", JushuitanOrderIdentity.create(order))
         .put("approvalUuid", approval.path("uuid").asText()).put("instanceCode", approval.path("instanceCode").asText())
         .put("accountingMode", approval.path("creditPushAccountingMode").asText())
         .put("environment", environment).put("status", "QUEUED").put("attempts", 0).put("attempted", false)

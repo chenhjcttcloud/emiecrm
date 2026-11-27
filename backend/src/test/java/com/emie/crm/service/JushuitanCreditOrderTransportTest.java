@@ -18,6 +18,7 @@ import static org.mockito.Mockito.*;
 
 class JushuitanCreditOrderTransportTest {
   private static final String SO = "CRM-0123456789abcdef0123456789abcdef";
+  private static final String NUMBER = "N2611260001";
   private static final String SANDBOX_WARNING = "【CRM沙箱测试，禁止实际发货】";
   private static final String OLD_BUYER = "CRM-C-" + "a".repeat(40);
   private static final String OLD_REMARK = SANDBOX_WARNING + "CRM订单：o1；审批快照时CRM已收：0.00；账期挂账（非实收）；财务须在聚水潭审核";
@@ -84,6 +85,123 @@ class JushuitanCreditOrderTransportTest {
 
   private JsonNode upload(boolean success,String id,String so) throws Exception {
     return json("{\"code\":0,\"data\":{\"datas\":[{\"so_id\":\""+so+"\",\"o_id\":"+id+",\"issuccess\":"+success+"}]}}");
+  }
+
+  private JushuitanCreditPushService.Submission numbered(String soId, String attempt) throws Exception {
+    var original = submission(); var snapshot = (ObjectNode) original.orderSnapshot().deepCopy();
+    snapshot.put("orderNumber", NUMBER);
+    return new JushuitanCreditPushService.Submission(original.orderId(), soId, original.approvalUuid(), original.instanceCode(),
+        original.environment(), snapshot, original.products(), original.input(), attempt);
+  }
+
+  private JsonNode emptyNumberLookup() throws Exception {
+    return json("{\"code\":0,\"data\":{\"orders\":[],\"has_next\":false}}");
+  }
+
+  @Test void newBusinessNumberIsUsedByNativeOrderPaymentAndItemReferencesAfterReadOnlyCollisionCheck() throws Exception {
+    var submission = numbered(NUMBER, "number-first"); var before = submission.orderSnapshot().deepCopy();
+    when(client.query(eq("/open/orders/single/query"), any())).thenAnswer(call -> {
+      JsonNode query = call.getArgument(1);
+      assertEquals(1, query.path("shop_id").asLong()); assertEquals(NUMBER, query.path("so_ids").get(0).asText());
+      assertFalse(saved().path("upstreamAttempted").asBoolean()); return emptyNumberLookup();
+    });
+    when(client.upload(any())).thenAnswer(call -> {
+      JsonNode request = ((JsonNode) call.getArgument(0)).get(0);
+      assertEquals(NUMBER, request.path("so_id").asText());
+      assertEquals("亿觅CRM推送", request.path("labels").asText());
+      assertEquals(NUMBER + "-1", request.path("items").get(0).path("outer_oi_id").asText());
+      assertEquals(NUMBER + "-PAY", request.path("pay").path("outer_pay_id").asText());
+      assertEquals(NUMBER, request.path("pay").path("buyer_account").asText());
+      return upload(true, "123", NUMBER);
+    });
+    assertEquals("ACCEPTED", transport.push(submission).path("status").asText());
+    assertEquals(NUMBER, saved().path("soId").asText()); assertEquals(before, submission.orderSnapshot());
+    assertEquals(0, saved().path("snapshot").path("paid").asInt());
+    verify(client, times(1)).query(eq("/open/orders/single/query"), any()); verify(client, times(1)).upload(any());
+  }
+
+  @Test void collisionOrUnverifiableLookupBlocksANewNumberWithoutClaimingAnUpstreamAttempt() throws Exception {
+    for (JsonNode response : new JsonNode[]{queried("WaitConfirm", 999, NUMBER), json("{\"code\":500}"), json("{\"code\":0,\"data\":{}}")}) {
+      persisted = null;
+      when(client.query(eq("/open/orders/single/query"), any())).thenReturn(response);
+      assertThrows(JushuitanCreditPushService.Blocked.class, () -> transport.push(numbered(NUMBER, "number-first")));
+      assertEquals(NUMBER, saved().path("soId").asText()); assertFalse(saved().path("upstreamAttempted").asBoolean());
+      assertFalse(saved().path("busy").asBoolean());
+    }
+    persisted = null;
+    when(client.query(eq("/open/orders/single/query"), any())).thenThrow(new ApiException("lookup unavailable"));
+    assertThrows(JushuitanCreditPushService.Blocked.class, () -> transport.push(numbered(NUMBER, "number-first")));
+    assertFalse(saved().path("upstreamAttempted").asBoolean());
+    verify(client, never()).upload(any()); verify(queue, never()).renew(any());
+  }
+
+  @Test void unknownNumberedUploadOnlyQueriesTheFrozenShopAndNeverResends() throws Exception {
+    when(client.query(eq("/open/orders/single/query"), any())).thenReturn(emptyNumberLookup());
+    when(client.upload(any())).thenThrow(new ApiException("timeout"));
+    assertEquals("UNKNOWN", transport.push(numbered(NUMBER, "number-first")).path("status").asText());
+    var original = saved().path("request").deepCopy(); var source = numbered(NUMBER, "number-recovery");
+    var changed = (ObjectNode) source.input().deepCopy(); changed.put("shopId", 999).put("warehouseId", 999);
+    var retry = new JushuitanCreditPushService.Submission(source.orderId(), NUMBER, source.approvalUuid(), source.instanceCode(),
+        source.environment(), source.orderSnapshot(), mapper.createArrayNode(), changed, source.attemptId());
+    when(client.query(eq("/open/orders/single/query"), any())).thenAnswer(call -> {
+      JsonNode query = call.getArgument(1);
+      assertEquals(1, query.path("shop_id").asLong()); assertEquals(NUMBER, query.path("so_ids").get(0).asText());
+      return queried("Sent", 123, NUMBER);
+    });
+    assertEquals("SHIPPED", transport.push(retry).path("status").asText());
+    assertEquals(original, saved().path("request")); verify(client, times(1)).upload(any());
+    verify(queue, times(1)).renew(any()); verify(client, times(2)).query(eq("/open/orders/single/query"), any());
+  }
+
+  @Test void anUnrelatedBusinessNumberCannotAuthorizeOrReplaceThePersistedFrozenSnapshot() throws Exception {
+    assertThrows(JushuitanCreditPushService.Blocked.class, () -> transport.push(numbered("N2611260002", "foreign")));
+    assertNull(persisted); verify(client, never()).query(anyString(), any()); verify(client, never()).upload(any());
+    when(client.query(eq("/open/orders/single/query"), any())).thenReturn(emptyNumberLookup());
+    when(client.upload(any())).thenReturn(upload(true, "123", NUMBER));
+    transport.push(numbered(NUMBER, "first"));
+    var changed = saved(); ((ObjectNode) changed.path("snapshot")).put("orderNumber", "N2611260002"); persisted = changed.toString();
+    assertThrows(JushuitanCreditPushService.Blocked.class, () -> transport.push(numbered(NUMBER, "second")));
+    verify(client, times(1)).upload(any());
+  }
+
+  @Test void aConfirmedNumberedRejectionRetriesOnlyTheSameFrozenBodyAfterAnotherEmptyCollisionCheck() throws Exception {
+    when(client.query(eq("/open/orders/single/query"), any())).thenReturn(emptyNumberLookup());
+    when(client.upload(any())).thenReturn(upload(false, "0", NUMBER));
+    assertEquals("FAILED", transport.push(numbered(NUMBER, "first")).path("status").asText());
+    var frozen = saved().path("request").deepCopy(); var original = numbered(NUMBER, "explicit-retry");
+    var changedInput = (ObjectNode) original.input().deepCopy(); changedInput.put("shopId", 999);
+    var retry = new JushuitanCreditPushService.Submission(original.orderId(), NUMBER, original.approvalUuid(), original.instanceCode(),
+        original.environment(), original.orderSnapshot(), original.products(), changedInput, original.attemptId());
+    when(client.upload(any())).thenAnswer(call -> {
+      assertEquals(frozen, ((JsonNode) call.getArgument(0)).get(0)); return upload(true, "123", NUMBER);
+    });
+    assertEquals("ACCEPTED", transport.push(retry).path("status").asText());
+    assertEquals(frozen, saved().path("request"));
+    verify(client, times(2)).query(eq("/open/orders/single/query"), any()); verify(client, times(2)).upload(any());
+    verify(db, times(1)).audit(eq("SYSTEM"), anyString(), any(JsonNode.class));
+  }
+
+  @Test void aCollisionAfterConfirmedRejectionDoesNotPermitASecondNumberedUpload() throws Exception {
+    when(client.query(eq("/open/orders/single/query"), any())).thenReturn(emptyNumberLookup());
+    when(client.upload(any())).thenReturn(upload(false, "0", NUMBER)); transport.push(numbered(NUMBER, "first"));
+    var frozen = saved().path("request").deepCopy();
+    when(client.query(eq("/open/orders/single/query"), any())).thenReturn(queried("WaitConfirm", 999, NUMBER));
+    assertTrue(assertThrows(JushuitanCreditPushService.Blocked.class,
+        () -> transport.push(numbered(NUMBER, "explicit-retry"))).getMessage().contains("已存在"));
+    assertEquals(frozen, saved().path("request")); assertTrue(saved().path("confirmedRejected").asBoolean());
+    assertTrue(saved().path("upstreamAttempted").asBoolean()); verify(client, times(1)).upload(any());
+  }
+
+  @Test void anExistingCrmRequestOnANumberedOrderRetainsItsExactIdentityDuringUnknownRecovery() throws Exception {
+    var record = oldFrozenRecord("UNKNOWN", false); ((ObjectNode) record.path("snapshot")).put("orderNumber", NUMBER);
+    persisted = record.toString(); var frozen = record.path("request").deepCopy();
+    when(client.query(eq("/open/orders/single/query"), any())).thenAnswer(call -> {
+      JsonNode query = call.getArgument(1);
+      assertEquals(SO, query.path("so_ids").get(0).asText()); return queried("WaitConfirm", 123, SO);
+    });
+    assertEquals("ACCEPTED", transport.push(numbered(SO, "legacy-recovery")).path("status").asText());
+    assertEquals(frozen, saved().path("request")); assertEquals(SO + "-PAY", saved().at("/request/pay/outer_pay_id").asText());
+    verify(client, never()).upload(any()); verify(queue, never()).renew(any()); verify(shipments, never()).validateCreditRequest(any());
   }
 
   private JushuitanCreditPushService.Submission submitted(String approvalUuid,String instanceCode,String identity) throws Exception {
@@ -175,19 +293,22 @@ class JushuitanCreditOrderTransportTest {
     assertEquals("ACCEPTED",result.path("status").asText());assertEquals(SO,result.path("soId").asText());
     assertEquals(original,saved().path("request"));assertEquals(OLD_BUYER,saved().path("request").path("shop_buyer_id").asText());
     assertEquals(OLD_REMARK,saved().path("request").path("remark").asText());
+    assertFalse(saved().path("request").has("labels"));
     assertEquals(SO+"-PAY",saved().path("request").path("pay").path("outer_pay_id").asText());
     verify(client,never()).upload(any());verify(shipments,never()).validateCreditRequest(any());verify(queue,never()).renew(any());
     verify(db,never()).receipt(any());verify(db,never()).state(any(JsonNode.class));
   }
 
   @Test void explicitlyRejectedLegacyRequestRetriesTheSameOldHashRemarkAndPaymentReferences() throws Exception {
-    persisted=oldFrozenRecord("FAILED",true).toString();var original=saved().path("request").deepCopy();
-    var base=submission();var snapshot=(ObjectNode)base.orderSnapshot().deepCopy();snapshot.put("customer","客户已改名").put("note","新的业务备注");
+    var retained=oldFrozenRecord("FAILED",true);((ObjectNode)retained.path("snapshot")).put("orderNumber",NUMBER);
+    persisted=retained.toString();var original=saved().path("request").deepCopy();
+    var base=numbered(SO,"legacy-explicit-original");var snapshot=(ObjectNode)base.orderSnapshot().deepCopy();snapshot.put("customer","客户已改名").put("note","新的业务备注");
     var retry=new JushuitanCreditPushService.Submission(base.orderId(),SO,base.approvalUuid(),base.instanceCode(),base.environment(),
         snapshot,base.products(),base.input(),"explicit-new-attempt");
     when(client.upload(any())).thenAnswer(call->{
       var request=((JsonNode)call.getArgument(0)).get(0);
       assertEquals(original,request);assertEquals(original,saved().path("request"));
+      assertFalse(request.has("labels"));
       assertEquals(OLD_BUYER,request.path("shop_buyer_id").asText());assertEquals(OLD_REMARK,request.path("remark").asText());
       assertEquals(SO,request.path("so_id").asText());assertEquals(SO+"-PAY",request.path("pay").path("outer_pay_id").asText());
       assertEquals(SO,request.path("pay").path("buyer_account").asText());assertEquals("账期挂账（非实收）",request.path("pay").path("payment").asText());
@@ -207,7 +328,7 @@ class JushuitanCreditOrderTransportTest {
     verify(client,times(1)).upload(any());
   }
   private JsonNode queried(String status,long id,String so) throws Exception {
-    return json("{\"code\":0,\"data\":{\"orders\":[{\"shop_id\":1,\"so_id\":\""+so+"\",\"o_id\":"+id+",\"status\":\""+status+"\"}]}}");
+    return json("{\"code\":0,\"data\":{\"has_next\":false,\"orders\":[{\"shop_id\":1,\"so_id\":\""+so+"\",\"o_id\":"+id+",\"status\":\""+status+"\"}]}}");
   }
 
   @Test void explicitServerAccountingModeAndUploadCapabilityAreBothRequired() throws Exception {

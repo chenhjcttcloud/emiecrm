@@ -56,6 +56,55 @@ class JushuitanOrderMapperTest {
     assertEquals("SKU-1",r.path("items").get(0).path("sku_id").asText());
     assertTrue(r.path("remark").asText().contains("禁止实际发货"));
   }
+
+  @Test void everyNewUploadPathCarriesTheFixedSourceLabelWithoutChangingBusinessOrPaymentFields() throws Exception {
+    for (boolean sandbox : new boolean[]{true, false}) for (String path : new String[]{"paid", "approved-credit", "submitted-credit"}) {
+      String soId="N2611270001", note="请按客户要求分箱\n到货前电话联系";
+      var original=order().put("id",soId).put("customer","客户真实名称").put("note",note);
+      boolean credit=!path.equals("paid");
+      if (credit) original.put("paid",0);
+      if (path.equals("submitted-credit")) {
+        original.put("status","审批中");original.putObject("approvalDraft").put("creditFulfillment",true);
+      }
+      var catalog=products().deepCopy();
+      ((ObjectNode)catalog.get(0)).put("jstEnvironment",sandbox?"sandbox":"production");
+      var input=input();var before=original.deepCopy();var catalogBefore=catalog.deepCopy();var inputBefore=input.deepCopy();
+      var result=switch(path) {
+        case "approved-credit" -> JushuitanOrderMapper.buildCredit(m,original,catalog,input,soId,sandbox);
+        case "submitted-credit" -> JushuitanOrderMapper.buildSubmittedCredit(m,original,catalog,input,soId,sandbox);
+        default -> JushuitanOrderMapper.build(m,original,catalog,input,soId,sandbox);
+      };
+      assertTrue(result.path("labels").isTextual());assertEquals("亿觅CRM推送",result.path("labels").asText());
+      assertEquals(7,result.path("labels").asText().length());
+      assertEquals(0,result.path("pay_amount").decimalValue().compareTo(original.path("total").decimalValue()));
+      assertEquals(0,result.path("pay").path("amount").decimalValue().compareTo(original.path("total").decimalValue()));
+      assertEquals(credit?"账期挂账（非实收）":"CRM已收款",result.path("pay").path("payment").asText());
+      assertEquals(credit?0:19.98,original.path("paid").asDouble());
+      assertEquals("客户真实名称",result.path("shop_buyer_id").asText());
+      assertEquals((sandbox?"【CRM沙箱测试，禁止实际发货】":"")+note,result.path("remark").asText());
+      assertEquals(soId,result.path("so_id").asText());
+      assertEquals(soId+"-1",result.path("items").get(0).path("outer_oi_id").asText());
+      assertEquals(soId+"-PAY",result.path("pay").path("outer_pay_id").asText());
+      assertEquals(soId,result.path("pay").path("buyer_account").asText());
+      assertEquals(10402930,result.path("shop_id").asLong());assertEquals(10048859,result.path("wms_co_id").asLong());
+      assertEquals(before,original);assertEquals(catalogBefore,catalog);assertEquals(inputBefore,input);
+    }
+  }
+
+  @Test void clientOrOrderLabelsCannotOverrideTheServerOwnedSourceMarker() throws Exception {
+    for (String forged : new String[]{"null", "1", "[]", "{}", "\"别的标签,伪造跳财审\""}) {
+      var original=order();var input=input();
+      original.set("labels",json(forged));input.set("labels",json(forged));
+      var before=original.deepCopy();var inputBefore=input.deepCopy();
+      assertEquals("亿觅CRM推送",JushuitanOrderMapper.build(m,original,products(),input,"N2611270001",true).path("labels").asText());
+      original.put("paid",0);
+      assertEquals("亿觅CRM推送",JushuitanOrderMapper.buildCredit(m,original,products(),input,"N2611270001",true).path("labels").asText());
+      original.put("status","审批中");original.putObject("approvalDraft").put("creditFulfillment",true);
+      assertEquals("亿觅CRM推送",JushuitanOrderMapper.buildSubmittedCredit(m,original,products(),input,"N2611270001",true).path("labels").asText());
+      assertEquals(before.path("labels"),original.path("labels"));assertEquals(inputBefore,input);
+    }
+  }
+
   @Test void buyerAccountUsesTheCustomerDisplayNameWhileOrderAndPaymentIdentitiesStaySeparate() throws Exception {
     var initial = order().put("customer", "爱品儿（授权定制）");
     var first = JushuitanOrderMapper.build(m,initial,products(),input(),"CRM-order-1",true);

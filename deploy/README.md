@@ -2,6 +2,18 @@
 
 生产服务器为 `8.135.51.39`，入口 https://crm.emie.cn:9002/，目录 `/opt/emiecrm`。使用 `compose.cloud.yaml` 模板和 CRM 专用 MySQL，数据库 `emiecrm_prod`、账号 `emiecrm_app`、容器 `emiecrm-prod` / `emiecrm-mysql-prod`、数据卷 `emiecrm-mysql-prod-data`，与其他项目隔离。详见 [迁移及运维记录](../docs/DEPLOYMENT-2026-10-23.md)。以下 1Panel 说明仅适用于保留的旧服务器。
 
+## CRM 与聚水潭订单编号统一（2026-11-26）
+
+新建订单首次推送时，有效的 `NyyMMdd流水` 业务编号直接用作聚水潭 `so_id`，商品行及付款引用继续从同一外部编号派生。上传前按原店铺和号码查询占用情况；已有同号订单或查询无法完整确认时，不上传、不自动关联现有 ERP 单据。结果不确定的请求仍只查询原号。
+
+已有推送任务、冻结请求及历史 `CRM-…` 编号保持原样，不能批量改号或重新生成身份。未采用 N 业务号的历史订单继续保留兼容规则。原订单变更中的撤销重建流程仍生成新的换单编号，避免复用已被旧 ERP 单据占用的号码。
+
+本功能必须同时发布 CRM 和 `deploy/jst-gateway`：先更新兼容新旧编号的网关，再更新 CRM。仅更新 CRM 会被旧网关的 `CRM-` 前缀检查拦截。更新网关须保留现有私密配置、完整持久目录、上传及改单去重记录、令牌文件和文件属主，不能用空目录替换；部署前分别备份这些数据及 CRM 数据库。可在新网关容器内直接验证编号校验函数，无需为发布验证创建真实 ERP 订单。
+
+当前生产通过共享网关的 `persistent_server.py` 处理订单，上传与查询恢复另有严格编号校验；只更新本仓库的普通 `server.py` 不能解除这层限制。使用 `deploy/cloud/jst_shared_order_identity.py` 在本地对已核实 SHA-256 的源码生成新文件，保留旧 CRM32 校验并增加严格 N 编号，仅替换上传与查询恢复两处调用。工具拒绝未知源码形态及覆盖原文件。上线先备份实际共享网关源码、独立持久数据目录及配置，再替换唯一包装脚本并重启该服务；保留独立主授权网关、动态凭据、账号归属与去重账本。根 Compose 当前通过 include 合并服务，应保持根文件及网关编排，仅更新实际 CRM 服务文件里的镜像。
+
+产生 N 外部编号的推送任务或发货记录后，旧 CRM 不具备处理这些记录的能力；不能直接回退到仅支持 `CRM-…` 的版本。应保留兼容版本前滚恢复，或在确认尚未产生任何 N 推送身份时仅恢复旧镜像。任何恢复均保留当前数据库和网关去重账本，不回灌旧快照来消除新记录。
+
 ## 聚水潭网关与云生产 CRM 同机部署
 
 在 `/opt/emiecrm` 将 `deploy/compose.cloud.jst.yaml` 保存为 `compose.jst.yaml`，与现用的 `compose.production.yaml` 一起使用。将 `deploy/jst-gateway` 的网关源码放在 `/opt/emiecrm/jst-gateway`，将 `deploy/cloud/render-jst-route.sh` 放在 `/opt/emiecrm`。网关沿用现有 Compose 服务定义，只监听宿主机 `127.0.0.1:18766`。CRM 容器将 `crm.emie.cn` 解析到自身 Docker 网桥的宿主机地址，通过现有证书访问 `https://crm.emie.cn:9002/_internal/jst`。

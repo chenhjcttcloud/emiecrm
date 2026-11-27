@@ -96,6 +96,23 @@ class JushuitanCreditPushPolicyTest {
     JushuitanCreditPushPolicy.enqueue(approval,order);assertFalse(approval.has("creditPush"));
   }
 
+  @Test void newShortBusinessNumberIsTheErpIdentityForBothSubmissionAndApprovalTasks() throws Exception {
+    String number = "N2611260001";
+    var order = order().put("id", number);
+    var approval = approval(order).put("orderId", number);
+    var submitted = JushuitanCreditPushPolicy.intentForSubmission(approval, order, products(), "sandbox");
+    assertEquals(number, submitted.path("soId").asText());
+    assertEquals(number, submitted.path("orderSnapshot").path("id").asText());
+    JushuitanCreditPushPolicy.enqueue(approval, order);
+    assertEquals(number, approval.path("creditPush").path("soId").asText());
+    var original = approval.path("creditPush").deepCopy();
+    ((ObjectNode) approval.path("creditPush")).put("soId", "CRM-" + "a".repeat(32));
+    var retained = approval.path("creditPush").deepCopy();
+    JushuitanCreditPushPolicy.enqueue(approval, order);
+    assertEquals(retained, approval.path("creditPush"));
+    assertEquals(original.path("orderSnapshot"), approval.path("creditPush").path("orderSnapshot"));
+  }
+
   @Test void missingShippingInformationBlocksTheIntentInsteadOfThrowingAwayApproval() throws Exception {
     var order=order(); ((ObjectNode)order.path("approvalDraft")).remove("shopId");
     var approval=approval(order);

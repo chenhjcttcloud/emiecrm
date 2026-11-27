@@ -117,6 +117,86 @@ class JushuitanServiceTest {
   assertThrows(ApiException.class,()->service.submit("o1",input(),admin));
   verify(client,times(1)).upload(any());
  }
+ String unifiedOrder() {
+  String number="N2611260001";
+  ((ObjectNode)db.state(true).path("orders").get(0)).put("id",number);
+  when(db.rows(anyString(),eq(number))).thenAnswer(call->call.getArgument(0,String.class).contains("FROM jst_shipments")
+      &&persisted!=null?List.of(Map.of("payload",persisted)):List.of());
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(m.createObjectNode().put("code",0)
+      .set("data",m.createObjectNode().put("has_next",false).set("orders",m.createArrayNode())));
+  return number;
+ }
+ @Test void freshManualShipmentUsesItsReservedBusinessNumberAndChecksForCollisionBeforeUpload() throws Exception {
+  String number=unifiedOrder();
+  when(client.upload(any())).thenAnswer(call->{
+   var record=m.readTree(persisted);var request=((JsonNode)call.getArgument(0)).get(0);
+   assertEquals(number,record.path("soId").asText());assertEquals(number,record.path("snapshot").path("id").asText());
+   assertEquals(number,request.path("so_id").asText());assertTrue(record.path("upstreamAttempted").asBoolean());
+   return m.createObjectNode().put("code",0).set("data",m.createObjectNode().set("datas",m.createArrayNode()
+       .add(m.createObjectNode().put("so_id",number).put("o_id",123).put("issuccess",true))));
+  });
+  var result=service.submit(number,input(),admin);
+  assertEquals("ACCEPTED",result.path("status").asText());assertEquals(number,result.path("soId").asText());
+  verify(client).query(eq("/open/orders/single/query"),argThat(value->value instanceof JsonNode parameters
+      &&parameters.path("shop_id").asLong()==1&&parameters.path("so_ids").get(0).asText().equals(number)));
+  verify(client,times(1)).upload(any());
+ }
+ @Test void manualBusinessNumberCollisionFailsClosedWithoutAdoptingTheForeignOrder() throws Exception {
+  String number=unifiedOrder();
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("""
+      {"code":0,"data":{"has_next":false,"orders":[{"so_id":"N2611260001","o_id":999,"shop_id":2}]}}
+      """));
+  var result=service.submit(number,input(),admin);
+  assertEquals("FAILED",result.path("status").asText());assertTrue(result.path("message").asText().contains("已存在"));
+  assertEquals(number,result.path("soId").asText());assertFalse(m.readTree(persisted).path("upstreamAttempted").asBoolean());
+  assertFalse(result.hasNonNull("oId"));verify(client,never()).upload(any());verify(client,never()).mutate(anyString(),anyString(),any());
+ }
+ @Test void unavailableBusinessNumberPreflightNeverUploadsAndRetainsTheFrozenIdentity() throws Exception {
+  String number=unifiedOrder();
+  when(client.query(eq("/open/orders/single/query"),any())).thenThrow(new ApiException(502,"核对暂不可用"));
+  var result=service.submit(number,input(),admin);
+  assertEquals("FAILED",result.path("status").asText());assertEquals(number,result.path("soId").asText());
+  assertEquals(number,m.readTree(persisted).path("request").path("so_id").asText());
+  assertFalse(m.readTree(persisted).path("upstreamAttempted").asBoolean());verify(client,never()).upload(any());
+ }
+ @Test void explicitlyRejectedBusinessNumberRetryChecksAgainAndCannotBypassANewCollision() throws Exception {
+  String number=unifiedOrder();
+  when(client.upload(any())).thenReturn(json("""
+      {"code":0,"data":{"datas":[{"so_id":"N2611260001","issuccess":false,"o_id":0,"msg":"拒绝"}]}}
+      """));
+  assertEquals("FAILED",service.submit(number,input(),admin).path("status").asText());
+  var frozen=m.readTree(persisted).path("request").deepCopy();
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("""
+      {"code":0,"data":{"has_next":false,"orders":[{"so_id":"N2611260001","o_id":999}]}}
+      """));
+  var retried=service.submit(number,input(),admin);
+  assertEquals("FAILED",retried.path("status").asText());assertTrue(retried.path("message").asText().contains("已存在"));
+  assertEquals(frozen,m.readTree(persisted).path("request"));assertEquals(number,retried.path("soId").asText());
+  verify(client,times(2)).query(eq("/open/orders/single/query"),any());verify(client,times(1)).upload(any());
+ }
+ @Test void unknownManualBusinessNumberNeverEnablesAnotherUploadOrRegeneratesIdentity() throws Exception {
+  String number=unifiedOrder();when(client.upload(any())).thenThrow(new ApiException(502,"结果待核对"));
+  assertEquals("UNKNOWN",service.submit(number,input(),admin).path("status").asText());
+  var frozen=m.readTree(persisted).path("request").deepCopy();clearInvocations(client);
+  assertThrows(ApiException.class,()->service.submit(number,input(),admin));
+  assertEquals(number,m.readTree(persisted).path("soId").asText());assertEquals(frozen,m.readTree(persisted).path("request"));
+  verify(client,never()).upload(any());verify(client,never()).query(anyString(),any());
+ }
+ @Test void frozenLegacyManualRequestKeepsItsOriginalCrmIdentityEvenWhenTheBusinessDisplayIsNew() throws Exception {
+  when(client.upload(any())).thenAnswer(call->{String so=((JsonNode)call.getArgument(0)).get(0).path("so_id").asText();
+   return m.createObjectNode().put("code",0).set("data",m.createObjectNode().set("datas",m.createArrayNode()
+       .add(m.createObjectNode().put("so_id",so).put("o_id",0).put("issuccess",false))));
+  });
+  service.submit("o1",input(),admin);
+  var legacy=(ObjectNode)m.readTree(persisted);((ObjectNode)legacy.path("request")).remove("labels");persisted=legacy.toString();
+  var frozen=m.readTree(persisted).path("request").deepCopy();assertFalse(frozen.has("labels"));
+  String original=m.readTree(persisted).path("soId").asText();assertTrue(original.matches("CRM-[a-f0-9]{32}"));
+  ((ObjectNode)db.state(true).path("orders").get(0)).put("orderNumber","N2611260001");clearInvocations(client);
+  service.submit("o1",input(),admin);
+  assertEquals(original,m.readTree(persisted).path("soId").asText());assertEquals(frozen,m.readTree(persisted).path("request"));
+  assertFalse(m.readTree(persisted).path("request").has("labels"));
+  verify(client,never()).query(eq("/open/orders/single/query"),any());verify(client,times(1)).upload(any());
+ }
  @Test void timeoutIsUnknownAndCannotBeBlindlyRetried()throws Exception{
   when(client.upload(any())).thenThrow(new ApiException(502,"连接超时"));
   var r=service.submit("o1",input(),admin);
@@ -373,6 +453,16 @@ class JushuitanServiceTest {
   assertEquals(10,captor.getValue().path("amount").asInt());assertEquals("订单变更",captor.getValue().path("type").asText());
   assertThrows(ApiException.class,()->service.continueAmendment("o1",settlement(10),finance));
   verify(client,times(2)).upload(any());verify(db,never()).state(any(JsonNode.class));
+ }
+ @Test void replacementOfAnOriginalBusinessNumberStillUsesANewCrmIdentity() throws Exception {
+  ((ObjectNode)db.state(true).path("orders").get(0)).put("orderNumber","N2611260001");
+  when(client.query(eq("/open/orders/single/query"),any())).thenReturn(json("{\"code\":0,\"data\":{\"orders\":[],\"has_next\":false}}"));
+  amendmentSetup();var result=service.amend("o1",amendmentInput(10),admin);
+  assertEquals("N2611260001",result.path("amendment").path("oldSoId").asText());
+  String replacement=result.path("amendment").path("newSoId").asText();assertTrue(replacement.matches("CRM-[a-f0-9]{32}"));
+  assertNotEquals(result.path("amendment").path("oldSoId").asText(),replacement);
+  assertEquals(replacement,result.path("amendment").path("request").path("so_id").asText());
+  assertEquals("N2611260001",m.readTree(persisted).path("snapshot").path("orderNumber").asText());
  }
  @Test void refundIsSignedLedgerEntryAndDoesNotRewriteOriginalReceipt() throws Exception {
   amendmentSetup();service.amend("o1",amendmentInput(5),admin);

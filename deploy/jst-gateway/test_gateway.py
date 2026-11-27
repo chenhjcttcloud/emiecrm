@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import closing, contextmanager
 import json
 import os
 import tempfile
@@ -28,6 +29,121 @@ class UploadTests(unittest.TestCase):
         self.env.stop()
         gateway.DATABASE = self.old
         self.tmp.cleanup()
+
+    @contextmanager
+    def order_endpoint(self):
+        import threading
+        import urllib.error
+        import urllib.request
+        from http.server import HTTPServer
+
+        with patch.dict(os.environ, {'GATEWAY_TOKEN': 'fixture-bearer', 'JST_ALLOW_ORDER_UPLOAD': '1'}), \
+                patch.object(gateway, 'configured', return_value=True):
+            server = HTTPServer(('127.0.0.1', 0), gateway.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def post(order, headers=None):
+                    request_headers = {'Authorization': 'Bearer fixture-bearer', 'X-CRM-JST-Environment': 'sandbox',
+                                       'Content-Type': 'application/json'}
+                    if headers:
+                        request_headers.update(headers)
+                    request = urllib.request.Request('http://127.0.0.1:' + str(server.server_port) + '/v1/orders',
+                                                     headers=request_headers, data=json.dumps([order]).encode())
+                    try:
+                        response = urllib.request.urlopen(request, timeout=3)
+                    except urllib.error.HTTPError as failure:
+                        response = failure
+                    with response:
+                        return response.status, json.load(response)
+                yield post
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def numbered_order(self, number='N2611260001', shop=1):
+        return {**self.order, 'shop_id': shop, 'so_id': number, 'shop_status': 'WAIT_SELLER_SEND_GOODS'}
+
+    def accepted_number(self, path, orders):
+        self.assertEqual('/open/jushuitan/orders/upload', path)
+        self.assertEqual(1, len(orders))
+        return {'code': 0, 'data': {'datas': [{'so_id': orders[0]['so_id'], 'issuccess': True, 'o_id': 123}]}}
+
+    def test_external_number_predicate_matches_java_short_numbers_and_preserves_legacy_prefix_contract(self):
+        for number in ['N2611260001', 'N26112610000', 'N0002290001', 'N9912319223372036854775807',
+                       'N261126' + '0' * 24 + '1', 'CRM-', 'CRM-unique', 'CRM-' + 'x' * 37]:
+            with self.subTest(number=number):
+                self.assertTrue(gateway.valid_external_order_number(number))
+        for number in [None, 2611260001, True, '', 'S2611260001', 'n2611260001', 'foreign-N2611260001',
+                       'N261126000', 'N2611260000', 'N261126-001', 'N2611260001.0', 'N2602290001',
+                       'N2613310001', 'N2611000001', 'N2611269223372036854775808', 'N261126' + '0' * 25 + '1',
+                       'N2611260001\n', 'N26112600\x0001', 'N２６１１２６0001', 'CRM-' + 'x' * 38]:
+            with self.subTest(number=number):
+                self.assertFalse(gateway.valid_external_order_number(number))
+
+    def test_valid_numbered_uploads_pass_the_http_route_without_changing_native_payload(self):
+        with patch.object(gateway, 'upstream', side_effect=self.accepted_number) as upstream, self.order_endpoint() as post:
+            for number in ['N2611260001', 'N26112610000', 'N0002290001', 'N9912319223372036854775807']:
+                order = self.numbered_order(number)
+                status, result = post(order)
+                self.assertEqual(200, status)
+                self.assertEqual(number, result['data']['datas'][0]['so_id'])
+                upstream.assert_called_with('/open/jushuitan/orders/upload', [order])
+            self.assertEqual(4, upstream.call_count)
+
+    def test_malformed_numbered_uploads_are_rejected_before_upstream_or_idempotency_insert(self):
+        with patch.object(gateway, 'upstream') as upstream, self.order_endpoint() as post:
+            for number in ['N2602290001', 'N2611260000', 'N2611269223372036854775808',
+                           'N261126' + '0' * 25 + '1', 'OTHER-2611260001', 'N2611260001\n', None]:
+                with self.subTest(number=number):
+                    self.assertEqual((400, {'error': 'invalid_request'}), post(self.numbered_order(number)))
+            upstream.assert_not_called()
+        import sqlite3
+        with closing(sqlite3.connect(gateway.DATABASE)) as db:
+            self.assertEqual(0, db.execute('SELECT COUNT(*) FROM uploads').fetchone()[0])
+
+    def test_native_order_labels_are_forwarded_and_cannot_change_an_existing_upload(self):
+        with patch.object(gateway, 'upstream', side_effect=self.accepted_number) as upstream, self.order_endpoint() as post:
+            for number, labels in [('N2611270001', '亿觅CRM推送'), ('N2611270002', None)]:
+                order = self.numbered_order(number)
+                if labels is not None:
+                    order['labels'] = labels
+                first = post(order)
+                self.assertEqual(200, first[0])
+                upstream.assert_called_with('/open/jushuitan/orders/upload', [order])
+                self.assertEqual(first, post(json.loads(json.dumps(order))))
+                self.assertEqual(409, post({**order, 'labels': '不同标签'})[0])
+            self.assertEqual(2, upstream.call_count)
+
+    def test_numbered_identity_replay_and_changed_payload_keep_existing_shop_scoped_idempotency(self):
+        with patch.object(gateway, 'upstream', side_effect=self.accepted_number) as upstream, self.order_endpoint() as post:
+            order = self.numbered_order()
+            first = post(order)
+            self.assertEqual(200, first[0])
+            self.assertEqual(first, post(json.loads(json.dumps(order))))
+            self.assertEqual(1, upstream.call_count)
+            changed = {**order, 'items': [{'sku_id': 'B', 'qty': 1}]}
+            self.assertEqual(409, post(changed)[0])
+            self.assertEqual(1, upstream.call_count)
+            self.assertEqual(200, post(self.numbered_order(shop=2))[0])
+            self.assertEqual(2, upstream.call_count)
+
+    def test_numbered_upload_keeps_environment_and_upload_authorization_gates(self):
+        with patch.object(gateway, 'upstream') as upstream, self.order_endpoint() as post:
+            self.assertEqual(401, post(self.numbered_order(), {'Authorization': 'Bearer wrong'})[0])
+            self.assertEqual(409, post(self.numbered_order(), {'X-CRM-JST-Environment': 'production'})[0])
+            self.assertEqual(403, post(self.numbered_order(), {'X-CRM-JST-Environment': ''})[0])
+            with patch.dict(os.environ, {'JST_ALLOW_ORDER_UPLOAD': '0'}):
+                self.assertEqual(403, post(self.numbered_order())[0])
+            upstream.assert_not_called()
+
+    def test_unknown_numbered_upload_is_not_repeated_while_gateway_outcome_is_uncertain(self):
+        with patch.object(gateway, 'upstream', side_effect=TimeoutError) as upstream, self.order_endpoint() as post:
+            order = self.numbered_order()
+            self.assertEqual(502, post(order)[0])
+            self.assertEqual(409, post(order)[0])
+            self.assertEqual(1, upstream.call_count)
 
     def test_replay_returns_cached_acceptance_without_second_upload(self):
         with patch.object(gateway, 'upstream', return_value=self.success) as upstream:
