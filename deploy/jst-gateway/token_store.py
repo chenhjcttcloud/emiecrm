@@ -1,6 +1,6 @@
 """Self-owned-app token rotation. Files contain secrets; never log their contents."""
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
@@ -12,6 +12,7 @@ import time
 
 LOCK = threading.RLock()
 DAY = 86400
+BEIJING = timezone(timedelta(hours=8))
 
 
 def timestamp(value):
@@ -148,13 +149,24 @@ def refresh_if_due(send):
         save(state)
 
 
+def next_daily_check(now):
+    current = datetime.fromtimestamp(now, BEIJING)
+    target = current.replace(hour=9, minute=0, second=0, microsecond=0)
+    if target <= current:
+        target += timedelta(days=1)
+    return target.timestamp()
+
+
 def worker(send, stop):
+    # Catch up once at startup, then check at 09:00 Beijing time every day.
     while not stop.is_set():
         try:
             refresh_if_due(send)
         except Exception:
             pass  # /ready exposes storage errors; never print exception bodies.
-        stop.wait(60)
+        now = time.time()
+        if stop.wait(next_daily_check(now) - now):
+            return
 
 
 def import_environment(replace=False):

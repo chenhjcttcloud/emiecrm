@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import tempfile
 import unittest
@@ -132,5 +133,75 @@ class TokenTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=3) as executor:
             list(executor.map(lambda _:tokens.refresh_if_due(send),range(3)))
         self.assertEqual(1,send.call_count)
+
+class DailyScheduleTests(unittest.TestCase):
+    def test_next_check_uses_beijing_nine_oclock_at_day_and_year_boundaries(self):
+        cases = [
+            ('2026-11-27T08:59:59.500000+08:00', '2026-11-27T09:00:00+08:00'),
+            ('2026-11-27T09:00:00+08:00', '2026-11-28T09:00:00+08:00'),
+            ('2026-11-27T09:00:01+08:00', '2026-11-28T09:00:00+08:00'),
+            ('2026-12-31T23:59:59+08:00', '2027-01-01T09:00:00+08:00'),
+            ('2026-11-27T00:59:59+00:00', '2026-11-27T09:00:00+08:00'),
+        ]
+        for current, expected in cases:
+            with self.subTest(current=current):
+                self.assertEqual(datetime.fromisoformat(expected).timestamp(),
+                                 tokens.next_daily_check(datetime.fromisoformat(current).timestamp()))
+
+    def run_worker(self, start, failure=None, waits_until_stop=2):
+        now = [datetime.fromisoformat(start).timestamp()]
+        checks, waits = [], []
+
+        class Stop:
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                waits.append(seconds)
+                if len(waits) == waits_until_stop:
+                    return True
+                now[0] += seconds
+                return False
+
+        def check(send):
+            checks.append(now[0])
+            if failure:
+                raise failure
+
+        with patch.object(tokens.time, 'time', side_effect=lambda: now[0]), \
+                patch.object(tokens, 'refresh_if_due', side_effect=check):
+            tokens.worker(object(), Stop())
+        return checks, waits
+
+    def test_worker_checks_at_startup_and_then_daily_without_real_sleep(self):
+        for start, first_wait in [
+            ('2026-11-27T08:30:00+08:00', 1800),
+            ('2026-11-27T09:00:00+08:00', tokens.DAY),
+            ('2026-11-27T10:00:00+08:00', 23 * 3600),
+        ]:
+            with self.subTest(start=start):
+                checks, waits = self.run_worker(start)
+                initial = datetime.fromisoformat(start).timestamp()
+                self.assertEqual([initial, initial + first_wait], checks)
+                self.assertEqual([first_wait, tokens.DAY], waits)
+
+    def test_stop_interrupts_wait_and_preexisting_stop_skips_startup(self):
+        from unittest.mock import Mock
+        checks, waits = self.run_worker('2026-11-27T10:00:00+08:00', waits_until_stop=1)
+        self.assertEqual(1, len(checks))
+        self.assertEqual([23 * 3600], waits)
+        stop = Mock()
+        stop.is_set.return_value = True
+        with patch.object(tokens, 'refresh_if_due') as check:
+            tokens.worker(object(), stop)
+        check.assert_not_called()
+        stop.wait.assert_not_called()
+
+    def test_check_failure_waits_for_next_daily_schedule_without_busy_retry(self):
+        checks, waits = self.run_worker('2026-11-27T10:00:00+08:00', failure=OSError('disk full'))
+        self.assertEqual(2, len(checks))
+        self.assertEqual([23 * 3600, tokens.DAY], waits)
+        self.assertEqual(23 * 3600, checks[1] - checks[0])
+
 
 if __name__=='__main__':unittest.main()
